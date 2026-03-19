@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Files{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Privacy-Conscious File Handling</h2>
+  </div>
+
+  <section class="grid">
+    <div class="card">
+      <div class="label">File Access Monitor</div>
+      <div id="fileAccessBox" class="help">Monitoring file access...</div>
+    </div>
+    <div class="card">
+      <div class="label">Data Classification</div>
+      <p>Public Files: <span id="publicFiles">--</span></p>
+      <p>Private Files: <span id="privateFiles">--</span></p>
+      <p>Sensitive Files: <span id="sensitiveFiles">--</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Encryption Status</div>
+      <p>Encrypted Files: <span class="good">--</span></p>
+      <p>Pending Encryption: <span class="warn">--</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Access Controls</div>
+      <button class="btn" id="scanFilesBtn">Scan for Sensitive Data</button>
+      <button class="btn" id="encryptBtn">Encrypt Files</button>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:20px;">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">Recent File Access</div>
+      <table class="table" id="fileTable">
+        <thead><tr><th>Time</th><th>User</th><th>File</th><th>Action</th><th>Classification</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const $ = (id) => document.getElementById(id);
+
+  // Mock file data
+  function loadFileData(){
+    $('publicFiles').textContent = '45';
+    $('privateFiles').textContent = '123';
+    $('sensitiveFiles').textContent = '12';
+
+    const tb = $('fileTable').querySelector('tbody');
+    tb.innerHTML = `
+      <tr><td>14:45</td><td>user1</td><td>/home/user1/docs/private.txt</td><td>Read</td><td>Private</td></tr>
+      <tr><td>14:42</td><td>admin</td><td>/var/log/system.log</td><td>Access</td><td>System</td></tr>
+    `;
+  }
+
+  loadFileData();
+  setInterval(loadFileData, 15000);
+});
+</script>
+{% endblock %}

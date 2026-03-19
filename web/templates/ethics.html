@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Ethics{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Ethics & Privacy Dashboard</h2>
+  </div>
+
+  <section class="grid">
+    <div class="card">
+      <div class="label">Privacy Compliance</div>
+      <p>Data Collection: <span class="good">Minimal</span></p>
+      <p>Consent Status: <span class="good">Obtained</span></p>
+      <p>Retention Policy: <span class="good">Enforced</span></p>
+    </div>
+    <div class="card">
+      <div class="label">AI Ethics</div>
+      <p>Bias Detection: <span class="good">Active</span></p>
+      <p>Transparency: <span class="good">High</span></p>
+      <p>Accountability: <span class="good">Enabled</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Data Protection</div>
+      <p>Encryption: <span class="good">AES-256</span></p>
+      <p>Access Controls: <span class="good">RBAC</span></p>
+      <p>Audit Trail: <span class="good">Complete</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Ethical Alerts</div>
+      <div id="ethicalAlerts" class="help">No ethical violations detected</div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:20px;">
+    <div class="card" style="grid-column: span 2;">
+      <div class="label">Privacy Impact Assessment</div>
+      <p>Current Assessment: <span class="good">Low Risk</span></p>
+      <p>Last Review: 2026-03-15</p>
+      <p>Next Review: 2026-06-15</p>
+    </div>
+    <div class="card">
+      <div class="label">User Rights</div>
+      <button class="btn" id="dataRequestBtn">Data Access Request</button>
+      <button class="btn" id="dataDeleteBtn">Data Deletion</button>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // Ethics specific logic
+  fetch('/api/ai_alerts').then(r=>r.json()).then(data => {
+    document.getElementById('ethicalAlerts').textContent = data.alerts || 'No alerts';
+  });
+});
+</script>
+{% endblock %}

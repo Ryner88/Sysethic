@@ -5,6 +5,8 @@ from datetime import datetime
 
 import psutil
 from flask import Flask, jsonify, render_template
+import pandas as pd
+import os
 
 try:
     import GPUtil  # optional
@@ -13,6 +15,10 @@ except Exception:
 
 # --- Flask app ---
 app = Flask(__name__, static_folder='static', template_folder='templates')
+
+# Paths
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LOG_PATH = os.path.join(BASE_DIR, "logs", "system_log.csv")
 
 # --- Ring buffers ---
 MAX_SAMPLES = 240          # ~4 minutes @ 1s
@@ -149,8 +155,32 @@ def _read_gpus():
 
 # --- Routes ---
 @app.route('/')
-def home():
+def dashboard():
     return render_template('dashboard.html')
+
+@app.route('/processes')
+def processes():
+    return render_template('processes.html')
+
+@app.route('/analytics')
+def analytics():
+    return render_template('analytics.html')
+
+@app.route('/security')
+def security():
+    return render_template('security.html')
+
+@app.route('/audit-logs')
+def audit_logs():
+    return render_template('audit_logs.html')
+
+@app.route('/ethics')
+def ethics():
+    return render_template('ethics.html')
+
+@app.route('/files')
+def files():
+    return render_template('files.html')
 
 @app.route('/api/usage')
 def api_usage():
@@ -168,6 +198,20 @@ def api_net():
 def api_procs_top():
     return jsonify(_top_procs(n=5))
 
+@app.route('/api/procs')
+def api_procs():
+    from flask import request
+    limit = int(request.args.get('limit', 12))
+    data = _top_procs(n=limit)
+    # Format for JS
+    rows = []
+    for cpu_proc in data['cpu_top']:
+        rows.append({**cpu_proc, 'type': 'cpu'})
+    for mem_proc in data['mem_top']:
+        if mem_proc not in rows:  # avoid duplicates
+            rows.append({**mem_proc, 'type': 'mem'})
+    return jsonify(rows=rows[:limit], updated=data['ts'])
+
 @app.route('/api/temps')
 def api_temps():
     return jsonify({'temps': _read_temps()})
@@ -175,6 +219,76 @@ def api_temps():
 @app.route('/api/gpu')
 def api_gpu():
     return jsonify(_read_gpus())
+
+@app.route('/api/anomalies')
+def api_anomalies():
+    if not os.path.exists(LOG_PATH):
+        return jsonify(anomalies=[])
+    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
+    if df.empty:
+        return jsonify(anomalies=[])
+    anomalies = []
+    for col in ['cpu_percent', 'memory_percent']:
+        thresh = df[col].mean() + 2 * df[col].std()
+        high = df[df[col] > thresh]
+        for _, row in high.iterrows():
+            anomalies.append({
+                'timestamp': row['timestamp'],
+                'metric': col,
+                'value': row[col],
+                'threshold': thresh
+            })
+    # Remove duplicates if same timestamp
+    seen = set()
+    unique = []
+    for a in sorted(anomalies, key=lambda x: x['timestamp'], reverse=True):
+        key = (a['timestamp'], a['metric'])
+        if key not in seen:
+            seen.add(key)
+            unique.append(a)
+    return jsonify(anomalies=unique[:10])  # last 10
+
+@app.route('/api/logs')
+def api_logs():
+    if not os.path.exists(LOG_PATH):
+        return jsonify(logs=[])
+    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
+    logs = df.tail(20).to_dict(orient='records')
+    return jsonify(logs=logs)
+
+@app.route('/api/audit_summary')
+def api_audit_summary():
+    # Placeholder for audit summary
+    return jsonify(summary="5 critical events in last hour, 23 warnings")
+
+@app.route('/api/ai_alerts')
+def api_ai_alerts():
+    # Placeholder for AI alerts
+    return jsonify(alerts="Model drift detected, retraining recommended")
+
+@app.route('/api/security/alerts')
+def api_security_alerts():
+    # Mock security alerts
+    return jsonify(alerts=[
+        {'time': '14:32', 'event': 'Unauthorized access', 'severity': 'High', 'source': '192.168.1.100'},
+        {'time': '14:28', 'event': 'Firewall triggered', 'severity': 'Medium', 'source': 'eth0'}
+    ])
+
+@app.route('/api/files/access')
+def api_files_access():
+    # Mock file access
+    return jsonify(access=[
+        {'time': '14:45', 'user': 'user1', 'file': '/home/user1/docs/private.txt', 'action': 'Read', 'classification': 'Private'}
+    ])
+
+@app.route('/api/audit/stats')
+def api_audit_stats():
+    if not os.path.exists(LOG_PATH):
+        return jsonify(stats={'total': 0, 'today': 0})
+    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
+    total = len(df)
+    today = len(df[df['timestamp'].dt.date == pd.Timestamp.now().date()])
+    return jsonify(stats={'total': total, 'today': today})
 
 @app.route('/health')
 def health():

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}SAAOE • Secure Environment{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='saaoe.css') }}">
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="sidebar-header">
+        <h1>SAAOE</h1>
+        <p>Secure Environment</p>
+      </div>
+      <ul class="nav-list">
+        <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">📊 Dashboard</a></li>
+        <li><a href="{{ url_for('processes') }}" class="{% if request.endpoint == 'processes' %}active{% endif %}">🔒 Processes</a></li>
+        <li><a href="{{ url_for('analytics') }}" class="{% if request.endpoint == 'analytics' %}active{% endif %}">📈 Analytics</a></li>
+        <li><a href="{{ url_for('security') }}" class="{% if request.endpoint == 'security' %}active{% endif %}">🛡️ Security</a></li>
+        <li><a href="{{ url_for('audit_logs') }}" class="{% if request.endpoint == 'audit_logs' %}active{% endif %}">📋 Audit Logs</a></li>
+        <li><a href="{{ url_for('ethics') }}" class="{% if request.endpoint == 'ethics' %}active{% endif %}">⚖️ Ethics</a></li>
+        <li><a href="{{ url_for('files') }}" class="{% if request.endpoint == 'files' %}active{% endif %}">📁 Files</a></li>
+      </ul>
+      <div class="sidebar-footer">
+        <div class="status">
+          <span class="dot" id="connDot"></span>
+          <span>System Status</span>
+        </div>
+      </div>
+    </nav>
+    <main class="main-content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+  // Global status update
+  function updateStatus(connected) {
+    const dot = document.getElementById('connDot');
+    dot.style.background = connected ? 'var(--good)' : 'var(--bad)';
+  }
+  // Initial status
+  updateStatus(true);
+  </script>
+</body>
+</html>

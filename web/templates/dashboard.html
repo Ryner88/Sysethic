@@ -1,52 +1,44 @@
-<!DOCTYPE html>
-<html lang="en" data-theme="dark">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SAAOE • Live System Dashboard</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='saaoe.css') }}">
-</head>
-<body>
-  <div class="wrap">
-    <header>
-      <div class="title">
-        SAAOE • Live System Dashboard
-        <span id="modeBadge" class="badge">MODE: LIVE</span>
-      </div>
-      <div class="controls" role="toolbar" aria-label="Dashboard controls">
-        <label class="label">Refresh
-          <select id="refreshMs" aria-label="Refresh interval">
-            <option value="1000">1s</option>
-            <option value="5000">5s</option>
-            <option value="10000">10s</option>
-            <option value="60000" selected>1m</option>
-          </select>
-        </label>
-        <label class="label">Chart height
-          <select id="chartSize" aria-label="Chart height">
-            <option value="64">Large (64px)</option>
-            <option value="80" selected>XL (80px)</option>
-            <option value="120">XXL (120px)</option>
-            <option value="160">Ultra (160px)</option>
-          </select>
-        </label>
-        <label class="label"><input id="autoScale" type="checkbox" checked /> Auto-scale</label>
-        <label class="label">Density
-          <select id="density" aria-label="Density">
-            <option value="ultra">Ultra</option>
-            <option value="compact">Compact</option>
-            <option value="normal" selected>Normal</option>
-          </select>
-        </label>
-        <button id="zoomAllBtn" class="btn" aria-label="Zoom all charts">Zoom All</button>
-        <button id="pauseBtn" class="btn" aria-label="Pause updates">Pause</button>
-        <button id="exportBtn" class="btn" aria-label="Export CSV">Export CSV</button>
-        <button id="themeToggle" class="btn" aria-label="Toggle theme">Toggle Theme</button>
-        <button id="toggleMode" class="btn" aria-label="Toggle mock/live">Use MOCK</button>
-        <span class="label">Status <span id="connDot" class="dot"></span></span>
-        <span id="lastUpdated" class="label">—</span>
-      </div>
-    </header>
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Dashboard{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Dashboard Overview</h2>
+    <div class="controls" role="toolbar" aria-label="Dashboard controls">
+      <label class="label">Refresh
+        <select id="refreshMs" aria-label="Refresh interval">
+          <option value="1000">1s</option>
+          <option value="5000">5s</option>
+          <option value="10000">10s</option>
+          <option value="60000" selected>1m</option>
+        </select>
+      </label>
+      <label class="label">Chart height
+        <select id="chartSize" aria-label="Chart height">
+          <option value="64">Large (64px)</option>
+          <option value="80" selected>XL (80px)</option>
+          <option value="120">XXL (120px)</option>
+          <option value="160">Ultra (160px)</option>
+        </select>
+      </label>
+      <label class="label"><input id="autoScale" type="checkbox" checked /> Auto-scale</label>
+      <label class="label">Density
+        <select id="density" aria-label="Density">
+          <option value="ultra">Ultra</option>
+          <option value="compact">Compact</option>
+          <option value="normal" selected>Normal</option>
+        </select>
+      </label>
+      <button id="zoomAllBtn" class="btn" aria-label="Zoom all charts">Zoom All</button>
+      <button id="pauseBtn" class="btn" aria-label="Pause updates">Pause</button>
+      <button id="exportBtn" class="btn" aria-label="Export CSV">Export CSV</button>
+      <button id="themeToggle" class="btn" aria-label="Toggle theme">Toggle Theme</button>
+      <button id="toggleMode" class="btn" aria-label="Toggle mock/live">Use MOCK</button>
+      <span id="lastUpdated" class="label">—</span>
+    </div>
+  </div>
 
     <!-- Top stats + charts -->
     <section class="grid">
@@ -92,6 +84,37 @@
       <div class="card">
         <div class="label">GPU</div>
         <div id="gpuBox" class="help">—</div>
+      </div>
+    </section>
+
+    <!-- Ethics Dashboard -->
+    <section class="grid" style="margin-top:10px;">
+      <div class="card">
+        <div class="label">Anomaly Detection</div>
+        <div id="anomaliesBox" class="help">Loading anomalies...</div>
+      </div>
+      <div class="card">
+        <div class="label">Audit Summary</div>
+        <div id="auditBox" class="help">Loading audit summary...</div>
+      </div>
+      <div class="card">
+        <div class="label">AI Alerts</div>
+        <div id="aiAlertsBox" class="help">Loading AI alerts...</div>
+      </div>
+      <div class="card">
+        <div class="label">System Health</div>
+        <div id="healthBox" class="help">Loading system health...</div>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section class="grid" style="margin-top:10px;">
+      <div class="card" style="grid-column: span 4;">
+        <div class="label">Recent Logs</div>
+        <table class="table" id="logsTable">
+          <thead><tr><th>Timestamp</th><th>CPU%</th><th>Memory%</th><th>Processes</th><th>Disk Read</th><th>Disk Write</th><th>Net Sent</th><th>Net Recv</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
@@ -318,6 +341,11 @@
         fetch('/api/procs?limit=12').then(r=>r.json()).then(drawProcs).catch(()=>{});
         fetch('/api/temps').then(r=>r.json()).then(drawTemps).catch(()=>{});
         fetch('/api/gpu').then(r=>r.json()).then(drawGpu).catch(()=>{});
+        fetch('/api/anomalies').then(r=>r.json()).then(drawAnomalies).catch(()=>{});
+        fetch('/api/audit_summary').then(r=>r.json()).then(drawAudit).catch(()=>{});
+        fetch('/api/ai_alerts').then(r=>r.json()).then(drawAiAlerts).catch(()=>{});
+        fetch('/api/system_health').then(r=>r.json()).then(drawHealth).catch(()=>{});
+        fetch('/api/logs').then(r=>r.json()).then(drawLogs).catch(()=>{});
         return true;
       }catch{ $('connDot').style.background='var(--warn)'; return false; }
       finally{ clearTimeout(to); }
@@ -343,6 +371,32 @@
     function drawGpu(data){
       const box=$('gpuBox'), g=data.gpus||[]; if(!g.length){ box.textContent='No GPU detected (or GPUtil not installed)'; return; }
       box.innerHTML = g.map(x=>`<div style="margin-bottom:6px;"><strong>${x.name}</strong> — ${fmt(x.load,1)}% • ${x.temperature??'--'}°C<br>VRAM: ${fmt(x.mem_used,0)} / ${fmt(x.mem_total,0)} MB (free ${fmt(x.mem_free,0)} MB)</div>`).join('');
+    }
+
+    function drawAnomalies(data){
+      const box=$('anomaliesBox'), a=data.anomalies||[]; if(!a.length){ box.textContent='No anomalies detected'; return; }
+      box.innerHTML = a.map(x=>`<div style="margin-bottom:4px;">${new Date(x.timestamp).toLocaleString()}: ${x.metric} ${fmt(x.value,1)}% (thresh ${fmt(x.threshold,1)}%)</div>`).join('');
+    }
+
+    function drawAudit(data){
+      $('auditBox').textContent = data.summary || 'No audit data';
+    }
+
+    function drawAiAlerts(data){
+      $('aiAlertsBox').textContent = data.alerts || 'No AI alerts';
+    }
+
+    function drawHealth(data){
+      $('healthBox').textContent = data.health || 'Unknown';
+    }
+
+    function drawLogs(data){
+      const tb = $('logsTable').querySelector('tbody'); tb.innerHTML='';
+      (data.logs||[]).forEach(r=>{
+        const tr=document.createElement('tr');
+        tr.innerHTML = `<td>${new Date(r.timestamp).toLocaleString()}</td><td class="num">${fmt(r.cpu_percent,1)}</td><td class="num">${fmt(r.memory_percent,1)}</td><td class="num">${r.num_processes}</td><td class="num">${fmt(r.disk_read_bytes/1024/1024,2)} MB</td><td class="num">${fmt(r.disk_write_bytes/1024/1024,2)} MB</td><td class="num">${fmt(r.net_bytes_sent/1024/1024,2)} MB</td><td class="num">${fmt(r.net_bytes_recv/1024/1024,2)} MB</td>`;
+        tb.appendChild(tr);
+      });
     }
 
     function startPolling(ms){ if(timer) clearInterval(timer); if(paused) return; tick(); timer=setInterval(tick,ms); }
@@ -418,5 +472,4 @@
     window.addEventListener('keydown',e=>{ if(e.key==='Escape' && overlay.hasAttribute('open')) closeZoom(); });
   });
   </script>
-</body>
-</html>
+{% endblock %}

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Processes{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Process Isolation Monitor</h2>
+  </div>
+
+  <section class="grid">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">Top Processes (CPU% / RAM MB)</div>
+      <table class="table" id="procTable">
+        <thead><tr><th>PID</th><th>Name</th><th>User</th><th class="num">CPU%</th><th class="num">RAM (MB)</th><th>Status</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="help">Updated: <span id="procUpdated">—</span></div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:20px;">
+    <div class="card">
+      <div class="label">Isolation Controls</div>
+      <button class="btn" id="isolateBtn">Isolate Process</button>
+      <button class="btn" id="releaseBtn">Release Isolation</button>
+      <div id="isolationStatus" class="help">No processes isolated</div>
+    </div>
+    <div class="card">
+      <div class="label">Resource Limits</div>
+      <p>CPU Quota: <span id="cpuQuota">--</span>%</p>
+      <p>Memory Limit: <span id="memLimit">--</span> MB</p>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // Similar to dashboard, but focused on processes
+  const $ = (id) => document.getElementById(id);
+
+  function drawProcs(data){
+    $('procUpdated').textContent = data.updated || '—';
+    const tb = $('procTable').querySelector('tbody'); tb.innerHTML='';
+    (data.rows||[]).forEach(r=>{
+      const tr=document.createElement('tr');
+      tr.innerHTML = `<td>${r.pid}</td><td>${r.name}</td><td>${r.user||'—'}</td>
+                      <td class="num">${(r.cpu||0).toFixed(1)}</td><td class="num">${(r.mem_mb||0).toFixed(1)}</td>
+                      <td><span class="badge">${r.isolated ? 'Isolated' : 'Normal'}</span></td>`;
+      tb.appendChild(tr);
+    });
+  }
+
+  // Poll for processes
+  setInterval(() => {
+    fetch('/api/procs?limit=20').then(r=>r.json()).then(drawProcs).catch(()=>{});
+  }, 5000);
+
+  // Initial load
+  fetch('/api/procs?limit=20').then(r=>r.json()).then(drawProcs);
+});
+</script>
+{% endblock %}

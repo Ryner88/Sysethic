@@ -1,6 +1,10 @@
 :root{
-  --bg:#0b0f14; --card:#121821; --text:#e8eef5; --muted:#9fb0c3; --accent:#3b82f6;
-  --good:#22c55e; --bad:#ef4444; --warn:#f59e0b; --border:#1f2937;
+  --bg:#0a0a0a; --card:#1a1a1a; --text:#e0f0e0; --muted:#80a080; --accent:#00ffff;
+  --good:#00ff00; --bad:#ff4444; --warn:#ffff00; --border:#333333;
+
+  /* terminal-inspired */
+  --font-mono: 'Courier New', monospace;
+  --font-main: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 
   /* bigger by default */
   --chart-h:80px;
@@ -10,12 +14,32 @@
   --label-font:11px;
 }
 [data-theme="light"]{
-  --bg:#f7fafc; --card:#ffffff; --text:#0b0f14; --muted:#495769; --accent:#2563eb;
-  --good:#16a34a; --bad:#dc2626; --warn:#d97706; --border:#e5e7eb;
+  --bg:#f0f0f0; --card:#ffffff; --text:#0a0a0a; --muted:#666666; --accent:#0080ff;
+  --good:#008000; --bad:#ff0000; --warn:#ff8000; --border:#cccccc;
 }
 
-html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+html,body{height:100%; margin:0; font-family: var(--font-main);}
+body{background:var(--bg);color:var(--text);}
+
+.app{display:flex; height:100vh;}
+.sidebar{width:250px; background:var(--card); border-right:1px solid var(--border); display:flex; flex-direction:column;}
+.sidebar-header{text-align:center; padding:20px; border-bottom:1px solid var(--border);}
+.sidebar-header h1{margin:0; color:var(--accent); font-family: var(--font-mono);}
+.sidebar-header p{margin:5px 0; color:var(--muted); font-size:12px;}
+.nav-list{list-style:none; padding:0; margin:0;}
+.nav-list li{margin:0;}
+.nav-list a{display:block; padding:15px 20px; color:var(--text); text-decoration:none; border-bottom:1px solid var(--border);}
+.nav-list a:hover{background:var(--bg);}
+.nav-list a.active{background:var(--accent); color:var(--bg);}
+.sidebar-footer{padding:20px; border-top:1px solid var(--border);}
+.status{display:flex; align-items:center; gap:10px; font-size:12px;}
+.dot{width:10px; height:10px; border-radius:50%; background:#888;}
+
+.main-content{flex:1; overflow-y:auto; padding:20px;}
+
+.page-header{display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:20px;}
+.page-header h2{margin:0; color:var(--accent);}
+
 .wrap{max-width:1200px;margin:0 auto;padding:16px 16px 40px}
 header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
 .title{font-weight:700}

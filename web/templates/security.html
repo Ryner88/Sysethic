@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Security{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Security Alerts & Access Control</h2>
+  </div>
+
+  <section class="grid">
+    <div class="card">
+      <div class="label">Active Alerts</div>
+      <div id="alertsBox" class="help">Loading alerts...</div>
+    </div>
+    <div class="card">
+      <div class="label">Access Control</div>
+      <button class="btn" id="lockdownBtn">Initiate Lockdown</button>
+      <button class="btn" id="unlockBtn">Release Lockdown</button>
+      <div id="lockdownStatus" class="help">System unlocked</div>
+    </div>
+    <div class="card">
+      <div class="label">Intrusion Detection</div>
+      <p>Failed Logins: <span id="failedLogins">--</span></p>
+      <p>Suspicious Activity: <span id="suspicious">--</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Firewall Status</div>
+      <p>Rules Active: <span id="firewallRules">--</span></p>
+      <p>Blocked Connections: <span id="blockedConns">--</span></p>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:20px;">
+    <div class="card" style="grid-column: span 2;">
+      <div class="label">Security Events</div>
+      <table class="table" id="securityTable">
+        <thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>Source</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="label">User Sessions</div>
+      <div id="sessionsBox" class="help">Loading sessions...</div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const $ = (id) => document.getElementById(id);
+
+  // Mock data for now
+  function loadSecurityData(){
+    $('alertsBox').textContent = '2 critical alerts, 5 warnings';
+    $('failedLogins').textContent = '3';
+    $('suspicious').textContent = 'Low';
+    $('firewallRules').textContent = '127';
+    $('blockedConns').textContent = '15';
+
+    const tb = $('securityTable').querySelector('tbody');
+    tb.innerHTML = `
+      <tr><td>14:32</td><td>Unauthorized access attempt</td><td>High</td><td>192.168.1.100</td></tr>
+      <tr><td>14:28</td><td>Firewall rule triggered</td><td>Medium</td><td>eth0</td></tr>
+    `;
+  }
+
+  loadSecurityData();
+  setInterval(loadSecurityData, 30000); // Update every 30s
+});
+</script>
+{% endblock %}

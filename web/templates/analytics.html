@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Analytics{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Real-Time Analytics</h2>
+    <div class="controls">
+      <label class="label">Refresh
+        <select id="refreshMs">
+          <option value="1000">1s</option>
+          <option value="5000">5s</option>
+          <option value="10000" selected>10s</option>
+        </select>
+      </label>
+      <button id="pauseBtn" class="btn">Pause</button>
+    </div>
+  </div>
+
+  <!-- Top stats + charts -->
+  <section class="grid">
+    <div class="card">
+      <div class="label">CPU Usage (latest)</div>
+      <div class="big" id="cpuNow">--</div>
+      <div class="chart"><canvas id="cpuChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="label">Memory Usage (latest)</div>
+      <div class="big" id="memNow">--</div>
+      <div class="chart"><canvas id="memChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="label">Disk Read / Write (latest)</div>
+      <div class="big" id="diskRW">-- / --</div>
+      <div class="chart"><canvas id="diskChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="label">Net RX / TX (latest)</div>
+      <div class="big" id="netNow">-- / --</div>
+      <div class="chart"><canvas id="netChart"></canvas></div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:20px;">
+    <div class="card">
+      <div class="label">Performance Metrics</div>
+      <p>Load Average: <span id="loadAvg">--</span></p>
+      <p>Active Processes: <span id="activeProcs">--</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Network Stats</div>
+      <p>Connections: <span id="netConns">--</span></p>
+      <p>Packets: <span id="packets">--</span></p>
+    </div>
+    <div class="card">
+      <div class="label">Storage</div>
+      <p>Free Space: <span id="freeSpace">--</span> GB</p>
+      <p>I/O Operations: <span id="ioOps">--</span></p>
+    </div>
+    <div class="card">
+      <div class="label">System Uptime</div>
+      <p><span id="uptime">--</span></p>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Simplified version of dashboard charts
+// Include chart logic here
+</script>
+{% endblock %}
