@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Anomalies{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Anomaly Management Center</h2>
+    <div class="controls">
+      <button id="refreshBtn" class="btn">Refresh</button>
+      <button id="exportCsvBtn" class="btn">Export CSV</button>
+      <button id="exportPdfBtn" class="btn">Export PDF</button>
+      <button id="openConfigBtn" class="btn">Config Rules</button>
+    </div>
+  </div>
+
+  <section class="grid" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:12px;">
+    <div class="card"><div class="label">Open Anomalies</div><div class="big" id="openAnomalies">--</div></div>
+    <div class="card"><div class="label">Critical Alerts</div><div class="big" id="criticalAlerts">--</div></div>
+    <div class="card"><div class="label">High Alerts</div><div class="big" id="highAlerts">--</div></div>
+    <div class="card"><div class="label">Active Rules</div><div class="big" id="activeRules">--</div></div>
+  </section>
+
+  <section class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr));grid-gap:14px;">
+    <div class="card" style="height:320px;"> 
+      <div class="label">Anomaly Timeline (last 24h)</div>
+      <div class="chart"><canvas id="timelineChart"></canvas></div>
+    </div>
+
+    <div class="card" style="height:320px; padding:14px; overflow:auto;"> 
+      <div class="label">Filter by Time Window</div>
+      <input type="datetime-local" id="filterStart" class="btn" style="width:48%;margin:2px;" />
+      <input type="datetime-local" id="filterEnd" class="btn" style="width:48%;margin:2px;" />
+      <button id="applyFilterBtn" class="btn" style="width:100%; margin-top:10px;">Apply Filter</button>
+      <div class="label" style="margin-top:12px;">Severity</div>
+      <select id="filterSeverity" class="btn" style="width:100%; margin-top:6px;"><option value="all">All</option><option value="critical">Critical</option><option value="high">High</option></select>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:14px;" id="anomalySummarySection">
+    <div class="card" style="grid-column:1 / -1;">
+      <div class="label">Recent Anomaly Summary</div>
+      <table class="table" id="anomalyTable"><thead><tr><th>Time</th><th>Metric</th><th>Value</th><th>Severity</th><th>Confidence</th><th>Rule</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:14px;">
+    <div class="card" style="grid-column:1 / -1;">
+      <div class="label">Recent Activity Feed</div>
+      <div id="activityFeed" style="max-height:220px;overflow:auto;"></div>
+    </div>
+  </section>
+
+  <div id="configPanel" class="overlay" style="display:none;">
+      <div class="modal">
+        <div class="head"><span class="label">Threshold Rules Config</span><button id="closeConfig" class="btn">Close</button></div>
+        <div style="margin-top:10px">
+          <div><strong>Create new rule</strong></div>
+          <label>Metric<select id="newMetric" class="btn"><option value="cpu_percent">CPU %</option><option value="memory_percent">Memory %</option></select></label>
+          <label>Operator<select id="newOp" class="btn"><option value=">">&gt;</option><option value=">=">&gt;=</option><option value="<">&lt;</option><option value="<=">&lt;=</option></select></label>
+          <label>Threshold<input id="newThreshold" type="number" class="btn" value="90"/></label>
+          <label>Severity<select id="newSeverity" class="btn"><option value="high">High</option><option value="critical">Critical</option></select></label>
+          <label style="display:block;margin-top:8px;"><input type="checkbox" id="newInApp" checked/> In-App alert</label>
+          <label><input type="checkbox" id="newEmail"/> Email alert</label>
+          <button id="addRuleBtn" class="btn">Add Rule</button>
+        </div>
+        <div style="margin-top:20px;"><strong>Existing rules</strong><div id="rulesList" style="max-height:200px;overflow:auto;"></div></div>
+      </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const OUTER_THEME = {
+  colors: { 0: '#23d2bc', 1: '#00c3ff', 2: '#ffea00', 3: '#ff0044' }
+};
+
+const state = {
+  anomalies: [],
+  feed: []
+};
+
+const timelineCtx = document.getElementById('timelineChart').getContext('2d');
+const timelineChart = new Chart(timelineCtx, {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'Anomaly Magnitude', data: [], borderColor:'#00ffcc', backgroundColor:'rgba(0,255,204,0.12)', tension: 0.2 }]},
+    options: { scales:{x:{type:'time', time:{unit:'hour'}}, y:{beginAtZero:true}}, plugins:{legend:{display:false}} }
+});
+
+function fetchAnomalies() {
+  const start = document.getElementById('filterStart').value;
+  const end = document.getElementById('filterEnd').value;
+  const severity = document.getElementById('filterSeverity').value;
+  const params = new URLSearchParams();
+  if (start) params.set('start', start);
+  if (end) params.set('end', end);
+  if (severity && severity !== 'all') params.set('severity', severity);
+
+  return fetch('/api/anomalies?' + params).then(r=>r.json());
+}
+
+function renderAnomalies(data) {
+  state.anomalies = data.anomalies;
+  document.getElementById('openAnomalies').textContent = data.anomalies.length;
+  document.getElementById('criticalAlerts').textContent = data.anomalies.filter(a=>a.severity==='critical').length;
+  document.getElementById('highAlerts').textContent = data.anomalies.filter(a=>a.severity==='high').length;
+
+  const rows = data.anomalies.slice(0, 8).map(a => `
+    <tr>
+      <td>${new Date(a.timestamp).toLocaleString()}</td>
+      <td>${a.metric}</td>
+      <td>${a.value.toFixed(2)}</td>
+      <td><span class="badge" style="color:${a.severity==='critical'?'#ff4d4d':'#ffc107'}">${a.severity}</span></td>
+      <td>${(a.confidence||0).toFixed(2)}</td>
+      <td>${a.rule_name || 'built-in'}</td>
+    </tr>`).join('');
+  document.querySelector('#anomalyTable tbody').innerHTML = rows;
+
+  const timelineData = data.anomalies.map(a=>({x: new Date(a.timestamp), y: a.value}));
+  timelineChart.data.labels = timelineData.map(p=>p.x);
+  timelineChart.data.datasets[0].data = timelineData;
+  timelineChart.update();
+
+  appendFeed(data.anomalies.slice(0, 5).map(a=>`${new Date(a.timestamp).toLocaleTimeString()} ${a.severity.toUpperCase()} ${a.metric}=${a.value.toFixed(2)}`));
+}
+
+function appendFeed(lines){
+  const feed = document.getElementById('activityFeed');
+  lines.forEach(l=> {
+    const div = document.createElement('div');
+    div.textContent = l;
+    div.style.color = '#8cdfeb';
+    feed.prepend(div);
+  });
+}
+
+function fetchRules(){
+  return fetch('/api/anomaly_rules').then(r=>r.json()).then(res=>{
+    const target = document.getElementById('rulesList');
+    target.innerHTML = '';
+    document.getElementById('activeRules').textContent = res.rules.filter(r=>r.enabled).length;
+    res.rules.forEach(r=> {
+      const row = document.createElement('div');
+      row.innerHTML = `<div>${r.metric} ${r.operator} ${r.threshold} (${r.severity}) <button class="btn" data-id="${r.id}" style="font-size:11px;padding:3px 6px;">Delete</button></div>`;
+      row.querySelector('button').onclick = e => {
+        fetch('/api/anomaly_rules', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'delete',id:r.id})})
+          .then(_=>fetchRules())
+      };
+      target.appendChild(row);
+    });
+  });
+}
+
+function exportCSV(){
+  const rows = [ ['timestamp','metric','value','severity','category'] ].concat(state.anomalies.map(a=>[a.timestamp,a.metric,a.value,a.severity,a.category]));
+  const blob = new Blob([rows.map(r=>r.join(',')).join('\n')], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download='anomalies.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportPDF(){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFont('JetBrains Mono');
+  doc.setFontSize(12);
+  doc.text('Anomalies report', 14, 14);
+  state.anomalies.slice(0, 25).forEach((a,i)=> {
+    doc.text(`${a.timestamp} ${a.metric}=${a.value.toFixed(2)} ${a.severity}`, 14, 24 + i*6);
+  });
+  doc.save('anomalies.pdf');
+}
+
+function init() {
+  document.getElementById('refreshBtn').onclick = refresh;
+  document.getElementById('applyFilterBtn').onclick = refresh;
+  document.getElementById('openConfigBtn').onclick = () => document.getElementById('configPanel').style.display='flex';
+  document.getElementById('closeConfig').onclick = () => document.getElementById('configPanel').style.display='none';
+  document.getElementById('addRuleBtn').onclick = () => {
+    const payload = { metric: document.getElementById('newMetric').value, operator: document.getElementById('newOp').value, threshold: Number(document.getElementById('newThreshold').value), severity: document.getElementById('newSeverity').value, alert_in_app: document.getElementById('newInApp').checked, alert_email: document.getElementById('newEmail').checked };
+    fetch('/api/anomaly_rules', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
+      .then(_=>fetchRules()).then(_=>refresh());
+  };
+  document.getElementById('exportCsvBtn').onclick = exportCSV;
+  document.getElementById('exportPdfBtn').onclick = exportPDF;
+  fetchRules();
+  refresh();
+  setInterval(refresh, 15000);
+}
+
+function refresh(){ fetchAnomalies().then(resp=>renderAnomalies(resp)).catch(console.error); }
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+{% endblock %}

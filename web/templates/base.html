@@ -17,9 +17,13 @@
         <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">📊 Dashboard</a></li>
         <li><a href="{{ url_for('processes') }}" class="{% if request.endpoint == 'processes' %}active{% endif %}">🔒 Processes</a></li>
         <li><a href="{{ url_for('analytics') }}" class="{% if request.endpoint == 'analytics' %}active{% endif %}">📈 Analytics</a></li>
+        <li><a href="{{ url_for('threat_trends_page') }}" class="{% if request.endpoint == 'threat_trends_page' %}active{% endif %}">📉 Threat Trends</a></li>
+        <li><a href="{{ url_for('assets_page') }}" class="{% if request.endpoint == 'assets_page' %}active{% endif %}">🖥️ Assets</a></li>
+        <li><a href="{{ url_for('playbooks_page') }}" class="{% if request.endpoint == 'playbooks_page' %}active{% endif %}">🛠️ Playbooks</a></li>
         <li><a href="{{ url_for('security') }}" class="{% if request.endpoint == 'security' %}active{% endif %}">🛡️ Security</a></li>
         <li><a href="{{ url_for('audit_logs') }}" class="{% if request.endpoint == 'audit_logs' %}active{% endif %}">📋 Audit Logs</a></li>
         <li><a href="{{ url_for('ethics') }}" class="{% if request.endpoint == 'ethics' %}active{% endif %}">⚖️ Ethics</a></li>
+        <li><a href="{{ url_for('anomalies_page') }}" class="{% if request.endpoint == 'anomalies_page' %}active{% endif %}">🚨 Anomalies</a></li>
         <li><a href="{{ url_for('files') }}" class="{% if request.endpoint == 'files' %}active{% endif %}">📁 Files</a></li>
       </ul>
       <div class="sidebar-footer">
@@ -33,6 +37,7 @@
       {% block content %}{% endblock %}
     </main>
   </div>
+  <div class="toast-container" id="toastContainer"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
   // Global status update
@@ -42,6 +47,46 @@
   }
   // Initial status
   updateStatus(true);
+
+  // Toast notification system
+  let toastId = 0;
+  function showToast(severity, title, message, actionText, actionCallback) {
+    const container = document.getElementById('toastContainer');
+    const toast = document.createElement('div');
+    toast.className = `toast ${severity}`;
+    toast.id = `toast-${toastId++}`;
+    toast.innerHTML = `
+      <div class="toast-content">
+        <div class="toast-title">${title}</div>
+        <div class="toast-message">${message}</div>
+      </div>
+      <div class="toast-actions">
+        <button class="toast-btn" onclick="${actionCallback}">${actionText}</button>
+      </div>
+    `;
+    container.appendChild(toast);
+    setTimeout(() => toast.classList.add('show'), 10);
+    setTimeout(() => {
+      toast.classList.add('hide');
+      setTimeout(() => toast.remove(), 300);
+    }, 10000); // auto hide after 10s
+  }
+
+  // SSE for notifications
+  const eventSource = new EventSource('/api/notifications');
+  eventSource.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    if (data.type === 'anomaly' && (data.severity === 'critical' || data.severity === 'high')) {
+      const title = `${data.severity.toUpperCase()} Anomaly Detected`;
+      const message = `${data.metric.replace('_', ' ').toUpperCase()}: ${data.value.toFixed(2)}%`;
+      const actionText = 'Investigate';
+      const actionCallback = `window.location.href='/analytics'`;
+      showToast(data.severity, title, message, actionText, actionCallback);
+    }
+  };
+  eventSource.onerror = function() {
+    console.log('SSE error');
+  };
   </script>
 </body>
 </html>

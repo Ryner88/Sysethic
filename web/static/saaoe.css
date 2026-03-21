@@ -70,9 +70,84 @@ select{padding:6px 8px}
 
 /* overlay zoom-all */
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:1000}
-.overlay[open]{display:flex}
+.overlay[open], #configPanel {display:flex}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;max-width:1200px;width:92vw;max-height:88vh;overflow:auto}
 .modal .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .modal .grid .chart{height:240px}
 .help{color:var(--muted);font-size:12px;margin-top:8px}
 .footer{color:var(--muted);font-size:12px;margin-top:10px}
+
+.badge {font-size:11px; padding:3px 7px; border-radius:6px; background:rgba(0,255,255,0.15); border:1px solid var(--border);}
+#configPanel {position:fixed; inset:0; z-index:10001; background:rgba(0,0,0,0.7); justify-content:center; align-items:center;}
+#configPanel .modal {width:720px; max-height:84vh;}
+
+.tooltip-label{position:absolute; pointer-events:none; background:rgba(0,0,0,0.75); border:1px solid #2b9eb8; border-radius:4px; color:#9bffea; padding:2px 6px; font-size:11px; z-index:10002;}
+
+
+/* Toast notifications */
+.toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.toast {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  min-width: 300px;
+  max-width: 400px;
+  opacity: 0;
+  transform: translateX(100%);
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+.toast.hide {
+  opacity: 0;
+  transform: translateX(100%);
+}
+.toast.critical {
+  border-color: var(--bad);
+  background: rgba(255, 68, 68, 0.1);
+}
+.toast.high {
+  border-color: var(--warn);
+  background: rgba(255, 255, 0, 0.1);
+}
+.toast-content {
+  flex: 1;
+}
+.toast-title {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+.toast-message {
+  font-size: 14px;
+  color: var(--text);
+}
+.toast-actions {
+  margin-left: 12px;
+}
+.toast-btn {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.toast-btn:hover {
+  opacity: 0.8;
+}

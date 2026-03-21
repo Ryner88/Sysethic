@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Threat Trends{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header"><h2>Threat Trends</h2></div>
+
+  <section class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;">
+    <div class="card"><div class="label">Avg Daily anomalies</div><div class="big" id="avgAnomalies">--</div></div>
+    <div class="card"><div class="label">Trend direction</div><div class="big" id="trendDir">--</div></div>
+    <div class="card"><div class="label">Peak day</div><div class="big" id="peakDay">--</div></div>
+  </section>
+
+  <section class="grid" style="margin-top:12px;">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">Anomaly frequency (past 30 days)</div>
+      <div class="chart" style="height:300px;">
+        <canvas id="trendChart"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top:12px;">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">Severity breakdown (past 30 days)</div>
+      <div class="chart" style="height:280px;">
+        <canvas id="severityChart"></canvas>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+window.addEventListener('DOMContentLoaded', () => {
+  fetch('/api/threat_trends').then(r=>r.json()).then(data=>{
+    const trends = data.trends;
+    if(!trends.length){ return; }
+    const days = trends.map(t=>t.day);
+    const counts = trends.map(t=>t.count);
+    const avg = (counts.reduce((a,b)=>a+b,0)/counts.length).toFixed(1);
+    const peak = trends.reduce((p,c)=>(c.count>p.count?c:p), trends[0]);
+    document.getElementById('avgAnomalies').textContent = avg;
+    document.getElementById('peakDay').textContent = peak.day + ' (' + peak.count + ')';
+    const first = counts[0], last = counts[counts.length-1];
+    document.getElementById('trendDir').textContent = last>=first ? 'Increasing' : 'Decreasing';
+
+    new Chart(document.getElementById('trendChart').getContext('2d'), {
+      type:'line',
+      data:{labels:days, datasets:[{label:'Anomalies', data:counts, borderColor:'#0af', backgroundColor:'rgba(0,180,255,0.24)', fill:true}]},
+      options:{scales:{y:{beginAtZero:true}}}
+    });
+
+    new Chart(document.getElementById('severityChart').getContext('2d'), {
+      type:'bar',
+      data:{labels:days, datasets:[
+        {label:'Critical', data:trends.map(t=>t.critical), backgroundColor:'#ff4c4c'},
+        {label:'High', data:trends.map(t=>t.high), backgroundColor:'#ffae33'},
+        {label:'Medium', data:trends.map(t=>t.medium), backgroundColor:'#33ffe4'},
+        {label:'Low', data:trends.map(t=>t.low), backgroundColor:'#4dc3ff'}
+      ]},
+      options:{scales:{x:{stacked:true}, y:{stacked:true, beginAtZero:true}}}
+    });
+  });
+});
+</script>
+{% endblock %}

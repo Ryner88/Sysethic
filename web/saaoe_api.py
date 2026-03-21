@@ -2,9 +2,14 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+import queue
+import statistics
+import json
+import socket
+import random
 
 import psutil
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, Response, stream_with_context, request
 import pandas as pd
 import os
 
@@ -36,6 +41,9 @@ rx_series   = deque(maxlen=MAX_SAMPLES)    # Net MB/s
 tx_series   = deque(maxlen=MAX_SAMPLES)
 net_ts      = deque(maxlen=MAX_SAMPLES)
 
+# Notification queue for real-time alerts
+notification_queue = queue.Queue()
+
 # init so arrays are never empty
 for _ in range(2):
     now = datetime.now().strftime('%H:%M:%S')
@@ -50,6 +58,20 @@ for _ in range(2):
     rx_series.append(0.0)
     tx_series.append(0.0)
     net_ts.append(now)
+
+# in-memory rule store (persist optional)
+anomaly_rules = [
+    {'id': 1, 'metric': 'cpu_percent', 'operator': '>', 'threshold': 90, 'severity': 'critical', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
+    {'id': 2, 'metric': 'memory_percent', 'operator': '>', 'threshold': 85, 'severity': 'high', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
+]
+next_rule_id = 3
+
+playbooks = [
+    {'id': 1, 'name': 'Kill runaway CPU', 'metric': 'cpu_percent', 'operator': '>', 'threshold': 95, 'action': 'kill_process', 'target': 'cmdline', 'enabled': True, 'auto': True},
+    {'id': 2, 'name': 'Isolate suspicious IP', 'metric': 'memory_percent', 'operator': '>', 'threshold': 90, 'action': 'block_ip', 'target': 'external', 'enabled': True, 'auto': False},
+]
+next_playbook_id = 3
+playbook_runs = []
 
 # --- Background sampler ---
 
@@ -85,6 +107,32 @@ def sampler():
         cpu_series.append(float(cpu));   mem_series.append(float(mem));   usage_ts.append(now_dt)
         read_series.append(float(read_mbs)); write_series.append(float(write_mbs)); disk_ts.append(now_dt)
         rx_series.append(float(rx_mbs));     tx_series.append(float(tx_mbs));       net_ts.append(now_dt)
+
+        # Check for anomalies
+        if len(cpu_series) > 10:  # need some data
+            cpu_std = statistics.stdev(cpu_series) if len(set(cpu_series)) > 1 else 1
+            cpu_mean = statistics.mean(cpu_series)
+            mem_std = statistics.stdev(mem_series) if len(set(mem_series)) > 1 else 1
+            mem_mean = statistics.mean(mem_series)
+            
+            if cpu > cpu_mean + 2 * cpu_std:
+                severity = 'critical' if cpu > cpu_mean + 3 * cpu_std else 'high'
+                notification_queue.put({
+                    'type': 'anomaly',
+                    'severity': severity,
+                    'metric': 'cpu_percent',
+                    'value': cpu,
+                    'timestamp': datetime.now().isoformat()
+                })
+            if mem > mem_mean + 2 * mem_std:
+                severity = 'critical' if mem > mem_mean + 3 * mem_std else 'high'
+                notification_queue.put({
+                    'type': 'anomaly',
+                    'severity': severity,
+                    'metric': 'memory_percent',
+                    'value': mem,
+                    'timestamp': datetime.now().isoformat()
+                })
 
         last_time = now
         time.sleep(SAMPLE_INTERVAL)
@@ -220,33 +268,225 @@ def api_temps():
 def api_gpu():
     return jsonify(_read_gpus())
 
+@app.route('/anomalies')
+def anomalies_page():
+    return render_template('anomalies.html')
+
 @app.route('/api/anomalies')
 def api_anomalies():
     if not os.path.exists(LOG_PATH):
         return jsonify(anomalies=[])
+
     df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
     if df.empty:
         return jsonify(anomalies=[])
+
+    # filter window support
+    start = request.args.get('start')
+    end = request.args.get('end')
+    if start:
+        df = df[df['timestamp'] >= pd.to_datetime(start)]
+    if end:
+        df = df[df['timestamp'] <= pd.to_datetime(end)]
+
     anomalies = []
     for col in ['cpu_percent', 'memory_percent']:
-        thresh = df[col].mean() + 2 * df[col].std()
+        mean_val = df[col].mean()
+        std_val = df[col].std() if len(df) > 1 else 0
+        if std_val == 0:
+            continue
+        thresh = mean_val + 2 * std_val
         high = df[df[col] > thresh]
         for _, row in high.iterrows():
+            z = (row[col] - mean_val) / std_val
+            severity = 'critical' if z > 3 else 'high'
             anomalies.append({
-                'timestamp': row['timestamp'],
+                'timestamp': row['timestamp'].isoformat(),
                 'metric': col,
-                'value': row[col],
-                'threshold': thresh
+                'value': float(row[col]),
+                'threshold': float(thresh),
+                'severity': severity,
+                'category': 'system',
+                'confidence': min(1.0, abs(z) / 5)
             })
-    # Remove duplicates if same timestamp
-    seen = set()
-    unique = []
-    for a in sorted(anomalies, key=lambda x: x['timestamp'], reverse=True):
-        key = (a['timestamp'], a['metric'])
-        if key not in seen:
-            seen.add(key)
-            unique.append(a)
-    return jsonify(anomalies=unique[:10])  # last 10
+
+    # apply custom rules (extends results)
+    for rule in anomaly_rules:
+        if not rule.get('enabled'):
+            continue
+        metric = rule['metric']
+        if metric not in df.columns:
+            continue
+        rvalue = df[metric].iloc[-1] if not df.empty else None
+        if rvalue is None:
+            continue
+        ops = {
+            '>': rvalue > rule['threshold'],
+            '<': rvalue < rule['threshold'],
+            '>=': rvalue >= rule['threshold'],
+            '<=': rvalue <= rule['threshold']
+        }
+        if ops.get(rule['operator'], False):
+            anomalies.append({
+                'timestamp': datetime.now().isoformat(),
+                'metric': metric,
+                'value': float(rvalue),
+                'threshold': float(rule['threshold']),
+                'severity': rule['severity'],
+                'category': 'custom',
+                'confidence': 0.9,
+                'rule_name': f"Custom {metric} {rule['operator']} {rule['threshold']}"
+            })
+
+    # sort and limit
+    sorted_list = sorted(anomalies, key=lambda x: x['timestamp'], reverse=True)
+
+    # apply playbooks
+    apply_playbooks(sorted_list)
+
+    # filtering by severity
+    severity = request.args.get('severity')
+    if severity:
+        sorted_list = [a for a in sorted_list if a.get('severity') == severity]
+
+    return jsonify(anomalies=sorted_list[:200])
+
+def op_eval(value, operator, threshold):
+    if operator == '>': return value > threshold
+    if operator == '<': return value < threshold
+    if operator == '>=': return value >= threshold
+    if operator == '<=': return value <= threshold
+    return False
+
+def apply_playbooks(anomalies):
+    for anomaly in anomalies:
+        for pb in playbooks:
+            if not pb.get('enabled', False):
+                continue
+            if anomaly.get('metric') != pb.get('metric'):
+                continue
+            if op_eval(anomaly.get('value', 0), pb.get('operator'), pb.get('threshold')):
+                run_entry = {
+                    'id': len(playbook_runs)+1,
+                    'playbook_id': pb['id'],
+                    'name': pb['name'],
+                    'metric': anomaly['metric'],
+                    'value': anomaly['value'],
+                    'threshold': pb['threshold'],
+                    'action': pb['action'],
+                    'target': pb['target'],
+                    'timestamp': datetime.now().isoformat(),
+                    'auto': pb.get('auto', False),
+                    'status': 'executed' if pb.get('auto') else 'ready'
+                }
+                playbook_runs.append(run_entry)
+                if pb.get('auto'):
+                    notification_queue.put({
+                        'type': 'playbook_trigger',
+                        'playbook': pb['name'],
+                        'details': run_entry
+                    })
+
+@app.route('/api/playbooks', methods=['GET', 'POST'])
+def api_playbooks():
+    global next_playbook_id
+    if request.method == 'GET':
+        return jsonify(playbooks=playbooks, runs=playbook_runs)
+    payload = request.json or {}
+    if payload.get('action') == 'delete':
+        pid = int(payload.get('id', 0))
+        playbooks[:] = [pb for pb in playbooks if pb['id'] != pid]
+        return jsonify(success=True, playbooks=playbooks)
+    new_pb = {
+        'id': next_playbook_id,
+        'name': payload.get('name', 'New Playbook'),
+        'metric': payload.get('metric', 'cpu_percent'),
+        'operator': payload.get('operator', '>'),
+        'threshold': float(payload.get('threshold', 90)),
+        'action': payload.get('action_type', 'block_ip'),
+        'target': payload.get('target', 'external'),
+        'enabled': bool(payload.get('enabled', True)),
+        'auto': bool(payload.get('auto', False))
+    }
+    playbooks.append(new_pb)
+    next_playbook_id += 1
+    return jsonify(success=True, playbook=new_pb, playbooks=playbooks)
+
+@app.route('/api/playbook_trigger', methods=['POST'])
+def api_playbook_trigger():
+    payload = request.json or {}
+    pb_id = int(payload.get('id', 0))
+    pb = next((x for x in playbooks if x['id'] == pb_id), None)
+    if not pb:
+        return jsonify(success=False, message='Playbook not found'), 404
+    run_entry = {
+        'id': len(playbook_runs)+1,
+        'playbook_id': pb['id'],
+        'name': pb['name'],
+        'metric': payload.get('metric', 'n/a'),
+        'value': payload.get('value', 0),
+        'threshold': pb['threshold'],
+        'action': pb['action'],
+        'target': pb['target'],
+        'timestamp': datetime.now().isoformat(),
+        'auto': False,
+        'status': 'manual_triggered'
+    }
+    playbook_runs.append(run_entry)
+    notification_queue.put({'type':'playbook_manual_trigger','playbook':pb['name'],'details':run_entry})
+    return jsonify(success=True, run=run_entry)
+
+@app.route('/api/notifications')
+def api_notifications():
+    def generate():
+        while True:
+            try:
+                msg = notification_queue.get(timeout=30)  # wait up to 30s
+                yield f"data: {json.dumps(msg)}\n\n"
+            except queue.Empty:
+                yield "data: {\"type\": \"ping\"}\n\n"  # keep connection alive
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+
+@app.route('/api/anomaly_rules', methods=['GET', 'POST'])
+def api_anomaly_rules():
+    global next_rule_id
+    if request.method == 'GET':
+        return jsonify(rules=anomaly_rules)
+
+    payload = request.json or {}
+    if 'action' in payload and payload['action'] == 'delete':
+        rid = int(payload.get('id', 0))
+        anomaly_rules[:] = [r for r in anomaly_rules if r['id'] != rid]
+        return jsonify(success=True, rules=anomaly_rules)
+
+    rule = {
+        'id': next_rule_id,
+        'metric': payload.get('metric', 'cpu_percent'),
+        'operator': payload.get('operator', '>'),
+        'threshold': float(payload.get('threshold', 90)),
+        'severity': payload.get('severity', 'high'),
+        'enabled': bool(payload.get('enabled', True)),
+        'alert_in_app': bool(payload.get('alert_in_app', True)),
+        'alert_email': bool(payload.get('alert_email', False))
+    }
+    anomaly_rules.append(rule)
+    next_rule_id += 1
+    return jsonify(success=True, rule=rule, rules=anomaly_rules)
+
+@app.route('/api/system_health')
+def api_system_health():
+    return jsonify({'health': 'Operational'})
+
+@app.route('/api/test_anomaly')
+def api_test_anomaly():
+    notification_queue.put({
+        'type': 'anomaly',
+        'severity': 'critical',
+        'metric': 'cpu_percent',
+        'value': 95.0,
+        'timestamp': datetime.now().isoformat()
+    })
+    return jsonify({'status': 'test anomaly sent'})
 
 @app.route('/api/logs')
 def api_logs():
@@ -293,6 +533,81 @@ def api_audit_stats():
 @app.route('/health')
 def health():
     return jsonify({'ok': True})
+
+@app.route('/assets')
+def assets_page():
+    return render_template('assets.html')
+
+@app.route('/threat-trends')
+def threat_trends_page():
+    return render_template('threat_trends.html')
+
+@app.route('/playbooks')
+def playbooks_page():
+    return render_template('playbooks.html')
+
+@app.route('/api/assets')
+def api_assets():
+    # mocked assets summary, in prod should be from CMDB / service inventory
+    local = {'name': socket.gethostname(), 'ip': socket.gethostbyname(socket.gethostname()), 'health': 'good', 'active_processes': len(psutil.pids()), 'vuln_scan': '2026-03-19 (no findings)'}
+    peers = []
+    for i in range(3):
+        peers.append({
+            'name': f'host-{100+i}',
+            'ip': f'10.0.1.{i+5}',
+            'health': random.choice(['good', 'warning', 'critical']),
+            'active_processes': random.randint(40, 150),
+            'vuln_scan': f'2026-03-{15+i} ' + random.choice(['(no findings)', '(low findings)', '(needs patch)'])
+        })
+    return jsonify(assets=[local] + peers)
+
+@app.route('/api/threat_trends')
+def api_threat_trends():
+    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp']) if os.path.exists(LOG_PATH) else pd.DataFrame()
+    if df.empty:
+        return jsonify(trends=[])
+
+    df['day'] = df['timestamp'].dt.floor('D')
+    summary = df.groupby('day').agg(anomalies=('cpu_percent','count')).reset_index()
+    # severity distribution mock
+    data = []
+    for _, row in summary.iterrows():
+        data.append({'day': row['day'].strftime('%Y-%m-%d'), 'count': int(row['anomalies']), 'critical': random.randint(0, 4), 'high': random.randint(0, 8), 'medium': random.randint(0,10), 'low': random.randint(0,12)})
+    return jsonify(trends=data)
+
+@app.route('/api/net_graph')
+def api_net_graph():
+    # Adult minimal graph - process-to-external ip mapping using live pid connections
+    connections = []
+    try:
+        # use psutil.net_connections to avoid deprecation warning (p.connections deprecated)
+        proc_map = {p.pid: p.info['name'] for p in psutil.process_iter(attrs=['pid','name'])}
+        for c in psutil.net_connections(kind='inet'):
+            if c.raddr and getattr(c, 'status', None) == 'ESTABLISHED' and c.pid in proc_map:
+                proc_name = proc_map.get(c.pid, f'pid-{c.pid}')
+                connections.append((proc_name, c.raddr.ip))
+    except Exception:
+        pass
+
+    nodes = []
+    links = []
+    seen_nodes = set()
+    for proc, ip in connections[:20]:
+        proc_id = f'proc-{proc}-{random.randint(1,9999)}'
+        ext_id = f'ext-{ip}'
+        if proc_id not in seen_nodes:
+            nodes.append({'id': proc_id, 'label': proc, 'type': 'process'})
+            seen_nodes.add(proc_id)
+        if ext_id not in seen_nodes:
+            nodes.append({'id': ext_id, 'label': ip, 'type': 'ip'})
+            seen_nodes.add(ext_id)
+        links.append({'source': proc_id, 'target': ext_id, 'score': random.uniform(0.2,1.0)})
+
+    if not nodes:
+        nodes = [{'id':'proc-dummy','label':'svc-example','type':'process'},{'id':'ext-8.8.8.8','label':'8.8.8.8','type':'ip'}]
+        links = [{'source':'proc-dummy','target':'ext-8.8.8.8','score':0.8}]
+
+    return jsonify(graph={'nodes':nodes,'links':links})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

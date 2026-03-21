@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Assets{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header"><h2>Monitored Assets</h2></div>
+  <section class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">
+    <div class="card"><div class="label">Total Assets</div><div class="big" id="assetTotal">--</div></div>
+    <div class="card"><div class="label">Critical Health</div><div class="big" id="assetCritical">--</div></div>
+    <div class="card"><div class="label">Last scan</div><div class="big" id="assetScan">--</div></div>
+  </section>
+
+  <section class="grid" style="margin-top:12px;">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">Asset Inventory</div>
+      <table class="table" id="assetsTableFull"><thead><tr><th>Name</th><th>IP</th><th>Health</th><th>Active processes</th><th>Last vuln scan</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function refreshAssets(){
+  fetch('/api/assets').then(r=>r.json()).then(data=>{
+    const tbody = document.querySelector('#assetsTableFull tbody');
+    tbody.innerHTML='';
+    const total = data.assets.length;
+    const critical = data.assets.filter(a=>a.health==='critical').length;
+    const latest = data.assets.map(a=>a.vuln_scan).sort().reverse()[0] || 'n/a';
+    document.getElementById('assetTotal').textContent = total;
+    document.getElementById('assetCritical').textContent = critical;
+    document.getElementById('assetScan').textContent = latest;
+    data.assets.forEach(a=>{
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${a.name}</td><td>${a.ip}</td><td>${a.health}</td><td>${a.active_processes}</td><td>${a.vuln_scan}</td>`;
+      tbody.appendChild(tr);
+    });
+  });
+}
+
+window.addEventListener('DOMContentLoaded', refreshAssets);
+</script>
+{% endblock %}

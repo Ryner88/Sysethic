@@ -107,6 +107,36 @@
       </div>
     </section>
 
+    <!-- Network graph -->
+    <section class="grid" style="margin-top:10px;">
+      <div class="card" style="grid-column: span 4;">
+        <div class="label">Flagged Process <-> External IP Network Graph</div>
+        <div id="netGraph" style="height:320px;"></div>
+      </div>
+    </section>
+
+    <!-- Assets summary -->
+    <section class="grid" style="margin-top:10px;">
+      <div class="card" style="grid-column: span 4;">
+        <div class="label">Asset Overview</div>
+        <table class="table" id="assetsTable">
+          <thead><tr><th>Name</th><th>IP</th><th>Health</th><th>Active Processes</th><th>Last Vulnerability Scan</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Threat trends preview -->
+    <section class="grid" style="margin-top:10px;">
+      <div class="card" style="grid-column: span 4;">
+        <div class="label">Threat Trends (Weekly)</div>
+        <div class="chart" style="height:220px;">
+          <canvas id="trendsChart"></canvas>
+        </div>
+        <div style="margin-top:8px;">Go to <a href="/threat-trends" style="color: var(--accent);">Threat Trends</a> for full analysis.</div>
+      </div>
+    </section>
+
     <!-- Logs -->
     <section class="grid" style="margin-top:10px;">
       <div class="card" style="grid-column: span 4;">
@@ -137,6 +167,8 @@
     </div>
   </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+  <script src="https://threejs.org/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
   document.addEventListener('DOMContentLoaded', () => {
@@ -470,6 +502,134 @@
     $('closeZoom').addEventListener('click',closeZoom);
     overlay.addEventListener('click',e=>{ if(e.target===overlay) closeZoom(); });
     window.addEventListener('keydown',e=>{ if(e.key==='Escape' && overlay.hasAttribute('open')) closeZoom(); });
+
+    // Net graph, assets, and threat trends enrichments
+    function loadNetGraph(){
+      fetch('/api/net_graph').then(r=>r.json()).then(data=>{
+        const container = document.getElementById('netGraph');
+        container.innerHTML = '';
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050a14);
+
+        const camera = new THREE.PerspectiveCamera(45, width / height, 1, 2000);
+        camera.position.set(0, 0, 500);
+
+        const renderer = new THREE.WebGLRenderer({antialias: true});
+        renderer.setSize(width, height);
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+
+        const light = new THREE.PointLight(0x88f5ff, 1.2);
+        light.position.set(0, 200, 200);
+        scene.add(light);
+
+        const nodes = {};
+        const nodeGroup = new THREE.Group();
+        const edgeGroup = new THREE.Group();
+
+        data.graph.nodes.forEach((n, idx) => {
+          const geometry = new THREE.SphereGeometry(n.type === 'process' ? 8 : 6, 12, 12);
+          const material = new THREE.MeshStandardMaterial({color: n.type === 'process' ? 0x00ffbb : 0xff9933});
+          const sphere = new THREE.Mesh(geometry, material);
+          sphere.position.set((Math.random()-0.5)*240, (Math.random()-0.5)*240, (Math.random()-0.5)*240);
+          sphere.userData = {id: n.id, label: n.label, type: n.type};
+          nodeGroup.add(sphere);
+          nodes[n.id] = sphere;
+
+          const text = document.createElement('div');
+          text.className = 'tooltip-label';
+          text.textContent = n.label;
+          text.style.position = 'absolute';
+          text.style.color = '#9bffea';
+          text.style.fontSize = '11px';
+          text.style.pointerEvents = 'none';
+          text.style.display = 'none';
+          container.appendChild(text);
+
+          sphere.userData.labelElem = text;
+        });
+
+        data.graph.links.forEach(l => {
+          const source = nodes[l.source];
+          const target = nodes[l.target];
+          if (!source || !target) return;
+          const material = new THREE.LineBasicMaterial({color: 0x22d0ff, transparent: true, opacity: 0.55});
+          const points = [source.position.clone(), target.position.clone()];
+          const geometry = new THREE.BufferGeometry().setFromPoints(points);
+          const line = new THREE.Line(geometry, material);
+          edgeGroup.add(line);
+        });
+
+        scene.add(edgeGroup);
+        scene.add(nodeGroup);
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        renderer.domElement.addEventListener('pointerdown', (event) => {
+          mouse.x = ( event.offsetX / renderer.domElement.clientWidth ) * 2 - 1;
+          mouse.y = - ( event.offsetY / renderer.domElement.clientHeight ) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const intersects = raycaster.intersectObjects(nodeGroup.children);
+          if (intersects.length > 0) {
+            const selected = intersects[0].object;
+            window.location.href = '/anomalies';
+          }
+        });
+
+        function animate() {
+          requestAnimationFrame(animate);
+          nodeGroup.rotation.y += 0.0012;
+          edgeGroup.rotation.y += 0.0012;
+          controls.update();
+          renderer.render(scene, camera);
+
+          nodeGroup.children.forEach(node => {
+            const v = node.userData.labelElem;
+            if(!v) return;
+            const vector = node.position.clone();
+            vector.project(camera);
+            const x = (vector.x * 0.5 + 0.5) * width;
+            const y = ( -vector.y * 0.5 + 0.5) * height;
+            v.style.transform = `translate(${x}px,${y}px)`;
+            v.style.display = 'block';
+          });
+        }
+
+        animate();
+      });
+    }
+
+    function loadAssets(){
+      fetch('/api/assets').then(r=>r.json()).then(data=>{
+        const tbody = document.querySelector('#assetsTable tbody');
+        tbody.innerHTML = '';
+        data.assets.forEach(a=>{
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${a.name}</td><td>${a.ip}</td><td>${a.health}</td><td>${a.active_processes}</td><td>${a.vuln_scan}</td>`;
+          tbody.appendChild(tr);
+        });
+      });
+    }
+
+    function loadThreatTrends(){
+      fetch('/api/threat_trends').then(r=>r.json()).then(data=>{
+        const ctx = document.getElementById('trendsChart').getContext('2d');
+        const days = data.trends.map(t=>t.day);
+        const values = data.trends.map(t=>t.count);
+        if(window.trendChart) window.trendChart.destroy();
+        window.trendChart = new Chart(ctx, {type:'line', data:{labels:days, datasets:[{label:'Daily anomaly count', data:values, borderColor:'#00ffd6', backgroundColor:'rgba(0,255,214,0.2)', fill:true}]}, options:{scales:{y:{beginAtZero:true}}, plugins:{legend:{display:false}}}});
+      });
+    }
+
+    loadNetGraph();
+    loadAssets();
+    loadThreatTrends();
   });
   </script>
 {% endblock %}
