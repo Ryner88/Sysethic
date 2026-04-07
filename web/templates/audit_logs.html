@@ -5,62 +5,116 @@
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>Transparent Audit Logging</h2>
-    <div class="controls">
-      <label class="label">Filter
-        <select id="logFilter">
-          <option value="all">All</option>
-          <option value="security">Security</option>
-          <option value="system">System</option>
-          <option value="user">User</option>
-        </select>
-      </label>
-      <button id="exportLogsBtn" class="btn">Export Logs</button>
+    <h1 style="font-size:2.2rem;font-family:var(--font-mono);margin-bottom:0;">Audit Logs</h1>
+    <div style="color:var(--muted);font-size:1.1rem;margin-bottom:18px;">Transparent logging of all system actions &amp; access events</div>
+  </div>
+
+  <div class="stat-grid" style="margin-bottom:18px;">
+    <div class="stat-card">
+      <div class="stat-label">TOTAL EVENTS</div>
+      <div class="stat-value" id="totalEvents">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">DENIED</div>
+      <div class="stat-value alert-critical" id="deniedEvents">--</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">FLAGGED</div>
+      <div class="stat-value" id="flaggedEvents">--</div>
     </div>
   </div>
 
-  <section class="grid">
-    <div class="card" style="grid-column: span 4;">
-      <div class="label">Audit Log Entries</div>
-      <table class="table" id="logsTable">
-        <thead><tr><th>Timestamp</th><th>Event</th><th>User</th><th>Action</th><th>Details</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+  <div style="display:flex;gap:12px;margin-bottom:18px;">
+    <select id="roleFilter" class="btn" style="min-width:140px;"></select>
+    <select id="severityFilter" class="btn" style="min-width:140px;"></select>
+    <select id="outcomeFilter" class="btn" style="min-width:140px;"></select>
+  </div>
 
-  <section class="grid" style="margin-top:20px;">
-    <div class="card">
-      <div class="label">Log Statistics</div>
-      <p>Total Entries: <span id="totalLogs">--</span></p>
-      <p>Today: <span id="todayLogs">--</span></p>
-    </div>
-    <div class="card">
-      <div class="label">Compliance Status</div>
-      <p>Audit Trail: <span class="good">Complete</span></p>
-      <p>Retention: <span class="good">90 days</span></p>
-    </div>
-  </section>
+  <div class="card" style="margin-bottom:24px;">
+    <div class="label" style="font-size:1.2rem;">📝 Event Log (<span id="eventCount">--</span>)</div>
+    <table class="table" id="logsTable">
+      <thead>
+        <tr><th>Time</th><th>Action</th><th>Role</th><th>Severity</th><th>Outcome</th><th>Resource</th><th>Details</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-document.addEventListener('DOMContentLoaded', () => {
-  const $ = (id) => document.getElementById(id);
+function badgeClass(type, val) {
+  if(type==='severity') {
+    val = (val||'').toLowerCase();
+    if(val==='critical') return 'audit-badge denied';
+    if(val==='warning') return 'audit-badge flagged';
+    if(val==='info') return 'audit-badge allowed';
+    return 'audit-badge';
+  }
+  if(type==='outcome') {
+    val = (val||'').toLowerCase();
+    if(val==='denied') return 'audit-badge denied';
+    if(val==='flagged') return 'audit-badge flagged';
+    if(val==='allowed') return 'audit-badge allowed';
+    return 'audit-badge';
+  }
+  if(type==='role') return 'badge-role';
+  return '';
+}
 
-  function drawLogs(data){
-    const tb = $('logsTable').querySelector('tbody'); tb.innerHTML='';
-    (data.logs||[]).forEach(r=>{
-      const tr=document.createElement('tr');
-      tr.innerHTML = `<td>${new Date(r.timestamp).toLocaleString()}</td><td>${r.event||'System'}</td><td>${r.user||'system'}</td><td>${r.action||'—'}</td><td>${r.details||'—'}</td>`;
-      tb.appendChild(tr);
-    });
-    $('totalLogs').textContent = data.logs?.length || 0;
+function renderLogRow(r) {
+  return `<tr>
+    <td style="font-family:var(--font-mono);font-size:13px;">${r.time||r.timestamp||''}</td>
+    <td style="font-weight:700;">${r.action||r.event||''}</td>
+    <td><span class="${badgeClass('role',r.role)}">${r.role||''}</span></td>
+    <td><span class="${badgeClass('severity',r.severity)}">${r.severity||''}</span></td>
+    <td><span class="${badgeClass('outcome',r.outcome)}">${r.outcome||''}</span></td>
+    <td style="font-family:var(--font-mono);font-size:13px;">${r.resource||''}</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.details||''}</td>
+  </tr>`;
+}
+
+async function loadAuditLogs() {
+  const res = await fetch('/api/logs');
+  const data = await res.json();
+  const logs = data.logs || [];
+
+  // Stat cards
+  document.getElementById('totalEvents').textContent = logs.length;
+  document.getElementById('deniedEvents').textContent = logs.filter(l=>String(l.outcome).toLowerCase()==='denied').length;
+  document.getElementById('flaggedEvents').textContent = logs.filter(l=>String(l.outcome).toLowerCase()==='flagged').length;
+
+  // Filters
+  const roles = Array.from(new Set(logs.map(l=>l.role||'Unknown')));
+  const severities = Array.from(new Set(logs.map(l=>l.severity||'Unknown')));
+  const outcomes = Array.from(new Set(logs.map(l=>l.outcome||'Unknown')));
+  const roleSel = document.getElementById('roleFilter');
+  const sevSel = document.getElementById('severityFilter');
+  const outSel = document.getElementById('outcomeFilter');
+  if(roleSel.options.length===0) {
+    roleSel.innerHTML = '<option value="">All Roles</option>' + roles.map(r=>`<option value="${r}">${r}</option>`).join('');
+  }
+  if(sevSel.options.length===0) {
+    sevSel.innerHTML = '<option value="">All Severity</option>' + severities.map(s=>`<option value="${s}">${s}</option>`).join('');
+  }
+  if(outSel.options.length===0) {
+    outSel.innerHTML = '<option value="">All Outcomes</option>' + outcomes.map(o=>`<option value="${o}">${o}</option>`).join('');
   }
 
-  fetch('/api/logs').then(r=>r.json()).then(drawLogs);
-  setInterval(() => fetch('/api/logs').then(r=>r.json()).then(drawLogs), 10000);
-});
+  // Filtering
+  const rf = roleSel.value, sf = sevSel.value, of = outSel.value;
+  const filtered = logs.filter(l => (!rf||l.role===rf) && (!sf||l.severity===sf) && (!of||l.outcome===of));
+
+  // Table
+  document.getElementById('logsTable').querySelector('tbody').innerHTML = filtered.map(renderLogRow).join('');
+  document.getElementById('eventCount').textContent = filtered.length;
+}
+
+document.getElementById('roleFilter').addEventListener('change', loadAuditLogs);
+document.getElementById('severityFilter').addEventListener('change', loadAuditLogs);
+document.getElementById('outcomeFilter').addEventListener('change', loadAuditLogs);
+loadAuditLogs();
+setInterval(loadAuditLogs, 10000);
 </script>
 {% endblock %}

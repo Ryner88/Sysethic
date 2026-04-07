@@ -5,64 +5,104 @@
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>Privacy-Conscious File Handling</h2>
+    <h1 style="font-size:2.2rem;font-family:var(--font-mono);margin-bottom:0;">File Management</h1>
+    <div style="color:var(--muted);font-size:1.1rem;margin-bottom:18px;">Privacy conscious file handling with sensitivity tagging</div>
   </div>
 
-  <section class="grid">
-    <div class="card">
-      <div class="label">File Access Monitor</div>
-      <div id="fileAccessBox" class="help">Monitoring file access...</div>
+  <div class="stat-grid" style="margin-bottom:18px;">
+    <div class="stat-card">
+      <div class="stat-label">PUBLIC</div>
+      <div class="stat-value" id="publicCount">--</div>
+      <span class="badge" style="background:#111;color:#00ffd6;">public</span>
     </div>
-    <div class="card">
-      <div class="label">Data Classification</div>
-      <p>Public Files: <span id="publicFiles">--</span></p>
-      <p>Private Files: <span id="privateFiles">--</span></p>
-      <p>Sensitive Files: <span id="sensitiveFiles">--</span></p>
+    <div class="stat-card">
+      <div class="stat-label">INTERNAL</div>
+      <div class="stat-value" id="internalCount">--</div>
+      <span class="badge" style="background:#111;color:#00ffb0;">internal</span>
     </div>
-    <div class="card">
-      <div class="label">Encryption Status</div>
-      <p>Encrypted Files: <span class="good">--</span></p>
-      <p>Pending Encryption: <span class="warn">--</span></p>
+    <div class="stat-card">
+      <div class="stat-label">CONFIDENTIAL</div>
+      <div class="stat-value" id="confidentialCount">--</div>
+      <span class="badge" style="background:#ffb300;color:#222;">confidential</span>
     </div>
-    <div class="card">
-      <div class="label">Access Controls</div>
-      <button class="btn" id="scanFilesBtn">Scan for Sensitive Data</button>
-      <button class="btn" id="encryptBtn">Encrypt Files</button>
+    <div class="stat-card">
+      <div class="stat-label">RESTRICTED</div>
+      <div class="stat-value alert-critical" id="restrictedCount">--</div>
+      <span class="badge" style="background:#ff4444;color:#fff;">restricted</span>
     </div>
-  </section>
+  </div>
 
-  <section class="grid" style="margin-top:20px;">
-    <div class="card" style="grid-column: span 4;">
-      <div class="label">Recent File Access</div>
-      <table class="table" id="fileTable">
-        <thead><tr><th>Time</th><th>User</th><th>File</th><th>Action</th><th>Classification</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+  <div style="display:flex;gap:12px;margin-bottom:18px;">
+    <select id="levelFilter" class="btn" style="min-width:140px;">
+      <option value="">All Levels</option>
+      <option value="public">Public</option>
+      <option value="internal">Internal</option>
+      <option value="confidential">Confidential</option>
+      <option value="restricted">Restricted</option>
+    </select>
+  </div>
+
+  <div class="card" style="margin-bottom:24px;">
+    <div class="label" style="font-size:1.2rem;">📁 Managed Files (<span id="fileCount">--</span>)</div>
+    <table class="table" id="fileTable">
+      <thead>
+        <tr><th>Filename</th><th>Path</th><th>Sensitivity</th><th>Owner</th><th>MAC Policy</th><th>Accesses</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-document.addEventListener('DOMContentLoaded', () => {
-  const $ = (id) => document.getElementById(id);
+function badgeClass(level) {
+  level = (level||'').toLowerCase();
+  if(level==='public') return 'badge';
+  if(level==='internal') return 'badge' + ' badge-role';
+  if(level==='confidential') return 'badge' + ' audit-badge flagged';
+  if(level==='restricted') return 'badge' + ' audit-badge denied';
+  return 'badge';
+}
 
-  // Mock file data
-  function loadFileData(){
-    $('publicFiles').textContent = '45';
-    $('privateFiles').textContent = '123';
-    $('sensitiveFiles').textContent = '12';
+const mockFiles = [
+  {filename:'security.conf',path:'/etc/saaoe/security.conf',sensitivity:'restricted',owner:'admin',mac:'owner only',accesses:3},
+  {filename:'audit.log',path:'/var/log/saaoe/audit.log',sensitivity:'confidential',owner:'admin',mac:'read only',accesses:12},
+  {filename:'ml-dataset.csv',path:'/home/student/data/ml-dataset.csv',sensitivity:'internal',owner:'student',mac:'read write',accesses:8},
+  {filename:'README.md',path:'/home/shared/docs/README.md',sensitivity:'public',owner:'admin',mac:'read only',accesses:45},
+  {filename:'user_credentials.db',path:'/etc/saaoe/credentials/user_credentials.db',sensitivity:'restricted',owner:'admin',mac:'owner only',accesses:1}
+];
 
-    const tb = $('fileTable').querySelector('tbody');
-    tb.innerHTML = `
-      <tr><td>14:45</td><td>user1</td><td>/home/user1/docs/private.txt</td><td>Read</td><td>Private</td></tr>
-      <tr><td>14:42</td><td>admin</td><td>/var/log/system.log</td><td>Access</td><td>System</td></tr>
-    `;
-  }
+function renderFileRow(f) {
+  return `<tr>
+    <td style="font-family:var(--font-mono);font-size:14px;">${f.filename}</td>
+    <td style="font-family:var(--font-mono);font-size:13px;">${f.path}</td>
+    <td><span class="${badgeClass(f.sensitivity)}">${f.sensitivity}</span></td>
+    <td><span class="badge-role">${f.owner}</span></td>
+    <td><span class="badge-state">${f.mac}</span></td>
+    <td style="font-family:var(--font-mono);font-size:14px;">${f.accesses}</td>
+    <td><button class="btn">details</button></td>
+  </tr>`;
+}
 
-  loadFileData();
-  setInterval(loadFileData, 15000);
-});
+function loadFiles() {
+  // In real app, fetch('/api/files/access') and process response
+  const files = mockFiles; // Replace with API data
+  // Stat cards
+  document.getElementById('publicCount').textContent = files.filter(f=>f.sensitivity==='public').length;
+  document.getElementById('internalCount').textContent = files.filter(f=>f.sensitivity==='internal').length;
+  document.getElementById('confidentialCount').textContent = files.filter(f=>f.sensitivity==='confidential').length;
+  document.getElementById('restrictedCount').textContent = files.filter(f=>f.sensitivity==='restricted').length;
+  // Filtering
+  const level = document.getElementById('levelFilter').value;
+  const filtered = level ? files.filter(f=>f.sensitivity===level) : files;
+  // Table
+  document.getElementById('fileTable').querySelector('tbody').innerHTML = filtered.map(renderFileRow).join('');
+  document.getElementById('fileCount').textContent = filtered.length;
+}
+
+document.getElementById('levelFilter').addEventListener('change', loadFiles);
+loadFiles();
+setInterval(loadFiles, 15000);
 </script>
 {% endblock %}

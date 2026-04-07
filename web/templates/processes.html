@@ -2,22 +2,51 @@
 
 {% block title %}SAAOE • Processes{% endblock %}
 
+
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>Process Isolation Monitor</h2>
+    <h2>Process Monitor</h2>
+    <span class="label">User & process isolation with sandbox controls</span>
   </div>
 
-  <section class="grid">
-    <div class="card" style="grid-column: span 4;">
-      <div class="label">Top Processes (CPU% / RAM MB)</div>
-      <table class="table" id="procTable">
-        <thead><tr><th>PID</th><th>Name</th><th>User</th><th class="num">CPU%</th><th class="num">RAM (MB)</th><th>Status</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="help">Updated: <span id="procUpdated">—</span></div>
+  <!-- Stat Cards Row -->
+  <section class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-label">RUNNING</div>
+      <div class="stat-value" id="statRunning">6</div>
+      <div class="stat-desc"><span class="badge badge-state running">running</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">SUSPENDED</div>
+      <div class="stat-value" id="statSuspended">1</div>
+      <div class="stat-desc"><span class="badge badge-state suspended">suspended</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">SANDBOXED</div>
+      <div class="stat-value" id="statSandboxed">1</div>
+      <div class="stat-desc"><span class="badge badge-state sandboxed">sandboxed</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">TERMINATED</div>
+      <div class="stat-value" id="statTerminated">1</div>
+      <div class="stat-desc"><span class="badge badge-state terminated">terminated</span></div>
     </div>
   </section>
+
+  <!-- Active Processes Table -->
+  <div class="card" style="margin-top:24px;">
+    <div class="label" style="font-family: var(--font-mono); font-size: 18px; margin-bottom: 10px;">🟢 Active Processes</div>
+    <table class="table process-table" id="procTable">
+      <thead>
+        <tr>
+          <th>PID</th><th>Name</th><th>Role</th><th>Status</th><th>CPU %</th><th>Memory</th><th>Sandbox</th><th>Threat</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="help">Updated: <span id="procUpdated">—</span></div>
+  </div>
 
   <section class="grid" style="margin-top:20px;">
     <div class="card">
@@ -44,13 +73,61 @@ document.addEventListener('DOMContentLoaded', () => {
   function drawProcs(data){
     $('procUpdated').textContent = data.updated || '—';
     const tb = $('procTable').querySelector('tbody'); tb.innerHTML='';
+    // Count states for stat cards
+    let running=0, suspended=0, sandboxed=0, terminated=0;
     (data.rows||[]).forEach(r=>{
+      // State logic
+      let state = 'running', stateLabel = 'Running', stateClass = 'running';
+      if(r.status==='suspended'){ state='suspended'; stateLabel='Suspended'; stateClass='suspended'; suspended++; }
+      else if(r.status==='sandboxed'){ state='sandboxed'; stateLabel='Sandboxed'; stateClass='sandboxed'; sandboxed++; }
+      else if(r.status==='terminated'){ state='terminated'; stateLabel='Terminated'; stateClass='terminated'; terminated++; }
+      else { running++; }
+
+      // Threat coloring
+      let threat = r.threat||0, threatClass = 'green';
+      if(threat>=40 && threat<70) threatClass='yellow';
+      else if(threat>=70) threatClass='red';
+
+      // Progress bar for CPU
+      const cpuBar = `<span class="progress-bar"><span class="progress" style="width:${Math.min(100, r.cpu||0)}%;background:${threatClass==='red'?'#ff4444':threatClass==='yellow'?'#ffb300':'#00ffd6'}"></span></span> ${(r.cpu||0).toFixed(0)}%`;
+
+      // Role badge
+      const role = r.role||'user';
+      const roleBadge = `<span class="badge badge-role">${role}</span>`;
+
+      // Sandbox badge
+      const sandbox = r.sandbox||'none';
+      const sandboxBadge = `<span class="sandbox-badge">${sandbox}</span>`;
+
+      // Status badge
+      const statusBadge = `<span class="badge badge-state ${stateClass}">${stateLabel}</span>`;
+
+      // Threat badge
+      const threatBadge = `<span class="threat ${threatClass}">${threat}</span>`;
+
       const tr=document.createElement('tr');
-      tr.innerHTML = `<td>${r.pid}</td><td>${r.name}</td><td>${r.user||'—'}</td>
-                      <td class="num">${(r.cpu||0).toFixed(1)}</td><td class="num">${(r.mem_mb||0).toFixed(1)}</td>
-                      <td><span class="badge">${r.isolated ? 'Isolated' : 'Normal'}</span></td>`;
+      tr.innerHTML = `
+        <td>${r.pid}</td>
+        <td>${r.name}</td>
+        <td>${roleBadge}</td>
+        <td>${statusBadge}</td>
+        <td>${cpuBar}</td>
+        <td>${(r.mem_mb||0).toFixed(0)} MB</td>
+        <td>${sandboxBadge}</td>
+        <td>${threatBadge}</td>
+        <td class="actions">
+          <button class="action-btn" title="Isolate"><span>🔒</span></button>
+          <button class="action-btn" title="Terminate"><span>⛔</span></button>
+          <button class="action-btn" title="Details"><span>ℹ️</span></button>
+        </td>
+      `;
       tb.appendChild(tr);
     });
+    // Update stat cards
+    document.getElementById('statRunning').textContent = running;
+    document.getElementById('statSuspended').textContent = suspended;
+    document.getElementById('statSandboxed').textContent = sandboxed;
+    document.getElementById('statTerminated').textContent = terminated;
   }
 
   // Poll for processes

@@ -5,57 +5,115 @@
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>Ethics & Privacy Dashboard</h2>
+    <h1 style="font-size:2.2rem;font-family:var(--font-mono);margin-bottom:0;">Ethics Dashboard</h1>
+    <div style="color:var(--muted);font-size:1.1rem;margin-bottom:18px;">Transparency, fairness &amp; privacy-conscious system monitoring</div>
   </div>
 
-  <section class="grid">
-    <div class="card">
-      <div class="label">Privacy Compliance</div>
-      <p>Data Collection: <span class="good">Minimal</span></p>
-      <p>Consent Status: <span class="good">Obtained</span></p>
-      <p>Retention Policy: <span class="good">Enforced</span></p>
+  <div class="stat-grid" style="margin-bottom:18px;">
+    <div class="stat-card">
+      <div class="stat-label">TOTAL DATA POINTS</div>
+      <div class="stat-value" id="totalDataPoints">--</div>
     </div>
-    <div class="card">
-      <div class="label">AI Ethics</div>
-      <p>Bias Detection: <span class="good">Active</span></p>
-      <p>Transparency: <span class="good">High</span></p>
-      <p>Accountability: <span class="good">Enabled</span></p>
+    <div class="stat-card">
+      <div class="stat-label">ANOMALY FLAGS</div>
+      <div class="stat-value alert-critical" id="anomalyFlags">--</div>
+      <div class="alert-trend" id="anomalyTrend"></div>
     </div>
-    <div class="card">
-      <div class="label">Data Protection</div>
-      <p>Encryption: <span class="good">AES-256</span></p>
-      <p>Access Controls: <span class="good">RBAC</span></p>
-      <p>Audit Trail: <span class="good">Complete</span></p>
+    <div class="stat-card">
+      <div class="stat-label">PRIVACY SCORE</div>
+      <div class="stat-value" id="privacyScore">--</div>
+      <div class="stat-desc" id="privacyDesc"></div>
     </div>
-    <div class="card">
-      <div class="label">Ethical Alerts</div>
-      <div id="ethicalAlerts" class="help">No ethical violations detected</div>
-    </div>
-  </section>
+  </div>
 
-  <section class="grid" style="margin-top:20px;">
-    <div class="card" style="grid-column: span 2;">
-      <div class="label">Privacy Impact Assessment</div>
-      <p>Current Assessment: <span class="good">Low Risk</span></p>
-      <p>Last Review: 2026-03-15</p>
-      <p>Next Review: 2026-06-15</p>
+  <div class="card" style="margin-bottom:24px;">
+    <div class="label" style="font-size:1.2rem;">⚖️ Ethical Computing Principles</div>
+    <div id="ethicsPrinciples"></div>
+  </div>
+
+  <div class="row-2col">
+    <div class="card chart-card">
+      <div class="label">👥 Data Collection by Role</div>
+      <canvas id="roleChart" height="120"></canvas>
     </div>
     <div class="card">
-      <div class="label">User Rights</div>
-      <button class="btn" id="dataRequestBtn">Data Access Request</button>
-      <button class="btn" id="dataDeleteBtn">Data Deletion</button>
+      <div class="label">🔒 Data Handling Policy</div>
+      <div id="policyTable" style="font-family:var(--font-mono);font-size:15px;"></div>
     </div>
-  </section>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-document.addEventListener('DOMContentLoaded', () => {
-  // Ethics specific logic
-  fetch('/api/ai_alerts').then(r=>r.json()).then(data => {
-    document.getElementById('ethicalAlerts').textContent = data.alerts || 'No alerts';
+const principleData = [
+  {label:'Informed Consent',desc:'All data collection is transparent. Users are notified of what is monitored and why.',val:92},
+  {label:'Data Minimization',desc:'Only necessary data is collected. No personal content is stored — only behavioral metadata.',val:88},
+  {label:'Explainability',desc:'AI anomaly detection decisions include confidence scores and reasoning.',val:85},
+  {label:'Fairness',desc:'Monitoring policies apply equally across all user roles. No discriminatory profiling.',val:95},
+  {label:'Right to Access',desc:'Users can view all data collected about them through this dashboard.',val:90}
+];
+const policyRows = [
+  ['Retention Period','30 days rolling window'],
+  ['Encryption','AES-256 at rest, TLS 1.3 in transit'],
+  ['Access Control','Role-based (RBAC) + MAC policies'],
+  ['Anonymization','User IDs hashed in exported reports'],
+  ['Audit Trail','All data access logged with justification'],
+  ['Consent Model','Opt-in with granular permissions']
+];
+
+function renderPrinciples() {
+  return principleData.map(p=>`
+    <div style="margin-bottom:18px;">
+      <div style="display:flex;align-items:center;gap:10px;font-size:1.1rem;font-family:var(--font-mono);font-weight:700;">
+        <span style="color:var(--accent);font-size:1.3rem;">⚖️</span> ${p.label}
+        <span style="margin-left:auto;font-size:1.1rem;color:var(--good);font-weight:900;">${p.val}%</span>
+      </div>
+      <div style="color:var(--muted);font-size:14px;margin-bottom:4px;">${p.desc}</div>
+      <div style="background:var(--accent);height:4px;border-radius:6px;width:${p.val}%;margin-bottom:2px;"></div>
+    </div>
+  `).join('');
+}
+
+function renderPolicyTable() {
+  return '<table style="width:100%;">'+policyRows.map(r=>`<tr><td style="color:var(--muted);padding:2px 8px 2px 0;">${r[0]}</td><td style="color:var(--text);font-weight:700;">${r[1]}</td></tr>`).join('')+'</table>';
+}
+
+async function loadEthicsStats() {
+  // Stat cards (mocked for now)
+  document.getElementById('totalDataPoints').textContent = 37;
+  document.getElementById('anomalyFlags').textContent = 6;
+  document.getElementById('anomalyTrend').textContent = 'AI flagged events only';
+  document.getElementById('privacyScore').textContent = '91%';
+  document.getElementById('privacyDesc').textContent = 'Based on ethical principles compliance';
+
+  // Principles
+  document.getElementById('ethicsPrinciples').innerHTML = renderPrinciples();
+
+  // Policy
+  document.getElementById('policyTable').innerHTML = renderPolicyTable();
+
+  // Chart.js bar chart for role data
+  const ctx = document.getElementById('roleChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['student','guest','admin'],
+      datasets: [{
+        label: 'Data Points',
+        data: [5,4,3],
+        backgroundColor: 'rgba(0,255,176,0.7)',
+        borderRadius: 8
+      }]
+    },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: '#80a080', font: { family: 'Courier New', size: 13 } }, grid: { color: '#222' } }, y: { beginAtZero: true, ticks: { color: '#80a080' }, grid: { color: '#222' } } }
+    }
   });
-});
+}
+
+loadEthicsStats();
 </script>
 {% endblock %}

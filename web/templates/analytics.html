@@ -2,73 +2,202 @@
 
 {% block title %}SAAOE • Analytics{% endblock %}
 
+
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>Real-Time Analytics</h2>
-    <div class="controls">
-      <label class="label">Refresh
-        <select id="refreshMs">
-          <option value="1000">1s</option>
-          <option value="5000">5s</option>
-          <option value="10000" selected>10s</option>
-        </select>
-      </label>
-      <button id="pauseBtn" class="btn">Pause</button>
-    </div>
+    <h2 style="font-family: var(--font-mono); font-size: 2.2rem;">Real-Time Analytics</h2>
+    <span class="label">System metrics, anomaly detection & behavioral analysis</span>
   </div>
 
-  <!-- Top stats + charts -->
-  <section class="grid">
-    <div class="card">
-      <div class="label">CPU Usage (latest)</div>
-      <div class="big" id="cpuNow">--</div>
-      <div class="chart"><canvas id="cpuChart"></canvas></div>
+  <!-- Stat Cards Row -->
+  <section class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-label">AVG CPU</div>
+      <div class="stat-value" id="avgCpu">50.8%</div>
+      <div class="stat-desc"><span class="stat-icon">&#128295;</span></div>
     </div>
-    <div class="card">
-      <div class="label">Memory Usage (latest)</div>
-      <div class="big" id="memNow">--</div>
-      <div class="chart"><canvas id="memChart"></canvas></div>
+    <div class="stat-card">
+      <div class="stat-label">AVG MEMORY</div>
+      <div class="stat-value" id="avgMem">52.2%</div>
+      <div class="stat-desc"><span class="stat-icon">&#128187;</span></div>
     </div>
-    <div class="card">
-      <div class="label">Disk Read / Write (latest)</div>
-      <div class="big" id="diskRW">-- / --</div>
-      <div class="chart"><canvas id="diskChart"></canvas></div>
+    <div class="stat-card">
+      <div class="stat-label">AVG NETWORK</div>
+      <div class="stat-value" id="avgNet">36.0%</div>
+      <div class="stat-desc"><span class="stat-icon">&#128246;</span></div>
     </div>
-    <div class="card">
-      <div class="label">Net RX / TX (latest)</div>
-      <div class="big" id="netNow">-- / --</div>
-      <div class="chart"><canvas id="netChart"></canvas></div>
+    <div class="stat-card">
+      <div class="stat-label">AVG DISK</div>
+      <div class="stat-value" id="avgDisk">37.5%</div>
+      <div class="stat-desc"><span class="stat-icon">&#128190;</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ANOMALIES</div>
+      <div class="stat-value" id="anomalyCount">6</div>
+      <div class="stat-desc"><span class="alert-trend">▲ 18% from last hour</span></div>
     </div>
   </section>
 
-  <section class="grid" style="margin-top:20px;">
+  <!-- Chart Grid -->
+  <section class="grid" style="margin-bottom: 0;">
     <div class="card">
-      <div class="label">Performance Metrics</div>
-      <p>Load Average: <span id="loadAvg">--</span></p>
-      <p>Active Processes: <span id="activeProcs">--</span></p>
+      <div class="label" style="font-family: var(--font-mono); font-size: 18px;">&#128295; Cpu Usage</div>
+      <div class="chart"><canvas id="cpuChart"></canvas></div>
     </div>
     <div class="card">
-      <div class="label">Network Stats</div>
-      <p>Connections: <span id="netConns">--</span></p>
-      <p>Packets: <span id="packets">--</span></p>
+      <div class="label" style="font-family: var(--font-mono); font-size: 18px;">&#128187; Memory Usage</div>
+      <div class="chart"><canvas id="memChart"></canvas></div>
     </div>
     <div class="card">
-      <div class="label">Storage</div>
-      <p>Free Space: <span id="freeSpace">--</span> GB</p>
-      <p>I/O Operations: <span id="ioOps">--</span></p>
+      <div class="label" style="font-family: var(--font-mono); font-size: 18px;">&#128246; Network Usage</div>
+      <div class="chart"><canvas id="netChart"></canvas></div>
     </div>
     <div class="card">
-      <div class="label">System Uptime</div>
-      <p><span id="uptime">--</span></p>
+      <div class="label" style="font-family: var(--font-mono); font-size: 18px;">&#128190; Disk Usage</div>
+      <div class="chart"><canvas id="diskChart"></canvas></div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-top: 0;">
+    <div class="card" style="grid-column: span 2;">
+      <div class="label" style="font-family: var(--font-mono); font-size: 18px;">&#9888;&#65039; Anomaly Score Distribution</div>
+      <div class="chart"><canvas id="anomalyChart"></canvas></div>
+    </div>
+    <div class="card" style="grid-column: span 2;">
+      <div class="label" style="font-family: var(--font-mono); font-size: 18px;">&#128200; Metrics by User Role</div>
+      <div class="chart"><canvas id="roleChart"></canvas></div>
     </div>
   </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-// Simplified version of dashboard charts
-// Include chart logic here
+document.addEventListener('DOMContentLoaded', () => {
+  const colors = {
+    cpu: '#00ffd6', mem: '#00bfff', net: '#ffb300', disk: '#7c5fff',
+    anomaly: '#ff4444', anomalyGood: '#00ffb0', roleTotal: '#00ffb0', roleAnom: '#ff4444'
+  };
+
+  // Chart.js instances
+  let cpuChart, memChart, netChart, diskChart, anomalyChart, roleChart;
+
+  // Helper: update stat card
+  function setStat(id, value, suffix = '') {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value + suffix;
+  }
+
+  // Helper: fetch and update all
+  async function updateAnalytics() {
+    // CPU & Memory
+    const usage = await fetch('/api/usage').then(r=>r.json());
+    const cpu = usage.cpu || [];
+    const mem = usage.memory || [];
+    const ts = usage.timestamps || [];
+    setStat('avgCpu', cpu.length ? (cpu.reduce((a,b)=>a+b,0)/cpu.length).toFixed(1) : '--', '%');
+    setStat('avgMem', mem.length ? (mem.reduce((a,b)=>a+b,0)/mem.length).toFixed(1) : '--', '%');
+    if (cpuChart) {
+      cpuChart.data.labels = ts;
+      cpuChart.data.datasets[0].data = cpu;
+      cpuChart.update('none');
+    }
+    if (memChart) {
+      memChart.data.labels = ts;
+      memChart.data.datasets[0].data = mem;
+      memChart.update('none');
+    }
+
+    // Disk
+    const disk = await fetch('/api/disk').then(r=>r.json());
+    setStat('avgDisk', disk.read && disk.read.length ? (disk.read.reduce((a,b)=>a+b,0)/disk.read.length).toFixed(1) : '--', '%');
+    if (diskChart) {
+      diskChart.data.labels = disk.timestamps;
+      diskChart.data.datasets[0].data = disk.read;
+      diskChart.data.datasets[1].data = disk.write;
+      diskChart.update('none');
+    }
+
+    // Network
+    const net = await fetch('/api/net').then(r=>r.json());
+    setStat('avgNet', net.rx && net.rx.length ? (net.rx.reduce((a,b)=>a+b,0)/net.rx.length).toFixed(1) : '--', '%');
+    if (netChart) {
+      netChart.data.labels = net.timestamps;
+      netChart.data.datasets[0].data = net.rx;
+      netChart.data.datasets[1].data = net.tx;
+      netChart.update('none');
+    }
+
+    // Anomalies
+    const anomalies = await fetch('/api/anomalies').then(r=>r.json());
+    setStat('anomalyCount', anomalies.anomalies ? anomalies.anomalies.length : 0);
+    if (anomalyChart) {
+      // Map anomalies to scatter points
+      const normal = [], anomalyPts = [];
+      (anomalies.anomalies||[]).forEach(a => {
+        if (a.severity === 'critical' || a.severity === 'high') anomalyPts.push({x: Date.parse(a.timestamp), y: a.confidence||0.8});
+        else normal.push({x: Date.parse(a.timestamp), y: a.confidence||0.2});
+      });
+      anomalyChart.data.datasets[0].data = normal;
+      anomalyChart.data.datasets[1].data = anomalyPts;
+      anomalyChart.update('none');
+    }
+
+    // User Role Metrics (from /api/procs)
+    const procs = await fetch('/api/procs?limit=100').then(r=>r.json());
+    const roleMap = {};
+    (procs.rows||[]).forEach(p => {
+      const role = p.role || 'other';
+      if (!roleMap[role]) roleMap[role] = {total:0, anomalies:0};
+      roleMap[role].total++;
+      if ((p.threat||0) > 40) roleMap[role].anomalies++;
+    });
+    const roles = Object.keys(roleMap);
+    if (roleChart) {
+      roleChart.data.labels = roles;
+      roleChart.data.datasets[0].data = roles.map(r=>roleMap[r].total);
+      roleChart.data.datasets[1].data = roles.map(r=>roleMap[r].anomalies);
+      roleChart.update('none');
+    }
+  }
+
+  // Chart.js setup
+  cpuChart = new Chart(document.getElementById('cpuChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'CPU Usage', data: [], borderColor: colors.cpu, backgroundColor: 'rgba(0,255,214,0.10)', fill: true, tension: 0.35, pointRadius: 0 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#80a080' }, grid: { color: '#222' } }, y: { beginAtZero: true, ticks: { color: '#80a080' }, grid: { color: '#222' } } } }
+  });
+  memChart = new Chart(document.getElementById('memChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'Memory Usage', data: [], borderColor: colors.mem, backgroundColor: 'rgba(0,191,255,0.10)', fill: true, tension: 0.35, pointRadius: 0 }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#80a080' }, grid: { color: '#222' } }, y: { beginAtZero: true, ticks: { color: '#80a080' }, grid: { color: '#222' } } } }
+  });
+  netChart = new Chart(document.getElementById('netChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [ { label: 'RX', data: [], borderColor: colors.net, backgroundColor: 'rgba(255,179,0,0.10)', fill: true, tension: 0.35, pointRadius: 0 }, { label: 'TX', data: [], borderColor: '#ffb30099', backgroundColor: 'rgba(255,179,0,0.05)', fill: true, tension: 0.35, pointRadius: 0 } ] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#80a080' }, grid: { color: '#222' } }, y: { beginAtZero: true, ticks: { color: '#80a080' }, grid: { color: '#222' } } } }
+  });
+  diskChart = new Chart(document.getElementById('diskChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [ { label: 'Read', data: [], borderColor: colors.disk, backgroundColor: 'rgba(124,95,255,0.10)', fill: true, tension: 0.35, pointRadius: 0 }, { label: 'Write', data: [], borderColor: '#7c5fff99', backgroundColor: 'rgba(124,95,255,0.05)', fill: true, tension: 0.35, pointRadius: 0 } ] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#80a080' }, grid: { color: '#222' } }, y: { beginAtZero: true, ticks: { color: '#80a080' }, grid: { color: '#222' } } } }
+  });
+  anomalyChart = new Chart(document.getElementById('anomalyChart').getContext('2d'), {
+    type: 'scatter',
+    data: { datasets: [ { label: 'Normal', data: [], backgroundColor: colors.anomalyGood }, { label: 'Anomaly', data: [], backgroundColor: colors.anomaly } ] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { title: { display: false }, ticks: { color: '#80a080' }, grid: { color: '#222' } }, y: { min: 0, max: 1, title: { display: false }, ticks: { color: '#80a080' }, grid: { color: '#222' } } } }
+  });
+  roleChart = new Chart(document.getElementById('roleChart').getContext('2d'), {
+    type: 'bar',
+    data: { labels: [], datasets: [ { label: 'Total', data: [], backgroundColor: colors.roleTotal }, { label: 'Anomalies', data: [], backgroundColor: colors.roleAnom } ] },
+    options: { plugins: { legend: { display: true, labels: { color: '#80a080', font: { family: 'Courier New', size: 13 } } } }, scales: { x: { ticks: { color: '#80a080' }, grid: { color: '#222' } }, y: { beginAtZero: true, ticks: { color: '#80a080' }, grid: { color: '#222' } } } }
+  });
+
+  // Polling
+  updateAnalytics();
+  setInterval(updateAnalytics, 10000);
+});
 </script>
 {% endblock %}

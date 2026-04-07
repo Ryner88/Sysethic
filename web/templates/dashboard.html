@@ -2,70 +2,107 @@
 
 {% block title %}SAAOE • Dashboard{% endblock %}
 
+
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>Dashboard Overview</h2>
-    <div class="controls" role="toolbar" aria-label="Dashboard controls">
-      <label class="label">Refresh
-        <select id="refreshMs" aria-label="Refresh interval">
-          <option value="1000">1s</option>
-          <option value="5000">5s</option>
-          <option value="10000">10s</option>
-          <option value="60000" selected>1m</option>
-        </select>
-      </label>
-      <label class="label">Chart height
-        <select id="chartSize" aria-label="Chart height">
-          <option value="64">Large (64px)</option>
-          <option value="80" selected>XL (80px)</option>
-          <option value="120">XXL (120px)</option>
-          <option value="160">Ultra (160px)</option>
-        </select>
-      </label>
-      <label class="label"><input id="autoScale" type="checkbox" checked /> Auto-scale</label>
-      <label class="label">Density
-        <select id="density" aria-label="Density">
-          <option value="ultra">Ultra</option>
-          <option value="compact">Compact</option>
-          <option value="normal" selected>Normal</option>
-        </select>
-      </label>
-      <button id="zoomAllBtn" class="btn" aria-label="Zoom all charts">Zoom All</button>
-      <button id="pauseBtn" class="btn" aria-label="Pause updates">Pause</button>
-      <button id="exportBtn" class="btn" aria-label="Export CSV">Export CSV</button>
-      <button id="themeToggle" class="btn" aria-label="Toggle theme">Toggle Theme</button>
-      <button id="toggleMode" class="btn" aria-label="Toggle mock/live">Use MOCK</button>
-      <span id="lastUpdated" class="label">—</span>
-    </div>
+    <h2>System Overview</h2>
+    <span class="label">Real-time monitoring & anomaly detection</span>
   </div>
 
-    <!-- Top stats + charts -->
-    <section class="grid">
-      <div class="card">
-        <div class="label">CPU Usage (latest)</div>
-        <div class="big" id="cpuNow">--</div>
-        <div id="cpuWrap" class="chart" title="Double-click to zoom"><canvas id="cpuChart"></canvas></div>
-      </div>
+  <!-- Stat Cards Row -->
+  <section class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-label">ACTIVE PROCESSES</div>
+      <div class="stat-value" id="activeProcesses">6</div>
+      <div class="stat-desc">9 total tracked</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">OPEN ALERTS</div>
+      <div class="stat-value alert-critical" id="openAlerts">4</div>
+      <div class="stat-desc"><span class="alert-trend">▲ 12% from last hour</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ANOMALIES DETECTED</div>
+      <div class="stat-value" id="anomaliesDetected">6</div>
+      <div class="stat-desc">AI-flagged events</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">AUDIT EVENTS</div>
+      <div class="stat-value" id="auditEvents">12</div>
+      <div class="stat-desc">Last 20 events</div>
+    </div>
+  </section>
 
-      <div class="card">
-        <div class="label">Memory Usage (latest)</div>
-        <div class="big" id="memNow">--</div>
-        <div id="memWrap" class="chart" title="Double-click to zoom"><canvas id="memChart"></canvas></div>
+  <!-- Charts Row -->
+  <section class="chart-row">
+    <div class="card chart-card">
+      <div class="label">CPU Usage Timeline</div>
+      <div class="chart" style="height:180px"><canvas id="cpuTimelineChart"></canvas></div>
+    </div>
+    <div class="card chart-card">
+      <div class="label">Alert Severity</div>
+      <div class="donut-chart"><canvas id="alertSeverityChart"></canvas></div>
+      <div class="donut-legend">
+        <span class="legend-dot high"></span> High (2)
+        <span class="legend-dot critical"></span> Critical (2)
+        <span class="legend-dot medium"></span> Medium (2)
+        <span class="legend-dot low"></span> Low (1)
       </div>
+    </div>
+  </section>
 
-      <div class="card">
-        <div class="label">Disk Read / Write (latest)</div>
-        <div class="big" id="diskRW">-- / --</div>
-        <div id="diskWrap" class="chart" title="Double-click to zoom"><canvas id="diskChart"></canvas></div>
+  <!-- Alerts & Audit Events Row -->
+  <section class="row-2col">
+    <div class="card alert-list">
+      <div class="label">Recent Alerts</div>
+      <div class="alert-item high">
+        <span class="alert-badge high">high</span>
+        Unusual CPU spike detected on guest process curl-download
+        <span class="alert-status open">open</span>
       </div>
+      <div class="alert-item critical">
+        <span class="alert-badge critical">critical</span>
+        Unknown binary attempted to access /etc/shadow
+        <span class="alert-status open">open</span>
+      </div>
+      <div class="alert-item high">
+        <span class="alert-badge high">high</span>
+        Multiple failed SSH login attempts from 192.16...
+        <span class="alert-status investigating">investigating</span>
+      </div>
+      <div class="alert-item medium">
+        <span class="alert-badge medium">medium</span>
+        Large outbound data transfer detected from student
+        <span class="alert-status">open</span>
+      </div>
+      <div class="alert-item low">
+        <span class="alert-badge low">low</span>
+        Guest user attempted to install unauthorized package
+        <span class="alert-status resolved">resolved</span>
+      </div>
+    </div>
+    <div class="card audit-list">
+      <div class="label">Recent Audit Events</div>
+      <div class="audit-item allowed">
+        <span class="audit-badge allowed">allowed</span> process spawn <span class="audit-info">info</span>
+      </div>
+      <div class="audit-item flagged">
+        <span class="audit-badge flagged">flagged</span> network access <span class="audit-info">warning</span>
+      </div>
+      <div class="audit-item denied">
+        <span class="audit-badge denied">denied</span> file access <span class="audit-info critical">critical</span>
+      </div>
+      <div class="audit-item denied">
+        <span class="audit-badge denied">denied</span> privilege escalation <span class="audit-info critical">critical</span>
+      </div>
+      <div class="audit-item allowed">
+        <span class="audit-badge allowed">allowed</span> file access <span class="audit-info">info</span>
+      </div>
+    </div>
+  </section>
 
-      <div class="card">
-        <div class="label">Net RX / TX (latest)</div>
-        <div class="big" id="netNow">-- / --</div>
-        <div id="netWrap" class="chart" title="Double-click to zoom"><canvas id="netChart"></canvas></div>
-      </div>
-    </section>
+  <!-- ...existing code... (keep the rest of the dashboard as is) -->
 
     <!-- Processes / temps / gpu -->
     <section class="grid" style="margin-top:10px;">
@@ -171,6 +208,77 @@
   <script src="https://threejs.org/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
+      // --- Custom Dashboard Charts ---
+      let cpuTimelineChart, alertSeverityChart;
+      function makeDashboardCharts() {
+        // CPU Timeline (Line)
+        const cpuTimelineCtx = document.getElementById('cpuTimelineChart').getContext('2d');
+        cpuTimelineChart = new Chart(cpuTimelineCtx, {
+          type: 'line',
+          data: {
+            labels: [],
+            datasets: [{
+              label: 'CPU %',
+              data: [],
+              borderColor: '#00ffd6',
+              backgroundColor: 'rgba(0,255,214,0.08)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 0
+            }]
+          },
+          options: {
+            animation: false,
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { color: '#80a080', font: { size: 11 } }, grid: { color: '#222' } },
+              y: { beginAtZero: true, suggestedMax: 100, ticks: { color: '#80a080', font: { size: 11 } }, grid: { color: '#222' } }
+            }
+          }
+        });
+
+        // Alert Severity (Donut)
+        const alertSeverityCtx = document.getElementById('alertSeverityChart').getContext('2d');
+        alertSeverityChart = new Chart(alertSeverityCtx, {
+          type: 'doughnut',
+          data: {
+            labels: ['High', 'Critical', 'Medium', 'Low'],
+            datasets: [{
+              data: [2, 2, 2, 1],
+              backgroundColor: ['#00e0c6', '#ff4444', '#ffb300', '#7c5fff'],
+              borderWidth: 0
+            }]
+          },
+          options: {
+            cutout: '70%',
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: function(ctx) {
+                    return ctx.label + ': ' + ctx.parsed + ' alerts';
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
+
+      // Update dashboard charts with new data
+      function updateDashboardCharts() {
+        // CPU Timeline
+        if (cpuTimelineChart) {
+          cpuTimelineChart.data.labels = series.t.slice();
+          cpuTimelineChart.data.datasets[0].data = series.cpu.slice();
+          cpuTimelineChart.update('none');
+        }
+        // Alert Severity (static demo, could be dynamic)
+        // alertSeverityChart.data.datasets[0].data = [2, 2, 2, 1]; // Example
+        // alertSeverityChart.update('none');
+      }
   document.addEventListener('DOMContentLoaded', () => {
     const root = document.documentElement;
     const $ = (id) => document.getElementById(id);
@@ -439,12 +547,14 @@
       draw();
       const lbl=last(series.t);
       pushCharts(lbl,last(series.cpu),last(series.memory),last(series.read),last(series.write),last(series.rx),last(series.tx));
+      updateDashboardCharts();
     }
 
     // Init charts
     makeCharts({cpu:$('cpuChart').getContext('2d'), mem:$('memChart').getContext('2d'),
-                disk:$('diskChart').getContext('2d'), net:$('netChart').getContext('2d')});
+          disk:$('diskChart').getContext('2d'), net:$('netChart').getContext('2d')});
     applyChartTheme();
+    makeDashboardCharts();
 
     // Controls
     const sel=$('refreshMs'); startPolling(+sel.value);
