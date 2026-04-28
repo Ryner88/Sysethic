@@ -765,6 +765,35 @@ def api_visualization_lab():
     mem_values = list(mem_series)
     rx_values = list(rx_series)
     tx_values = list(tx_series)
+    cpu_mean = statistics.mean(cpu_values) if cpu_values else 0.0
+    cpu_std = statistics.stdev(cpu_values) if len(set(cpu_values)) > 1 else 0.0
+    mem_mean = statistics.mean(mem_values) if mem_values else 0.0
+    mem_std = statistics.stdev(mem_values) if len(set(mem_values)) > 1 else 0.0
+
+    def visualization_risk(cpu, memory, rx, tx):
+        composite = min(100.0, (cpu * 0.45) + (memory * 0.35) + ((rx + tx) * 8.0))
+        relative_score = 0.0
+        if cpu_std:
+            relative_score = max(relative_score, min(100.0, ((cpu - cpu_mean) / cpu_std) * 35.0))
+        if mem_std:
+            relative_score = max(relative_score, min(100.0, ((memory - mem_mean) / mem_std) * 35.0))
+
+        threshold_score = 0.0
+        if cpu >= 90 or memory >= 90:
+            threshold_score = 90.0
+        elif cpu >= 75 or memory >= 85:
+            threshold_score = 70.0
+        elif cpu >= 55 or memory >= 70:
+            threshold_score = 45.0
+
+        score = max(composite, relative_score, threshold_score)
+        if score >= 85:
+            return score, 'critical'
+        if score >= 65:
+            return score, 'high'
+        if score >= 40:
+            return score, 'medium'
+        return score, 'low'
 
     for i, timestamp in enumerate(timestamps):
         cpu = float(cpu_values[i]) if i < len(cpu_values) else 0.0
@@ -772,7 +801,7 @@ def api_visualization_lab():
         rx = float(rx_values[i]) if i < len(rx_values) else 0.0
         tx = float(tx_values[i]) if i < len(tx_values) else 0.0
 
-        anomaly_score = min(100.0, (cpu * 0.45) + (memory * 0.35) + ((rx + tx) * 8.0))
+        anomaly_score, risk_level = visualization_risk(cpu, memory, rx, tx)
 
         points.append({
             'timestamp': timestamp,
@@ -780,12 +809,7 @@ def api_visualization_lab():
             'memory': round(memory, 2),
             'network': round(rx + tx, 4),
             'anomaly_score': round(anomaly_score, 2),
-            'risk_level': (
-                'critical' if anomaly_score >= 85 else
-                'high' if anomaly_score >= 65 else
-                'medium' if anomaly_score >= 40 else
-                'low'
-            )
+            'risk_level': risk_level
         })
 
     heatmap = []
