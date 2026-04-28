@@ -17,6 +17,8 @@ Secure Autonomous Autonomous Operating Environment Monitor
 
 ## Architecture
 
+See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams.
+
 ### Entities
 - **AuditLog**: System and user activity logs
 - **SystemMetric**: Performance and resource metrics
