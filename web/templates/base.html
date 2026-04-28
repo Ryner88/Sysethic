@@ -17,6 +17,7 @@
         <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">📊 Dashboard</a></li>
         <li><a href="{{ url_for('processes') }}" class="{% if request.endpoint == 'processes' %}active{% endif %}">🔒 Processes</a></li>
         <li><a href="{{ url_for('analytics') }}" class="{% if request.endpoint == 'analytics' %}active{% endif %}">📈 Analytics</a></li>
+        <li><a href="{{ url_for('visualization_lab') }}" class="{% if request.endpoint == 'visualization_lab' %}active{% endif %}">🧪 Visualization Lab</a></li>
         <li><a href="{{ url_for('threat_trends_page') }}" class="{% if request.endpoint == 'threat_trends_page' %}active{% endif %}">📉 Threat Trends</a></li>
         <li><a href="{{ url_for('assets_page') }}" class="{% if request.endpoint == 'assets_page' %}active{% endif %}">🖥️ Assets</a></li>
         <li><a href="{{ url_for('playbooks_page') }}" class="{% if request.endpoint == 'playbooks_page' %}active{% endif %}">🛠️ Playbooks</a></li>

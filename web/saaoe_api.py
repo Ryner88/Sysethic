@@ -214,6 +214,10 @@ def processes():
 def analytics():
     return render_template('analytics.html')
 
+@app.route('/visualization-lab')
+def visualization_lab():
+    return render_template('visualization_lab.html')
+
 @app.route('/security')
 def security():
     return render_template('security.html')
@@ -241,6 +245,82 @@ def api_disk():
 @app.route('/api/net')
 def api_net():
     return jsonify({'rx': list(rx_series), 'tx': list(tx_series), 'timestamps': list(net_ts)})
+
+@app.route('/api/visualization_lab')
+def api_visualization_lab():
+    """
+    Aggregates SAAOE system metrics into a visualization-friendly payload.
+    This powers the Visualization Lab timeline, heatmap, scatterplot, and replay views.
+    """
+    usage = {
+        'cpu': list(cpu_series),
+        'memory': list(mem_series),
+        'timestamps': list(usage_ts)
+    }
+
+    disk = {
+        'read': list(read_series),
+        'write': list(write_series),
+        'timestamps': list(disk_ts)
+    }
+
+    net = {
+        'rx': list(rx_series),
+        'tx': list(tx_series),
+        'timestamps': list(net_ts)
+    }
+
+    points = []
+    timestamps = list(usage_ts)
+    cpu_values = list(cpu_series)
+    mem_values = list(mem_series)
+    rx_values = list(rx_series)
+    tx_values = list(tx_series)
+
+    for i, timestamp in enumerate(timestamps):
+        cpu = float(cpu_values[i]) if i < len(cpu_values) else 0.0
+        memory = float(mem_values[i]) if i < len(mem_values) else 0.0
+        rx = float(rx_values[i]) if i < len(rx_values) else 0.0
+        tx = float(tx_values[i]) if i < len(tx_values) else 0.0
+
+        anomaly_score = min(100.0, (cpu * 0.45) + (memory * 0.35) + ((rx + tx) * 8.0))
+
+        points.append({
+            'timestamp': timestamp,
+            'cpu': round(cpu, 2),
+            'memory': round(memory, 2),
+            'network': round(rx + tx, 4),
+            'anomaly_score': round(anomaly_score, 2),
+            'risk_level': (
+                'critical' if anomaly_score >= 85 else
+                'high' if anomaly_score >= 65 else
+                'medium' if anomaly_score >= 40 else
+                'low'
+            )
+        })
+
+    heatmap = []
+    for point in points[-60:]:
+        heatmap.append({
+            'label': point['timestamp'],
+            'value': point['anomaly_score'],
+            'risk_level': point['risk_level']
+        })
+
+    return jsonify({
+        'usage': usage,
+        'disk': disk,
+        'net': net,
+        'points': points,
+        'heatmap': heatmap,
+        'summary': {
+            'samples': len(points),
+            'latest_cpu': cpu_values[-1] if cpu_values else 0,
+            'latest_memory': mem_values[-1] if mem_values else 0,
+            'latest_anomaly_score': points[-1]['anomaly_score'] if points else 0,
+            'critical_windows': len([p for p in points if p['risk_level'] == 'critical'])
+        }
+    })
 
 @app.route('/api/procs/top')
 def api_procs_top():
