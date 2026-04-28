@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Anomaly Detail{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <div>
+      <h2>Anomaly Detail</h2>
+      <div class="label" id="detailSubtitle">Loading...</div>
+    </div>
+    <a class="btn" href="{{ url_for('anomalies_page') }}">Back</a>
+  </div>
+  <section class="stat-grid" id="detailStats"></section>
+  <section class="card" style="margin-top:14px;">
+    <div class="label">Root Cause Timeline</div>
+    <div class="timeline" id="timeline"></div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const anomalyId = {{ anomaly_id|tojson }};
+fetch(`/api/anomalies/${anomalyId}`).then(r=>r.json()).then(data => {
+  const a = data.anomaly;
+  document.getElementById('detailSubtitle').textContent = `${a.severity} ${a.metric} at ${new Date(a.timestamp).toLocaleString()}`;
+  document.getElementById('detailStats').innerHTML = `
+    <div class="stat-card"><div class="stat-label">VALUE</div><div class="stat-value">${a.value.toFixed(2)}</div></div>
+    <div class="stat-card"><div class="stat-label">RISK SCORE</div><div class="stat-value">${a.risk_score}</div></div>
+    <div class="stat-card"><div class="stat-label">INDICATOR</div><div class="stat-value" style="font-size:1.1rem;">${a.indicator}</div></div>
+    <div class="stat-card"><div class="stat-label">FRAMEWORKS</div><div class="stat-value" style="font-size:1rem;">${a.frameworks.slice(0,2).join(', ')}</div></div>`;
+  document.getElementById('timeline').innerHTML = data.timeline.map(e => `
+    <div class="timeline-item ${e.lane}">
+      <div class="timeline-time">${new Date(e.time).toLocaleTimeString()}</div>
+      <div><strong>${e.title}</strong><p>${e.detail}</p></div>
+    </div>`).join('');
+});
+</script>
+{% endblock %}

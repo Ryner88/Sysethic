@@ -65,14 +65,6 @@ function badgeClass(level) {
   return 'badge';
 }
 
-const mockFiles = [
-  {filename:'security.conf',path:'/etc/saaoe/security.conf',sensitivity:'restricted',owner:'admin',mac:'owner only',accesses:3},
-  {filename:'audit.log',path:'/var/log/saaoe/audit.log',sensitivity:'confidential',owner:'admin',mac:'read only',accesses:12},
-  {filename:'ml-dataset.csv',path:'/home/student/data/ml-dataset.csv',sensitivity:'internal',owner:'student',mac:'read write',accesses:8},
-  {filename:'README.md',path:'/home/shared/docs/README.md',sensitivity:'public',owner:'admin',mac:'read only',accesses:45},
-  {filename:'user_credentials.db',path:'/etc/saaoe/credentials/user_credentials.db',sensitivity:'restricted',owner:'admin',mac:'owner only',accesses:1}
-];
-
 function renderFileRow(f) {
   return `<tr>
     <td style="font-family:var(--font-mono);font-size:14px;">${f.filename}</td>
@@ -85,9 +77,10 @@ function renderFileRow(f) {
   </tr>`;
 }
 
-function loadFiles() {
-  // In real app, fetch('/api/files/access') and process response
-  const files = mockFiles; // Replace with API data
+async function loadFiles() {
+  const res = await fetch('/api/files/access');
+  const data = await res.json();
+  const files = data.access || [];
   // Stat cards
   document.getElementById('publicCount').textContent = files.filter(f=>f.sensitivity==='public').length;
   document.getElementById('internalCount').textContent = files.filter(f=>f.sensitivity==='internal').length;
@@ -97,7 +90,7 @@ function loadFiles() {
   const level = document.getElementById('levelFilter').value;
   const filtered = level ? files.filter(f=>f.sensitivity===level) : files;
   // Table
-  document.getElementById('fileTable').querySelector('tbody').innerHTML = filtered.map(renderFileRow).join('');
+  document.getElementById('fileTable').querySelector('tbody').innerHTML = filtered.length ? filtered.map(renderFileRow).join('') : '<tr><td colspan="7">No files found.</td></tr>';
   document.getElementById('fileCount').textContent = filtered.length;
 }
 

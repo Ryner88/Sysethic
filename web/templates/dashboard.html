@@ -14,24 +14,45 @@
   <section class="stat-grid">
     <div class="stat-card">
       <div class="stat-label">ACTIVE PROCESSES</div>
-      <div class="stat-value" id="activeProcesses">6</div>
-      <div class="stat-desc">9 total tracked</div>
+      <div class="stat-value" id="activeProcesses">--</div>
+      <div class="stat-desc">Live process count</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">OPEN ALERTS</div>
-      <div class="stat-value alert-critical" id="openAlerts">4</div>
-      <div class="stat-desc"><span class="alert-trend">▲ 12% from last hour</span></div>
+      <div class="stat-value alert-critical" id="openAlerts">--</div>
+      <div class="stat-desc"><span class="alert-trend" id="openAlertTrend">Telemetry derived</span></div>
     </div>
     <div class="stat-card">
       <div class="stat-label">ANOMALIES DETECTED</div>
-      <div class="stat-value" id="anomaliesDetected">6</div>
+      <div class="stat-value" id="anomaliesDetected">--</div>
       <div class="stat-desc">AI-flagged events</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">AUDIT EVENTS</div>
-      <div class="stat-value" id="auditEvents">12</div>
+      <div class="stat-value" id="auditEvents">--</div>
       <div class="stat-desc">Last 20 events</div>
     </div>
+  </section>
+
+  <section class="card local-machine-card">
+    <div class="local-machine-head">
+      <div>
+        <div class="label">Detected Computer</div>
+        <div class="local-machine-title" id="localHostName">--</div>
+      </div>
+      <div class="label" id="localDetectedAt">--</div>
+    </div>
+    <div class="local-machine-grid">
+      <div><span>Platform</span><strong id="localPlatform">--</strong></div>
+      <div><span>Local IPs</span><strong id="localIps">--</strong></div>
+      <div><span>CPU</span><strong id="localCpu">--</strong></div>
+      <div><span>Memory</span><strong id="localMemory">--</strong></div>
+      <div><span>Disk</span><strong id="localDisk">--</strong></div>
+      <div><span>Processes</span><strong id="localProcesses">--</strong></div>
+      <div><span>Users</span><strong id="localUsers">--</strong></div>
+      <div><span>Network</span><strong id="localNetwork">--</strong></div>
+    </div>
+    <div class="local-connection-list" id="localConnections"></div>
   </section>
 
   <!-- Charts Row -->
@@ -43,62 +64,19 @@
     <div class="card chart-card">
       <div class="label">Alert Severity</div>
       <div class="donut-chart"><canvas id="alertSeverityChart"></canvas></div>
-      <div class="donut-legend">
-        <span class="legend-dot high"></span> High (2)
-        <span class="legend-dot critical"></span> Critical (2)
-        <span class="legend-dot medium"></span> Medium (2)
-        <span class="legend-dot low"></span> Low (1)
-      </div>
+      <div class="donut-legend" id="severityLegend"></div>
     </div>
   </section>
 
   <!-- Alerts & Audit Events Row -->
   <section class="row-2col">
-    <div class="card alert-list">
+    <div class="card alert-list" id="dashboardAlertList">
       <div class="label">Recent Alerts</div>
-      <div class="alert-item high">
-        <span class="alert-badge high">high</span>
-        Unusual CPU spike detected on guest process curl-download
-        <span class="alert-status open">open</span>
-      </div>
-      <div class="alert-item critical">
-        <span class="alert-badge critical">critical</span>
-        Unknown binary attempted to access /etc/shadow
-        <span class="alert-status open">open</span>
-      </div>
-      <div class="alert-item high">
-        <span class="alert-badge high">high</span>
-        Multiple failed SSH login attempts from 192.16...
-        <span class="alert-status investigating">investigating</span>
-      </div>
-      <div class="alert-item medium">
-        <span class="alert-badge medium">medium</span>
-        Large outbound data transfer detected from student
-        <span class="alert-status">open</span>
-      </div>
-      <div class="alert-item low">
-        <span class="alert-badge low">low</span>
-        Guest user attempted to install unauthorized package
-        <span class="alert-status resolved">resolved</span>
-      </div>
+      <div class="label">Loading telemetry alerts...</div>
     </div>
-    <div class="card audit-list">
+    <div class="card audit-list" id="dashboardAuditList">
       <div class="label">Recent Audit Events</div>
-      <div class="audit-item allowed">
-        <span class="audit-badge allowed">allowed</span> process spawn <span class="audit-info">info</span>
-      </div>
-      <div class="audit-item flagged">
-        <span class="audit-badge flagged">flagged</span> network access <span class="audit-info">warning</span>
-      </div>
-      <div class="audit-item denied">
-        <span class="audit-badge denied">denied</span> file access <span class="audit-info critical">critical</span>
-      </div>
-      <div class="audit-item denied">
-        <span class="audit-badge denied">denied</span> privilege escalation <span class="audit-info critical">critical</span>
-      </div>
-      <div class="audit-item allowed">
-        <span class="audit-badge allowed">allowed</span> file access <span class="audit-info">info</span>
-      </div>
+      <div class="label">Loading telemetry audit events...</div>
     </div>
   </section>
 
@@ -246,7 +224,7 @@
           data: {
             labels: ['High', 'Critical', 'Medium', 'Low'],
             datasets: [{
-              data: [2, 2, 2, 1],
+              data: [0, 0, 0, 0],
               backgroundColor: ['#00e0c6', '#ff4444', '#ffb300', '#7c5fff'],
               borderWidth: 0
             }]
@@ -275,9 +253,6 @@
           cpuTimelineChart.data.datasets[0].data = series.cpu.slice();
           cpuTimelineChart.update('none');
         }
-        // Alert Severity (static demo, could be dynamic)
-        // alertSeverityChart.data.datasets[0].data = [2, 2, 2, 1]; // Example
-        // alertSeverityChart.update('none');
       }
   document.addEventListener('DOMContentLoaded', () => {
     const root = document.documentElement;
@@ -451,18 +426,32 @@
       $('lastUpdated').textContent = 'Last updated ' + new Date().toLocaleTimeString();
     }
 
-    // --- LIVE / MOCK data ---
-    let mode='live', paused=false, timer=null;
-    let mock={cpu:8,mem:19.5,read:0,write:0,rx:0,tx:0};
-    function stepMock(){
-      mock.cpu = clamp(mock.cpu+(Math.random()-0.5)*3,0,100);
-      mock.mem = clamp(mock.mem+(Math.random()-0.5)*0.3,12,30);
-      const sd=Math.random()<0.06, sn=Math.random()<0.08;
-      mock.read = sd?Math.random()*20:Math.random()*0.3;
-      mock.write= sd?Math.random()*15:Math.random()*0.25;
-      mock.rx   = sn?Math.random()*10:Math.random()*0.25;
-      mock.tx   = sn?Math.random()*10:Math.random()*0.25;
+    function fmtUptime(seconds){
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      return `${days}d ${hours}h ${minutes}m`;
     }
+
+    function drawLocalMachine(data){
+      $('localHostName').textContent = data.hostname || '--';
+      $('localDetectedAt').textContent = data.detected_at ? `Detected ${new Date(data.detected_at).toLocaleTimeString()}` : '--';
+      $('localPlatform').textContent = data.platform || '--';
+      const addresses = (data.network?.addresses || []).filter(a => !a.is_loopback).map(a => `${a.interface}: ${a.address}`);
+      $('localIps').textContent = addresses.length ? addresses.join(', ') : 'loopback only';
+      $('localCpu').textContent = `${fmt(data.cpu?.percent,1)}% · ${data.cpu?.cores_logical || '--'} cores`;
+      $('localMemory').textContent = `${fmt(data.memory?.percent,1)}% · ${data.memory?.used_gb}/${data.memory?.total_gb} GB`;
+      $('localDisk').textContent = `${fmt(data.disk?.percent,1)}% · ${data.disk?.used_gb}/${data.disk?.total_gb} GB`;
+      $('localProcesses').textContent = `${data.processes?.count || 0} running`;
+      $('localUsers').textContent = (data.users || []).map(u => u.name).join(', ') || 'none detected';
+      $('localNetwork').textContent = `${data.network?.established?.length || 0} established · ${data.network?.listening_ports || 0} listening · ${data.network?.public_connections || 0} public`;
+      $('localConnections').innerHTML = (data.network?.established || []).slice(0, 6).map(c =>
+        `<span class="connection-pill">${c.process} → ${c.remote_ip}:${c.remote_port}</span>`
+      ).join('') || '<span class="label">No established network connections detected.</span>';
+    }
+
+    // --- LIVE data ---
+    let paused=false, timer=null;
 
     async function fetchLive(){
       const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),4000);
@@ -482,10 +471,12 @@
         fetch('/api/temps').then(r=>r.json()).then(drawTemps).catch(()=>{});
         fetch('/api/gpu').then(r=>r.json()).then(drawGpu).catch(()=>{});
         fetch('/api/anomalies').then(r=>r.json()).then(drawAnomalies).catch(()=>{});
+        fetch('/api/security/alerts').then(r=>r.json()).then(drawSecurityAlerts).catch(()=>{});
         fetch('/api/audit_summary').then(r=>r.json()).then(drawAudit).catch(()=>{});
         fetch('/api/ai_alerts').then(r=>r.json()).then(drawAiAlerts).catch(()=>{});
         fetch('/api/system_health').then(r=>r.json()).then(drawHealth).catch(()=>{});
         fetch('/api/logs').then(r=>r.json()).then(drawLogs).catch(()=>{});
+        fetch('/api/local_machine').then(r=>r.json()).then(drawLocalMachine).catch(()=>{});
         return true;
       }catch{ $('connDot').style.background='var(--warn)'; return false; }
       finally{ clearTimeout(to); }
@@ -493,6 +484,7 @@
 
     function drawProcs(data){
       $('procUpdated').textContent = data.updated || '—';
+      $('activeProcesses').textContent = data.total_processes ?? (data.rows || []).length;
       const tb = $('procTable').querySelector('tbody'); tb.innerHTML='';
       (data.rows||[]).forEach(r=>{
         const tr=document.createElement('tr');
@@ -515,7 +507,32 @@
 
     function drawAnomalies(data){
       const box=$('anomaliesBox'), a=data.anomalies||[]; if(!a.length){ box.textContent='No anomalies detected'; return; }
+      $('anomaliesDetected').textContent = a.length;
       box.innerHTML = a.map(x=>`<div style="margin-bottom:4px;">${new Date(x.timestamp).toLocaleString()}: ${x.metric} ${fmt(x.value,1)}% (thresh ${fmt(x.threshold,1)}%)</div>`).join('');
+    }
+
+    function drawSecurityAlerts(data){
+      const alerts = data.alerts || [];
+      const counts = {
+        high: alerts.filter(a=>String(a.severity).toLowerCase()==='high').length,
+        critical: alerts.filter(a=>String(a.severity).toLowerCase()==='critical').length,
+        medium: alerts.filter(a=>String(a.severity).toLowerCase()==='medium').length,
+        low: alerts.filter(a=>String(a.severity).toLowerCase()==='low').length
+      };
+      $('openAlerts').textContent = alerts.filter(a=>a.status==='open').length;
+      $('severityLegend').innerHTML = `
+        <span class="legend-dot high"></span> High (${counts.high})
+        <span class="legend-dot critical"></span> Critical (${counts.critical})
+        <span class="legend-dot medium"></span> Medium (${counts.medium})
+        <span class="legend-dot low"></span> Low (${counts.low})`;
+      if (alertSeverityChart) {
+        alertSeverityChart.data.datasets[0].data = [counts.high, counts.critical, counts.medium, counts.low];
+        alertSeverityChart.update('none');
+      }
+      $('dashboardAlertList').innerHTML = '<div class="label">Recent Alerts</div>' + (
+        alerts.slice(0,5).map(a => `<div class="alert-item ${a.severity}"><span class="alert-badge ${a.severity}">${a.severity}</span>${a.event}<span class="alert-status ${a.status}">${a.status}</span></div>`).join('') ||
+        '<div class="label">No telemetry alerts.</div>'
+      );
     }
 
     function drawAudit(data){
@@ -532,7 +549,13 @@
 
     function drawLogs(data){
       const tb = $('logsTable').querySelector('tbody'); tb.innerHTML='';
-      (data.logs||[]).forEach(r=>{
+      const logs = data.logs || [];
+      $('auditEvents').textContent = logs.length;
+      $('dashboardAuditList').innerHTML = '<div class="label">Recent Audit Events</div>' + (
+        logs.slice(-5).reverse().map(r => `<div class="audit-item allowed"><span class="audit-badge allowed">metric</span> CPU ${fmt(r.cpu_percent,1)}% <span class="audit-info">${new Date(r.timestamp).toLocaleTimeString()}</span></div>`).join('') ||
+        '<div class="label">No audit events.</div>'
+      );
+      logs.forEach(r=>{
         const tr=document.createElement('tr');
         tr.innerHTML = `<td>${new Date(r.timestamp).toLocaleString()}</td><td class="num">${fmt(r.cpu_percent,1)}</td><td class="num">${fmt(r.memory_percent,1)}</td><td class="num">${r.num_processes}</td><td class="num">${fmt(r.disk_read_bytes/1024/1024,2)} MB</td><td class="num">${fmt(r.disk_write_bytes/1024/1024,2)} MB</td><td class="num">${fmt(r.net_bytes_sent/1024/1024,2)} MB</td><td class="num">${fmt(r.net_bytes_recv/1024/1024,2)} MB</td>`;
         tb.appendChild(tr);
@@ -542,8 +565,8 @@
     function startPolling(ms){ if(timer) clearInterval(timer); if(paused) return; tick(); timer=setInterval(tick,ms); }
     async function tick(){
       if(paused) return;
-      if(mode==='live'){ const ok=await fetchLive(); if(!ok){ stepMock(); pushSeries(mock.cpu,mock.mem,mock.read,mock.write,mock.rx,mock.tx); } }
-      else { stepMock(); pushSeries(mock.cpu,mock.mem,mock.read,mock.write,mock.rx,mock.tx); }
+      const ok=await fetchLive();
+      if(!ok) return;
       draw();
       const lbl=last(series.t);
       pushCharts(lbl,last(series.cpu),last(series.memory),last(series.read),last(series.write),last(series.rx),last(series.tx));
@@ -559,12 +582,8 @@
     // Controls
     const sel=$('refreshMs'); startPolling(+sel.value);
     sel.addEventListener('change',e=>startPolling(+e.target.value));
-    $('toggleMode').addEventListener('click', async ()=>{
-      mode=(mode==='mock')?'live':'mock';
-      $('modeBadge').textContent='MODE: '+mode.toUpperCase();
-      $('toggleMode').textContent = mode==='mock' ? 'Use LIVE' : 'Use MOCK';
-      await tick();
-    });
+    if ($('modeBadge')) $('modeBadge').textContent='MODE: LIVE';
+    if ($('toggleMode')) $('toggleMode').style.display='none';
     $('pauseBtn').addEventListener('click',()=>{
       paused=!paused; $('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
       if(!paused) startPolling(+sel.value);

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Terminal{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <div>
+      <h2>Diagnostic Terminal</h2>
+      <div class="label">WebSocket stream for constrained security diagnostics</div>
+    </div>
+    <div class="controls">
+      <button id="connectBtn" class="btn">Connect</button>
+      <button id="clearBtn" class="btn">Clear</button>
+    </div>
+  </div>
+
+  <section class="grid" style="grid-template-columns:2fr 1fr;">
+    <div class="card terminal-card">
+      <div class="terminal-output" id="terminalOutput"></div>
+      <div class="terminal-input-row">
+        <span class="prompt">$</span>
+        <input id="commandInput" class="terminal-input" autocomplete="off" value="ps aux" />
+        <button id="runBtn" class="btn">Run</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Enabled Commands</div>
+      <div id="allowedCommands" class="pill-list"></div>
+      <div class="help" id="terminalHelp">Commands run through a configured local WebSocket service with shell execution disabled and a short timeout.</div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let ws;
+let terminalWsUrl = '';
+const out = document.getElementById('terminalOutput');
+
+function print(text, cls='') {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = text;
+  out.appendChild(span);
+  out.scrollTop = out.scrollHeight;
+}
+
+function connect() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  ws = new WebSocket(terminalWsUrl);
+  ws.onopen = () => print('websocket connected\n', 'terminal-status');
+  ws.onmessage = (event) => print(event.data);
+  ws.onclose = () => print('websocket closed\n', 'terminal-status');
+  ws.onerror = () => print('websocket error; confirm the Flask app started the terminal service\n', 'terminal-error');
+}
+
+function runCommand() {
+  connect();
+  const cmd = document.getElementById('commandInput').value.trim();
+  if (!cmd) return;
+  print(`$ ${cmd}\n`, 'terminal-command');
+  const send = () => ws.send(cmd);
+  if (ws.readyState === WebSocket.OPEN) send();
+  else ws.addEventListener('open', send, {once: true});
+}
+
+fetch('/api/terminal/status').then(r=>r.json()).then(data => {
+  document.getElementById('allowedCommands').innerHTML = data.allowed.map(c => `<span class="badge">${c}</span>`).join('');
+  terminalWsUrl = data.websocket_url;
+  document.getElementById('terminalHelp').textContent = `Commands run through ${terminalWsUrl} with shell execution disabled and a short timeout. Status: ${data.running ? 'running' : 'not started'}.`;
+  if (data.running) connect();
+});
+document.getElementById('connectBtn').onclick = connect;
+document.getElementById('runBtn').onclick = runCommand;
+document.getElementById('clearBtn').onclick = () => out.textContent = '';
+document.getElementById('commandInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runCommand();
+});
+</script>
+{% endblock %}

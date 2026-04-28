@@ -1,0 +1,296 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Visualization Lab{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <div>
+      <h2 style="font-family: var(--font-mono); font-size: 2.2rem;">Visualization Lab</h2>
+      <span class="label">Scientific-style replay, heatmaps, and multidimensional system visualization</span>
+    </div>
+    <button class="btn" id="refreshBtn">Refresh Lab</button>
+  </div>
+
+  <section class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-label">SAMPLES</div>
+      <div class="stat-value" id="sampleCount">--</div>
+      <div class="stat-desc">Buffered telemetry points</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">LATEST CPU</div>
+      <div class="stat-value" id="latestCpu">--</div>
+      <div class="stat-desc">Live processor load</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">LATEST MEMORY</div>
+      <div class="stat-value" id="latestMemory">--</div>
+      <div class="stat-desc">Live memory pressure</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">ANOMALY SCORE</div>
+      <div class="stat-value" id="latestScore">--</div>
+      <div class="stat-desc">Composite risk estimate</div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-bottom: 16px;">
+    <div class="card" style="grid-column: span 2;">
+      <div class="label">📡 Timeline Replay</div>
+      <div class="chart" data-zoom="1">
+        <canvas id="timelineChart"></canvas>
+      </div>
+      <div class="help">CPU, memory, and anomaly score over time.</div>
+    </div>
+
+    <div class="card" style="grid-column: span 2;">
+      <div class="label">🧬 Multidimensional Scatter</div>
+      <div class="chart" data-zoom="1">
+        <canvas id="scatterChart"></canvas>
+      </div>
+      <div class="help">CPU vs memory with anomaly score represented by point intensity.</div>
+    </div>
+  </section>
+
+  <section class="grid" style="margin-bottom: 16px;">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">🔥 Risk Heatmap</div>
+      <div id="heatmapGrid" style="display:grid; grid-template-columns: repeat(30, 1fr); gap: 4px; margin-top: 12px;"></div>
+      <div class="help">Each cell represents a recent telemetry window. Brighter cells indicate higher risk.</div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">📋 Recent Visualization Points</div>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>CPU</th>
+            <th>Memory</th>
+            <th>Network</th>
+            <th>Anomaly Score</th>
+            <th>Risk</th>
+          </tr>
+        </thead>
+        <tbody id="pointRows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const colors = {
+    cpu: '#00ffd6',
+    memory: '#00bfff',
+    score: '#ff4444',
+    low: '#00ffb0',
+    medium: '#ffb300',
+    high: '#ff7a00',
+    critical: '#ff4444'
+  };
+
+  let timelineChart;
+  let scatterChart;
+
+  function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function riskColor(risk) {
+    if (risk === 'critical') return colors.critical;
+    if (risk === 'high') return colors.high;
+    if (risk === 'medium') return colors.medium;
+    return colors.low;
+  }
+
+  function buildHeatmap(cells) {
+    const grid = document.getElementById('heatmapGrid');
+    grid.innerHTML = '';
+
+    cells.forEach(cell => {
+      const div = document.createElement('div');
+      const opacity = Math.max(0.18, Math.min(1, cell.value / 100));
+
+      div.title = `${cell.label} • ${cell.value.toFixed(1)} • ${cell.risk_level}`;
+      div.style.height = '24px';
+      div.style.borderRadius = '6px';
+      div.style.border = '1px solid var(--border)';
+      div.style.background = riskColor(cell.risk_level);
+      div.style.opacity = opacity;
+      div.style.boxShadow = `0 0 ${Math.round(opacity * 14)}px ${riskColor(cell.risk_level)}`;
+
+      grid.appendChild(div);
+    });
+  }
+
+  function buildRows(points) {
+    const body = document.getElementById('pointRows');
+    body.innerHTML = '';
+
+    points.slice(-12).reverse().forEach(point => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${point.timestamp}</td>
+        <td class="num">${point.cpu.toFixed(1)}%</td>
+        <td class="num">${point.memory.toFixed(1)}%</td>
+        <td class="num">${point.network.toFixed(4)} MB/s</td>
+        <td class="num">${point.anomaly_score.toFixed(1)}</td>
+        <td><span class="badge-state ${point.risk_level === 'critical' ? 'terminated' : point.risk_level === 'high' ? 'suspended' : point.risk_level === 'medium' ? 'sandboxed' : 'running'}">${point.risk_level}</span></td>
+      `;
+      body.appendChild(tr);
+    });
+  }
+
+  async function loadVisualizationLab() {
+    const data = await fetch('/api/visualization_lab').then(r => r.json());
+
+    setText('sampleCount', data.summary.samples);
+    setText('latestCpu', `${Number(data.summary.latest_cpu).toFixed(1)}%`);
+    setText('latestMemory', `${Number(data.summary.latest_memory).toFixed(1)}%`);
+    setText('latestScore', Number(data.summary.latest_anomaly_score).toFixed(1));
+
+    const points = data.points || [];
+    const labels = points.map(p => p.timestamp);
+
+    if (timelineChart) {
+      timelineChart.data.labels = labels;
+      timelineChart.data.datasets[0].data = points.map(p => p.cpu);
+      timelineChart.data.datasets[1].data = points.map(p => p.memory);
+      timelineChart.data.datasets[2].data = points.map(p => p.anomaly_score);
+      timelineChart.update('none');
+    }
+
+    if (scatterChart) {
+      scatterChart.data.datasets[0].data = points.map(p => ({
+        x: p.cpu,
+        y: p.memory,
+        r: Math.max(4, Math.min(18, p.anomaly_score / 5))
+      }));
+      scatterChart.update('none');
+    }
+
+    buildHeatmap(data.heatmap || []);
+    buildRows(points);
+  }
+
+  timelineChart = new Chart(document.getElementById('timelineChart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'CPU',
+          data: [],
+          borderColor: colors.cpu,
+          backgroundColor: 'rgba(0,255,214,0.10)',
+          fill: false,
+          tension: 0.35,
+          pointRadius: 0
+        },
+        {
+          label: 'Memory',
+          data: [],
+          borderColor: colors.memory,
+          backgroundColor: 'rgba(0,191,255,0.10)',
+          fill: false,
+          tension: 0.35,
+          pointRadius: 0
+        },
+        {
+          label: 'Anomaly Score',
+          data: [],
+          borderColor: colors.score,
+          backgroundColor: 'rgba(255,68,68,0.10)',
+          fill: false,
+          tension: 0.35,
+          pointRadius: 0
+        }
+      ]
+    },
+    options: {
+      plugins: {
+        legend: {
+          labels: {
+            color: '#80a080',
+            font: { family: 'Courier New' }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#80a080' },
+          grid: { color: '#222' }
+        },
+        y: {
+          beginAtZero: true,
+          max: 100,
+          ticks: { color: '#80a080' },
+          grid: { color: '#222' }
+        }
+      }
+    }
+  });
+
+  scatterChart = new Chart(document.getElementById('scatterChart').getContext('2d'), {
+    type: 'bubble',
+    data: {
+      datasets: [
+        {
+          label: 'System State',
+          data: [],
+          borderColor: colors.cpu,
+          backgroundColor: 'rgba(0,255,214,0.25)'
+        }
+      ]
+    },
+    options: {
+      plugins: {
+        legend: {
+          labels: {
+            color: '#80a080',
+            font: { family: 'Courier New' }
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: 'CPU %',
+            color: '#80a080'
+          },
+          min: 0,
+          max: 100,
+          ticks: { color: '#80a080' },
+          grid: { color: '#222' }
+        },
+        y: {
+          title: {
+            display: true,
+            text: 'Memory %',
+            color: '#80a080'
+          },
+          min: 0,
+          max: 100,
+          ticks: { color: '#80a080' },
+          grid: { color: '#222' }
+        }
+      }
+    }
+  });
+
+  document.getElementById('refreshBtn').addEventListener('click', loadVisualizationLab);
+
+  loadVisualizationLab();
+  setInterval(loadVisualizationLab, 10000);
+});
+</script>
+{% endblock %}

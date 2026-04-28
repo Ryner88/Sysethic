@@ -8,6 +8,7 @@ Secure Autonomous Autonomous Operating Environment Monitor
 |---------|-------------|
 | 🔐 **User & Process Isolation** | Uses OS-level sandboxing to isolate and monitor apps and users (namespaces, cgroups, etc.). |
 | 📊 **Real-time Analytics** | Live system monitoring with CPU, memory, disk, and network usage charts. |
+| 🧪 **Visualization Lab** | Scientific-style visualization of system metrics, anomaly scores, heatmaps, and timeline replay. |
 | 🚨 **Anomaly Detection** | Automatic detection of unusual system behavior based on statistical thresholds. |
 | 🛡️ **Ethics Dashboard** | Monitoring for ethical AI operations, including alerts and system health. |
 | 📋 **Audit Logging** | Comprehensive logging of system metrics and events for auditing purposes. |
@@ -15,6 +16,8 @@ Secure Autonomous Autonomous Operating Environment Monitor
 | 📁 **Privacy-Conscious Files** | Secure file handling with classification and encryption. |
 
 ## Architecture
+
+See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams.
 
 ### Entities
 - **AuditLog**: System and user activity logs
@@ -27,6 +30,7 @@ Secure Autonomous Autonomous Operating Environment Monitor
 - **Dashboard**: Overview with key metrics and alerts
 - **Processes**: Process isolation monitor and controls
 - **Analytics**: Detailed real-time system analytics
+- **Visualization Lab**: Advanced scientific-style visualization with timeline replay, heatmaps, and multidimensional metric plots
 - **Security**: Alerts, access control, and firewall status
 - **Audit Logs**: Transparent logging and compliance
 - **Ethics**: Privacy dashboard and ethical AI monitoring
