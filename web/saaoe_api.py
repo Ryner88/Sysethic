@@ -96,6 +96,7 @@ THREAT_INTEL_PATH = os.environ.get('THREAT_INTEL_PATH', os.path.join(BASE_DIR, '
 DIAGNOSTIC_COMMANDS = {'netstat', 'ss', 'grep', 'rg', 'ps', 'uptime', 'whoami', 'hostname'}
 TERMINAL_WS_HOST = os.environ.get('TERMINAL_WS_HOST', '127.0.0.1')
 TERMINAL_WS_PORT = int(os.environ.get('TERMINAL_WS_PORT', '8765'))
+TERMINAL_WS_SCHEME = os.environ.get('TERMINAL_WS_SCHEME', 'wss')
 TERMINAL_WS_STARTED = False
 TERMINAL_WS_SERVER = None
 
@@ -907,7 +908,13 @@ def api_visualization_lab():
 
 @app.route('/api/terminal/status')
 def api_terminal_status():
-    return jsonify(host=TERMINAL_WS_HOST, port=TERMINAL_WS_PORT, running=TERMINAL_WS_STARTED, allowed=sorted(DIAGNOSTIC_COMMANDS))
+    return jsonify(
+        host=TERMINAL_WS_HOST,
+        port=TERMINAL_WS_PORT,
+        websocket_url=f'{TERMINAL_WS_SCHEME}://{TERMINAL_WS_HOST}:{TERMINAL_WS_PORT}',
+        running=TERMINAL_WS_STARTED,
+        allowed=sorted(DIAGNOSTIC_COMMANDS),
+    )
 
 @app.route('/api/local_machine')
 def api_local_machine():

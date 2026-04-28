@@ -36,7 +36,7 @@
 {% block scripts %}
 <script>
 let ws;
-let terminalWsUrl = 'ws://127.0.0.1:8765';
+let terminalWsUrl = '';
 const out = document.getElementById('terminalOutput');
 
 function print(text, cls='') {
@@ -68,7 +68,7 @@ function runCommand() {
 
 fetch('/api/terminal/status').then(r=>r.json()).then(data => {
   document.getElementById('allowedCommands').innerHTML = data.allowed.map(c => `<span class="badge">${c}</span>`).join('');
-  terminalWsUrl = `ws://${data.host}:${data.port}`;
+  terminalWsUrl = data.websocket_url;
   document.getElementById('terminalHelp').textContent = `Commands run through ${terminalWsUrl} with shell execution disabled and a short timeout. Status: ${data.running ? 'running' : 'not started'}.`;
   if (data.running) connect();
 });
