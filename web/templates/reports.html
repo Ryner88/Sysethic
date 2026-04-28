@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Reports{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <div>
+      <h2>Compliance Reports</h2>
+      <div class="label">Historical anomalies and audit logs mapped to NIST and CIS controls</div>
+    </div>
+    <div class="controls">
+      <a class="btn" href="/api/reports/download.csv">Download CSV</a>
+      <a class="btn" href="/api/reports/download.pdf">Download PDF</a>
+    </div>
+  </div>
+
+  <section class="stat-grid">
+    <div class="stat-card"><div class="stat-label">ANOMALIES</div><div class="stat-value" id="anomalyCount">--</div></div>
+    <div class="stat-card"><div class="stat-label">CRITICAL</div><div class="stat-value alert-critical" id="criticalCount">--</div></div>
+    <div class="stat-card"><div class="stat-label">HIGH RISK</div><div class="stat-value" id="highRiskCount">--</div></div>
+    <div class="stat-card"><div class="stat-label">AUDIT EVENTS</div><div class="stat-value" id="auditCount">--</div></div>
+  </section>
+
+  <section class="grid" style="grid-template-columns:1fr 1fr;margin-top:14px;">
+    <div class="card">
+      <div class="label">Framework Coverage</div>
+      <table class="table" id="frameworkTable"><thead><tr><th>Framework</th><th>Controls</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <div class="label">Top Risk Anomalies</div>
+      <table class="table" id="reportAnomalies"><thead><tr><th>Time</th><th>Severity</th><th>Risk</th><th>Controls</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch('/api/reports/summary').then(r=>r.json()).then(data => {
+  document.getElementById('anomalyCount').textContent = data.anomaly_count;
+  document.getElementById('criticalCount').textContent = data.critical_count;
+  document.getElementById('highRiskCount').textContent = data.high_risk_count;
+  document.getElementById('auditCount').textContent = data.audit_count;
+  document.querySelector('#frameworkTable tbody').innerHTML = Object.entries(data.frameworks)
+    .map(([name, controls]) => `<tr><td>${name}</td><td>${controls.map(c=>`<span class="badge">${c}</span>`).join('')}</td></tr>`).join('');
+  document.querySelector('#reportAnomalies tbody').innerHTML = data.anomalies.slice(0, 12)
+    .map(a => `<tr><td>${new Date(a.timestamp).toLocaleString()}</td><td>${a.severity}</td><td><span class="risk ${a.risk_score >= 80 ? 'critical' : 'high'}">${a.risk_score}</span></td><td>${a.frameworks.slice(0,3).join(', ')}</td></tr>`).join('');
+});
+</script>
+{% endblock %}

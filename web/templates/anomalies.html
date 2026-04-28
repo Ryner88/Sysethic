@@ -14,6 +14,11 @@
     </div>
   </div>
 
+  <section class="card anomaly-heatmap-card">
+    <div class="label">Anomaly Density Heatmap (last 24h)</div>
+    <div class="heatmap" id="anomalyHeatmap"></div>
+  </section>
+
   <section class="grid" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:12px;">
     <div class="card"><div class="label">Open Anomalies</div><div class="big" id="openAnomalies">--</div></div>
     <div class="card"><div class="label">Critical Alerts</div><div class="big" id="criticalAlerts">--</div></div>
@@ -40,7 +45,7 @@
   <section class="grid" style="margin-top:14px;" id="anomalySummarySection">
     <div class="card" style="grid-column:1 / -1;">
       <div class="label">Recent Anomaly Summary</div>
-      <table class="table" id="anomalyTable"><thead><tr><th>Time</th><th>Metric</th><th>Value</th><th>Severity</th><th>Confidence</th><th>Rule</th></tr></thead><tbody></tbody></table>
+      <table class="table" id="anomalyTable"><thead><tr><th>Time</th><th>Metric</th><th>Value</th><th>Severity</th><th>Risk</th><th>Threat Intel</th><th>Frameworks</th><th>Actions</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
 
@@ -65,6 +70,13 @@
           <button id="addRuleBtn" class="btn">Add Rule</button>
         </div>
         <div style="margin-top:20px;"><strong>Existing rules</strong><div id="rulesList" style="max-height:200px;overflow:auto;"></div></div>
+      </div>
+  </div>
+
+  <div id="respondPanel" class="overlay" style="display:none;">
+      <div class="modal" style="max-width:760px;">
+        <div class="head"><span class="label">Playbook Response</span><button id="closeRespond" class="btn">Close</button></div>
+        <div id="respondContent"></div>
       </div>
   </div>
 </div>
@@ -108,14 +120,19 @@ function renderAnomalies(data) {
   document.getElementById('criticalAlerts').textContent = data.anomalies.filter(a=>a.severity==='critical').length;
   document.getElementById('highAlerts').textContent = data.anomalies.filter(a=>a.severity==='high').length;
 
-  const rows = data.anomalies.slice(0, 8).map(a => `
+  const rows = data.anomalies.slice(0, 20).map(a => `
     <tr>
       <td>${new Date(a.timestamp).toLocaleString()}</td>
       <td>${a.metric}</td>
       <td>${a.value.toFixed(2)}</td>
       <td><span class="badge" style="color:${a.severity==='critical'?'#ff4d4d':'#ffc107'}">${a.severity}</span></td>
-      <td>${(a.confidence||0).toFixed(2)}</td>
-      <td>${a.rule_name || 'built-in'}</td>
+      <td><span class="risk ${riskClass(a.risk_score)}">${a.risk_score}</span></td>
+      <td>${a.indicator_type}: ${a.indicator}<br><span class="label">${a.threat_intel.matched ? a.threat_intel.source : 'no match'}</span></td>
+      <td>${(a.frameworks || []).slice(0, 3).map(f=>`<span class="badge">${f}</span>`).join('')}</td>
+      <td>
+        <button class="btn btn-small" onclick="openDetails('${a.id}')">Details</button>
+        <button class="btn btn-small" onclick="respond('${a.id}')">Respond</button>
+      </td>
     </tr>`).join('');
   document.querySelector('#anomalyTable tbody').innerHTML = rows;
 
@@ -125,6 +142,27 @@ function renderAnomalies(data) {
   timelineChart.update();
 
   appendFeed(data.anomalies.slice(0, 5).map(a=>`${new Date(a.timestamp).toLocaleTimeString()} ${a.severity.toUpperCase()} ${a.metric}=${a.value.toFixed(2)}`));
+}
+
+function riskClass(score){
+  if (score >= 80) return 'critical';
+  if (score >= 55) return 'high';
+  return 'medium';
+}
+
+function renderHeatmap(data) {
+  const severities = ['critical', 'high', 'medium', 'low'];
+  const max = Math.max(1, ...data.buckets.flatMap(b => severities.map(s => b[s] || 0)));
+  const html = severities.map(sev => `
+    <div class="heatmap-row">
+      <div class="heatmap-label">${sev}</div>
+      ${data.buckets.map(b => {
+        const count = b[sev] || 0;
+        const level = Math.ceil((count / max) * 5);
+        return `<div class="heat-cell ${sev}" data-level="${level}" title="${b.hour} ${sev}: ${count}"><span>${count || ''}</span></div>`;
+      }).join('')}
+    </div>`).join('') + `<div class="heatmap-hours"><span></span>${data.buckets.map(b=>`<span>${b.hour}</span>`).join('')}</div>`;
+  document.getElementById('anomalyHeatmap').innerHTML = html;
 }
 
 function appendFeed(lines){
@@ -174,6 +212,33 @@ function exportPDF(){
   doc.save('anomalies.pdf');
 }
 
+function openDetails(id) {
+  window.location.href = `/anomalies/${id}`;
+}
+
+function respond(id) {
+  fetch('/api/playbook_trigger', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({anomaly_id: id})
+  }).then(r=>r.json()).then(data => {
+    const panel = document.getElementById('respondPanel');
+    const content = document.getElementById('respondContent');
+    if (!data.success) {
+      content.innerHTML = `<div class="alert-item"><strong>No matching playbook</strong><span>${data.message || ''}</span></div>`;
+    } else {
+      content.innerHTML = `
+        <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);">
+          <div class="stat-card"><div class="stat-label">PLAYBOOK</div><div class="stat-value" style="font-size:1.2rem;">${data.run.name}</div></div>
+          <div class="stat-card"><div class="stat-label">ACTION</div><div class="stat-value" style="font-size:1.2rem;">${data.run.action}</div></div>
+          <div class="stat-card"><div class="stat-label">STATUS</div><div class="stat-value" style="font-size:1.2rem;">${data.run.status}</div></div>
+        </div>
+        <pre class="yaml-view">${data.run.yaml || 'No YAML steps defined.'}</pre>`;
+    }
+    panel.style.display = 'flex';
+  });
+}
+
 function init() {
   document.getElementById('refreshBtn').onclick = refresh;
   document.getElementById('applyFilterBtn').onclick = refresh;
@@ -186,9 +251,12 @@ function init() {
   };
   document.getElementById('exportCsvBtn').onclick = exportCSV;
   document.getElementById('exportPdfBtn').onclick = exportPDF;
+  document.getElementById('closeRespond').onclick = () => document.getElementById('respondPanel').style.display='none';
   fetchRules();
+  fetch('/api/anomalies/heatmap').then(r=>r.json()).then(renderHeatmap);
   refresh();
   setInterval(refresh, 15000);
+  setInterval(()=>fetch('/api/anomalies/heatmap').then(r=>r.json()).then(renderHeatmap), 60000);
 }
 
 function refresh(){ fetchAnomalies().then(resp=>renderAnomalies(resp)).catch(console.error); }

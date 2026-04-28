@@ -6,12 +6,22 @@ import queue
 import statistics
 import json
 import socket
-import random
+import base64
+import csv
+import hashlib
+import ipaddress
+import io
+import os
+import platform
+import select
+import shlex
+import socketserver
+import struct
+import subprocess
 
 import psutil
 from flask import Flask, jsonify, render_template, Response, stream_with_context, request
 import pandas as pd
-import os
 
 try:
     import GPUtil  # optional
@@ -67,11 +77,23 @@ anomaly_rules = [
 next_rule_id = 3
 
 playbooks = [
-    {'id': 1, 'name': 'Kill runaway CPU', 'metric': 'cpu_percent', 'operator': '>', 'threshold': 95, 'action': 'kill_process', 'target': 'cmdline', 'enabled': True, 'auto': True},
-    {'id': 2, 'name': 'Isolate suspicious IP', 'metric': 'memory_percent', 'operator': '>', 'threshold': 90, 'action': 'block_ip', 'target': 'external', 'enabled': True, 'auto': False},
+    {'id': 1, 'name': 'Kill runaway CPU', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': 95, 'action': 'kill_process', 'target': 'cmdline', 'enabled': True, 'auto': True, 'yaml': 'name: Kill runaway CPU\ncategory: system\nsteps:\n  - action: snapshot_process\n    target: top_cpu\n  - action: isolate_process\n    target: "{{ process.pid }}"\n  - action: notify\n    target: security-ops\n'},
+    {'id': 2, 'name': 'Isolate suspicious IP', 'category': 'network', 'metric': 'memory_percent', 'operator': '>', 'threshold': 90, 'action': 'block_ip', 'target': 'external', 'enabled': True, 'auto': False, 'yaml': 'name: Isolate suspicious IP\ncategory: network\nsteps:\n  - action: block_ip\n    target: "{{ anomaly.ip }}"\n  - action: collect_connections\n    target: host\n'},
 ]
 next_playbook_id = 3
 playbook_runs = []
+
+automation_rules = [
+    {'id': 1, 'name': 'Critical containment', 'field': 'severity', 'operator': 'equals', 'value': 'critical', 'action': 'Isolate Process', 'enabled': True},
+    {'id': 2, 'name': 'High risk evidence capture', 'field': 'risk_score', 'operator': '>=', 'value': '75', 'action': 'Capture Forensics Bundle', 'enabled': True},
+]
+next_automation_rule_id = 3
+automation_history = []
+
+THREAT_INTEL_PATH = os.environ.get('THREAT_INTEL_PATH', os.path.join(BASE_DIR, 'config', 'threat_intel.json'))
+
+DIAGNOSTIC_COMMANDS = {'netstat', 'ss', 'grep', 'rg', 'ps', 'uptime', 'whoami', 'hostname'}
+TERMINAL_WS_STARTED = False
 
 # --- Background sampler ---
 
@@ -151,13 +173,14 @@ def _top_procs(n=5):
         return _PROCS_CACHE["data"]
 
     procs = []
-    for p in psutil.process_iter(attrs=['pid', 'name', 'cpu_percent', 'memory_info']):
+    for p in psutil.process_iter(attrs=['pid', 'name', 'username', 'cpu_percent', 'memory_info']):
         try:
             info = p.info
             cpu = float(info.get('cpu_percent') or 0.0)
             rss = info.get('memory_info').rss if info.get('memory_info') else 0
             procs.append({
                 'pid': int(info.get('pid')), 'name': (info.get('name') or 'proc')[:40],
+                'user': info.get('username') or 'unknown',
                 'cpu': cpu, 'mem_mb': float(rss) / (1024*1024)
             })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -165,7 +188,7 @@ def _top_procs(n=5):
 
     cpu_top = sorted(procs, key=lambda x: x['cpu'], reverse=True)[:n]
     mem_top = sorted(procs, key=lambda x: x['mem_mb'], reverse=True)[:n]
-    data = {'cpu_top': cpu_top, 'mem_top': mem_top, 'ts': datetime.now().strftime('%H:%M:%S')}
+    data = {'cpu_top': cpu_top, 'mem_top': mem_top, 'total_processes': len(procs), 'ts': datetime.now().strftime('%H:%M:%S')}
     _PROCS_CACHE = {"data": data, "ts": now}
     return data
 
@@ -201,6 +224,460 @@ def _read_gpus():
     except Exception:
         return {'available': False, 'gpus': []}
 
+
+def _anomaly_id(anomaly):
+    raw = f"{anomaly.get('timestamp')}|{anomaly.get('metric')}|{anomaly.get('value'):.4f}|{anomaly.get('category')}"
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
+
+
+def _load_threat_intel():
+    if not os.path.exists(THREAT_INTEL_PATH):
+        return {'ips': {}, 'domains': {}, 'hashes': {}}
+    try:
+        with open(THREAT_INTEL_PATH, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        return {
+            'ips': data.get('ips', {}),
+            'domains': data.get('domains', {}),
+            'hashes': data.get('hashes', {}),
+        }
+    except (OSError, json.JSONDecodeError):
+        return {'ips': {}, 'domains': {}, 'hashes': {}}
+
+
+def _threat_lookup(indicator_type, indicator):
+    feed = _load_threat_intel().get(f'{indicator_type}s', {})
+    hit = feed.get(str(indicator).lower()) or feed.get(str(indicator))
+    if not hit:
+        return {'matched': False, 'confidence': 0, 'source': 'local feed: no match', 'tags': []}
+    return {'matched': True, **hit}
+
+
+def _is_public_ip(ip_value):
+    try:
+        parsed = ipaddress.ip_address(ip_value)
+        return parsed.is_global
+    except ValueError:
+        return False
+
+
+def _process_hash(pid):
+    try:
+        proc = psutil.Process(pid)
+        exe = proc.exe()
+        if not exe or not os.path.isfile(exe):
+            return None
+        digest = hashlib.sha256()
+        with open(exe, 'rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (psutil.Error, OSError, PermissionError):
+        return None
+
+
+def _current_indicators():
+    indicators = []
+    try:
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.raddr and _is_public_ip(conn.raddr.ip):
+                indicators.append({'type': 'ip', 'value': conn.raddr.ip, 'pid': conn.pid})
+    except (psutil.Error, OSError):
+        pass
+
+    if indicators:
+        return indicators
+
+    for proc in _top_procs(n=3).get('cpu_top', []):
+        digest = _process_hash(proc['pid'])
+        if digest:
+            indicators.append({'type': 'hash', 'value': digest, 'pid': proc['pid']})
+            break
+    return indicators
+
+
+def _local_ipv4_addresses():
+    addresses = []
+    for interface, entries in psutil.net_if_addrs().items():
+        for entry in entries:
+            if getattr(entry, 'family', None) == socket.AF_INET:
+                addresses.append({
+                    'interface': interface,
+                    'address': entry.address,
+                    'netmask': entry.netmask,
+                    'is_loopback': entry.address.startswith('127.')
+                })
+    return addresses
+
+
+def _local_connection_summary():
+    established = []
+    listening = 0
+    try:
+        proc_map = {p.pid: p.info['name'] for p in psutil.process_iter(attrs=['pid', 'name'])}
+        for conn in psutil.net_connections(kind='inet'):
+            status = getattr(conn, 'status', '') or ''
+            if status == 'LISTEN':
+                listening += 1
+            if conn.raddr and status == 'ESTABLISHED':
+                established.append({
+                    'pid': conn.pid,
+                    'process': proc_map.get(conn.pid, f"pid-{conn.pid}") if conn.pid else 'unknown',
+                    'remote_ip': conn.raddr.ip,
+                    'remote_port': conn.raddr.port,
+                    'local_port': conn.laddr.port if conn.laddr else None,
+                    'public': _is_public_ip(conn.raddr.ip),
+                })
+    except (psutil.Error, OSError):
+        pass
+    return {'listening': listening, 'established': established[:12]}
+
+
+def _bytes_to_gb(value):
+    return round(float(value) / (1024 ** 3), 2)
+
+
+def _decorate_threat_intel(anomaly):
+    indicators = _current_indicators()
+    selected = indicators[int(hashlib.sha1(_anomaly_id(anomaly).encode('utf-8')).hexdigest(), 16) % len(indicators)] if indicators else None
+    indicator_type = selected['type'] if selected else 'none'
+    indicator = selected['value'] if selected else 'no live indicator'
+    threat = _threat_lookup(indicator_type, indicator) if selected else {'matched': False, 'confidence': 0, 'source': 'no live network or process hash indicator', 'tags': []}
+    severity_weight = {'critical': 30, 'high': 18, 'medium': 10, 'low': 4}.get(anomaly.get('severity'), 8)
+    confidence_weight = int(float(anomaly.get('confidence', 0)) * 25)
+    risk_score = min(100, severity_weight + confidence_weight + int(threat['confidence'] * 0.45))
+    anomaly.update({
+        'id': _anomaly_id(anomaly),
+        'indicator_type': indicator_type,
+        'indicator': indicator,
+        'threat_intel': threat,
+        'risk_score': risk_score,
+        'frameworks': _framework_map(anomaly, risk_score),
+    })
+    return anomaly
+
+
+def _framework_map(anomaly, risk_score):
+    metric = anomaly.get('metric', '')
+    mappings = ['NIST DE.CM-1', 'CIS 8.16']
+    if 'cpu' in metric or 'memory' in metric:
+        mappings.extend(['NIST DE.AE-2', 'CIS 8.11'])
+    if risk_score >= 75:
+        mappings.extend(['NIST RS.MI-1', 'CIS 8.17'])
+    return mappings
+
+
+def _load_anomalies(start=None, end=None, severity=None, apply_automation=True):
+    if not os.path.exists(LOG_PATH):
+        return []
+
+    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
+    if df.empty:
+        return []
+
+    if start:
+        df = df[df['timestamp'] >= pd.to_datetime(start)]
+    if end:
+        df = df[df['timestamp'] <= pd.to_datetime(end)]
+
+    anomalies = []
+    for col in ['cpu_percent', 'memory_percent']:
+        mean_val = df[col].mean()
+        std_val = df[col].std() if len(df) > 1 else 0
+        if std_val == 0:
+            continue
+        thresh = mean_val + 2 * std_val
+        high = df[df[col] > thresh]
+        for _, row in high.iterrows():
+            z = (row[col] - mean_val) / std_val
+            severity_value = 'critical' if z > 3 else 'high'
+            anomalies.append({
+                'timestamp': row['timestamp'].isoformat(),
+                'metric': col,
+                'value': float(row[col]),
+                'threshold': float(thresh),
+                'severity': severity_value,
+                'category': 'system' if col != 'memory_percent' else 'host',
+                'confidence': min(1.0, abs(z) / 5)
+            })
+
+    for rule in anomaly_rules:
+        if not rule.get('enabled'):
+            continue
+        metric = rule['metric']
+        if metric not in df.columns or df.empty:
+            continue
+        rvalue = df[metric].iloc[-1]
+        if op_eval(rvalue, rule['operator'], rule['threshold']):
+            anomalies.append({
+                'timestamp': datetime.now().isoformat(),
+                'metric': metric,
+                'value': float(rvalue),
+                'threshold': float(rule['threshold']),
+                'severity': rule['severity'],
+                'category': 'custom',
+                'confidence': 0.9,
+                'rule_name': f"Custom {metric} {rule['operator']} {rule['threshold']}"
+            })
+
+    decorated = [_decorate_threat_intel(a) for a in anomalies]
+    sorted_list = sorted(decorated, key=lambda x: x['timestamp'], reverse=True)
+    if apply_automation:
+        apply_playbooks(sorted_list)
+        apply_automation_rules(sorted_list)
+    if severity:
+        sorted_list = [a for a in sorted_list if a.get('severity') == severity]
+    return sorted_list[:200]
+
+
+def _audit_rows(limit=100):
+    logs = []
+    if os.path.exists(LOG_PATH):
+        df = pd.read_csv(LOG_PATH, parse_dates=['timestamp']).tail(limit)
+        for _, row in df.iterrows():
+            sev = 'warning' if row.get('cpu_percent', 0) > 70 else 'info'
+            outcome = 'flagged' if sev == 'warning' else 'allowed'
+            logs.append({
+                'timestamp': row['timestamp'].isoformat(),
+                'action': 'metric_sample',
+                'role': 'system',
+                'severity': sev,
+                'outcome': outcome,
+                'resource': 'host.telemetry',
+                'details': f"CPU {row.get('cpu_percent', 0):.1f}%, memory {row.get('memory_percent', 0):.1f}%"
+            })
+    return logs
+
+
+def _report_summary():
+    anomalies = _load_anomalies(apply_automation=False)
+    audits = _audit_rows()
+    return {
+        'generated_at': datetime.now().isoformat(),
+        'anomaly_count': len(anomalies),
+        'critical_count': len([a for a in anomalies if a['severity'] == 'critical']),
+        'high_risk_count': len([a for a in anomalies if a['risk_score'] >= 75]),
+        'audit_count': len(audits),
+        'frameworks': {
+            'NIST': ['DE.CM-1', 'DE.AE-2', 'RS.MI-1'],
+            'CIS': ['8.11', '8.16', '8.17']
+        },
+        'anomalies': anomalies[:50],
+        'audits': audits[-50:],
+    }
+
+
+def _csv_response(summary):
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['report_generated_at', summary['generated_at']])
+    writer.writerow([])
+    writer.writerow(['type', 'timestamp', 'severity', 'metric_or_action', 'value_or_outcome', 'risk_score', 'frameworks'])
+    for a in summary['anomalies']:
+        writer.writerow(['anomaly', a['timestamp'], a['severity'], a['metric'], f"{a['value']:.2f}", a['risk_score'], '; '.join(a['frameworks'])])
+    for log in summary['audits']:
+        writer.writerow(['audit', log['timestamp'], log['severity'], log['action'], log['outcome'], '', 'NIST AU; CIS 8'])
+    return Response(buf.getvalue(), mimetype='text/csv', headers={'Content-Disposition': 'attachment; filename=security-compliance-report.csv'})
+
+
+def _pdf_bytes(lines):
+    escaped = [line.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)') for line in lines]
+    content = "BT /F1 10 Tf 40 780 Td 14 TL " + " T* ".join(f"({line})" for line in escaped) + " ET"
+    objects = [
+        "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj",
+        "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj",
+        "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj",
+        "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Courier >> endobj",
+        f"5 0 obj << /Length {len(content.encode('utf-8'))} >> stream\n{content}\nendstream endobj",
+    ]
+    pdf = "%PDF-1.4\n"
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(pdf.encode('utf-8')))
+        pdf += obj + "\n"
+    xref = len(pdf.encode('utf-8'))
+    pdf += f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n"
+    pdf += "".join(f"{off:010d} 00000 n \n" for off in offsets[1:])
+    pdf += f"trailer << /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    return pdf.encode('utf-8')
+
+
+def _pdf_response(summary):
+    lines = [
+        'SAAOE Security Compliance Report',
+        f"Generated: {summary['generated_at']}",
+        f"Anomalies: {summary['anomaly_count']}  Critical: {summary['critical_count']}  High Risk: {summary['high_risk_count']}",
+        'Framework Mapping: NIST DE.CM-1, DE.AE-2, RS.MI-1 | CIS 8.11, 8.16, 8.17',
+        '',
+        'Top Anomalies:',
+    ]
+    for a in summary['anomalies'][:28]:
+        lines.append(f"{a['timestamp'][:19]} {a['severity']} {a['metric']}={a['value']:.2f} risk={a['risk_score']} {','.join(a['frameworks'][:2])}")
+    return Response(_pdf_bytes(lines[:48]), mimetype='application/pdf', headers={'Content-Disposition': 'attachment; filename=security-compliance-report.pdf'})
+
+
+def automation_matches(rule, anomaly):
+    current = anomaly.get(rule.get('field'))
+    expected = rule.get('value')
+    op = rule.get('operator')
+    if op == 'equals':
+        return str(current).lower() == str(expected).lower()
+    try:
+        current_num = float(current)
+        expected_num = float(expected)
+    except (TypeError, ValueError):
+        return False
+    return op_eval(current_num, op, expected_num)
+
+
+def apply_automation_rules(anomalies):
+    seen = {(h.get('rule_id'), h.get('anomaly_id')) for h in automation_history}
+    for anomaly in anomalies[:25]:
+        for rule in automation_rules:
+            if not rule.get('enabled') or (rule['id'], anomaly['id']) in seen:
+                continue
+            if automation_matches(rule, anomaly):
+                entry = {
+                    'id': len(automation_history) + 1,
+                    'rule_id': rule['id'],
+                    'rule_name': rule['name'],
+                    'anomaly_id': anomaly['id'],
+                    'action': rule['action'],
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'executed',
+                    'details': f"{rule['field']} {rule['operator']} {rule['value']} matched {anomaly['metric']}"
+                }
+                automation_history.append(entry)
+                notification_queue.put({'type': 'automation_action', 'rule': rule['name'], 'details': entry})
+
+
+def _timeline_for_anomaly(anomaly_id):
+    anomaly = next((a for a in _load_anomalies(apply_automation=False) if a['id'] == anomaly_id), None)
+    if not anomaly:
+        return None, []
+    center = pd.to_datetime(anomaly['timestamp'])
+    events = []
+    if os.path.exists(LOG_PATH):
+        df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
+        window = df[(df['timestamp'] >= center - pd.Timedelta(minutes=10)) & (df['timestamp'] <= center + pd.Timedelta(minutes=10))]
+        for _, row in window.iterrows():
+            events.append({'time': row['timestamp'].isoformat(), 'lane': 'system', 'title': 'Metric sample', 'detail': f"CPU {row['cpu_percent']:.1f}% Memory {row['memory_percent']:.1f}%"})
+    events.extend([
+        {'time': center.isoformat(), 'lane': 'anomaly', 'title': 'Anomaly detected', 'detail': f"{anomaly['severity']} {anomaly['metric']} risk {anomaly['risk_score']}"},
+    ])
+    if abs((pd.Timestamp.now(tz=center.tz) - center).total_seconds()) <= 900:
+        for proc in _top_procs(n=3).get('cpu_top', []):
+            events.append({'time': datetime.now().isoformat(), 'lane': 'process', 'title': 'Live top process', 'detail': f"PID {proc['pid']} {proc['name']} CPU {proc['cpu']:.1f}% RAM {proc['mem_mb']:.1f} MB"})
+        for indicator in _current_indicators()[:3]:
+            events.append({'time': datetime.now().isoformat(), 'lane': 'network', 'title': 'Live indicator', 'detail': f"{indicator['type']} {indicator['value']} from PID {indicator.get('pid') or 'unknown'}"})
+    return anomaly, sorted(events, key=lambda x: x['time'])
+
+
+def _validate_terminal_command(command):
+    try:
+        parts = shlex.split(command)
+    except ValueError as exc:
+        return None, str(exc)
+    if not parts:
+        return None, 'Enter a diagnostic command.'
+    base = os.path.basename(parts[0])
+    if base not in DIAGNOSTIC_COMMANDS:
+        return None, f"Command '{base}' is not enabled. Allowed: {', '.join(sorted(DIAGNOSTIC_COMMANDS))}"
+    if any(token.startswith('/') or '..' in token for token in parts[1:]):
+        return None, 'Absolute paths and parent directory traversal are blocked in browser diagnostics.'
+    return parts, None
+
+
+def _ws_send(sock, text):
+    payload = text.encode('utf-8')
+    if len(payload) < 126:
+        header = struct.pack('!BB', 0x81, len(payload))
+    elif len(payload) < 65536:
+        header = struct.pack('!BBH', 0x81, 126, len(payload))
+    else:
+        header = struct.pack('!BBQ', 0x81, 127, len(payload))
+    sock.sendall(header + payload)
+
+
+def _ws_recv(sock):
+    header = sock.recv(2)
+    if len(header) < 2:
+        return None
+    opcode = header[0] & 0x0F
+    length = header[1] & 0x7F
+    if opcode == 0x8:
+        return None
+    if length == 126:
+        length = struct.unpack('!H', sock.recv(2))[0]
+    elif length == 127:
+        length = struct.unpack('!Q', sock.recv(8))[0]
+    mask = sock.recv(4)
+    data = bytearray(sock.recv(length))
+    for i in range(length):
+        data[i] ^= mask[i % 4]
+    return data.decode('utf-8', errors='replace')
+
+
+class TerminalWebSocketHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        data = self.request.recv(2048).decode('utf-8', errors='ignore')
+        key_line = next((line for line in data.splitlines() if line.lower().startswith('sec-websocket-key:')), None)
+        if not key_line:
+            return
+        key = key_line.split(':', 1)[1].strip()
+        accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+        self.request.sendall((
+            'HTTP/1.1 101 Switching Protocols\r\n'
+            'Upgrade: websocket\r\n'
+            'Connection: Upgrade\r\n'
+            f'Sec-WebSocket-Accept: {accept}\r\n\r\n'
+        ).encode('utf-8'))
+        _ws_send(self.request, 'Connected to SAAOE diagnostic terminal. Allowed commands: ' + ', '.join(sorted(DIAGNOSTIC_COMMANDS)) + '\n')
+        while True:
+            command = _ws_recv(self.request)
+            if command is None:
+                break
+            args, error = _validate_terminal_command(command)
+            if error:
+                _ws_send(self.request, f"blocked: {error}\n")
+                continue
+            try:
+                proc = subprocess.Popen(args, cwd=BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                start = time.time()
+                while proc.poll() is None:
+                    if time.time() - start > 12:
+                        proc.kill()
+                        _ws_send(self.request, '\ncommand timed out after 12 seconds\n')
+                        break
+                    ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+                    if ready:
+                        line = proc.stdout.readline()
+                        if line:
+                            _ws_send(self.request, line)
+                if proc.stdout:
+                    for line in proc.stdout.readlines():
+                        _ws_send(self.request, line)
+                _ws_send(self.request, f"\nexit {proc.returncode if proc.returncode is not None else 'timeout'}\n")
+            except FileNotFoundError:
+                _ws_send(self.request, f"{args[0]} is not installed on this host\n")
+            except Exception as exc:
+                _ws_send(self.request, f"terminal error: {exc}\n")
+
+
+def start_terminal_ws():
+    global TERMINAL_WS_STARTED
+    if TERMINAL_WS_STARTED:
+        return
+    TERMINAL_WS_STARTED = True
+    try:
+        server = socketserver.ThreadingTCPServer(('127.0.0.1', 8765), TerminalWebSocketHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    except OSError:
+        pass
+
+
+start_terminal_ws()
+
 # --- Routes ---
 @app.route('/')
 def dashboard():
@@ -233,6 +710,18 @@ def ethics():
 @app.route('/files')
 def files():
     return render_template('files.html')
+
+@app.route('/terminal')
+def terminal_page():
+    return render_template('terminal.html')
+
+@app.route('/reports')
+def reports_page():
+    return render_template('reports.html')
+
+@app.route('/automation')
+def automation_page():
+    return render_template('automation.html')
 
 @app.route('/api/usage')
 def api_usage():
@@ -322,6 +811,56 @@ def api_visualization_lab():
         }
     })
 
+@app.route('/api/terminal/status')
+def api_terminal_status():
+    return jsonify(host='127.0.0.1', port=8765, allowed=sorted(DIAGNOSTIC_COMMANDS))
+
+@app.route('/api/local_machine')
+def api_local_machine():
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage(BASE_DIR)
+    boot_time = datetime.fromtimestamp(psutil.boot_time())
+    users = []
+    try:
+        users = [{'name': u.name, 'terminal': u.terminal, 'started': datetime.fromtimestamp(u.started).isoformat()} for u in psutil.users()]
+    except (psutil.Error, OSError):
+        pass
+    connections = _local_connection_summary()
+    return jsonify({
+        'hostname': socket.gethostname(),
+        'fqdn': socket.getfqdn(),
+        'platform': platform.platform(),
+        'os': {'system': platform.system(), 'release': platform.release(), 'version': platform.version()},
+        'python': platform.python_version(),
+        'boot_time': boot_time.isoformat(),
+        'uptime_seconds': int((datetime.now() - boot_time).total_seconds()),
+        'cpu': {
+            'percent': psutil.cpu_percent(interval=0.05),
+            'cores_logical': psutil.cpu_count(logical=True),
+            'cores_physical': psutil.cpu_count(logical=False),
+        },
+        'memory': {
+            'percent': memory.percent,
+            'used_gb': _bytes_to_gb(memory.used),
+            'total_gb': _bytes_to_gb(memory.total),
+        },
+        'disk': {
+            'path': BASE_DIR,
+            'percent': disk.percent,
+            'used_gb': _bytes_to_gb(disk.used),
+            'total_gb': _bytes_to_gb(disk.total),
+        },
+        'network': {
+            'addresses': _local_ipv4_addresses(),
+            'listening_ports': connections['listening'],
+            'established': connections['established'],
+            'public_connections': len([c for c in connections['established'] if c['public']]),
+        },
+        'processes': {'count': len(psutil.pids())},
+        'users': users,
+        'detected_at': datetime.now().isoformat(),
+    })
+
 @app.route('/api/procs/top')
 def api_procs_top():
     return jsonify(_top_procs(n=5))
@@ -338,7 +877,7 @@ def api_procs():
     for mem_proc in data['mem_top']:
         if mem_proc not in rows:  # avoid duplicates
             rows.append({**mem_proc, 'type': 'mem'})
-    return jsonify(rows=rows[:limit], updated=data['ts'])
+    return jsonify(rows=rows[:limit], total_processes=data.get('total_processes', len(rows)), updated=data['ts'])
 
 @app.route('/api/temps')
 def api_temps():
@@ -352,84 +891,41 @@ def api_gpu():
 def anomalies_page():
     return render_template('anomalies.html')
 
+@app.route('/anomalies/<anomaly_id>')
+def anomaly_detail_page(anomaly_id):
+    return render_template('anomaly_detail.html', anomaly_id=anomaly_id)
+
 @app.route('/api/anomalies')
 def api_anomalies():
-    if not os.path.exists(LOG_PATH):
-        return jsonify(anomalies=[])
+    return jsonify(anomalies=_load_anomalies(
+        start=request.args.get('start'),
+        end=request.args.get('end'),
+        severity=request.args.get('severity')
+    ))
 
-    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
-    if df.empty:
-        return jsonify(anomalies=[])
+@app.route('/api/anomalies/heatmap')
+def api_anomalies_heatmap():
+    anomalies = _load_anomalies(apply_automation=False)
+    now = pd.Timestamp.now()
+    buckets = []
+    for hour in range(23, -1, -1):
+        start = now - pd.Timedelta(hours=hour + 1)
+        end = now - pd.Timedelta(hours=hour)
+        label = end.strftime('%H:00')
+        row = {'hour': label, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        for anomaly in anomalies:
+            ts = pd.to_datetime(anomaly['timestamp'])
+            if start <= ts < end:
+                row[anomaly.get('severity', 'low')] = row.get(anomaly.get('severity', 'low'), 0) + 1
+        buckets.append(row)
+    return jsonify(buckets=buckets)
 
-    # filter window support
-    start = request.args.get('start')
-    end = request.args.get('end')
-    if start:
-        df = df[df['timestamp'] >= pd.to_datetime(start)]
-    if end:
-        df = df[df['timestamp'] <= pd.to_datetime(end)]
-
-    anomalies = []
-    for col in ['cpu_percent', 'memory_percent']:
-        mean_val = df[col].mean()
-        std_val = df[col].std() if len(df) > 1 else 0
-        if std_val == 0:
-            continue
-        thresh = mean_val + 2 * std_val
-        high = df[df[col] > thresh]
-        for _, row in high.iterrows():
-            z = (row[col] - mean_val) / std_val
-            severity = 'critical' if z > 3 else 'high'
-            anomalies.append({
-                'timestamp': row['timestamp'].isoformat(),
-                'metric': col,
-                'value': float(row[col]),
-                'threshold': float(thresh),
-                'severity': severity,
-                'category': 'system',
-                'confidence': min(1.0, abs(z) / 5)
-            })
-
-    # apply custom rules (extends results)
-    for rule in anomaly_rules:
-        if not rule.get('enabled'):
-            continue
-        metric = rule['metric']
-        if metric not in df.columns:
-            continue
-        rvalue = df[metric].iloc[-1] if not df.empty else None
-        if rvalue is None:
-            continue
-        ops = {
-            '>': rvalue > rule['threshold'],
-            '<': rvalue < rule['threshold'],
-            '>=': rvalue >= rule['threshold'],
-            '<=': rvalue <= rule['threshold']
-        }
-        if ops.get(rule['operator'], False):
-            anomalies.append({
-                'timestamp': datetime.now().isoformat(),
-                'metric': metric,
-                'value': float(rvalue),
-                'threshold': float(rule['threshold']),
-                'severity': rule['severity'],
-                'category': 'custom',
-                'confidence': 0.9,
-                'rule_name': f"Custom {metric} {rule['operator']} {rule['threshold']}"
-            })
-
-    # sort and limit
-    sorted_list = sorted(anomalies, key=lambda x: x['timestamp'], reverse=True)
-
-    # apply playbooks
-    apply_playbooks(sorted_list)
-
-    # filtering by severity
-    severity = request.args.get('severity')
-    if severity:
-        sorted_list = [a for a in sorted_list if a.get('severity') == severity]
-
-    return jsonify(anomalies=sorted_list[:200])
+@app.route('/api/anomalies/<anomaly_id>')
+def api_anomaly_detail(anomaly_id):
+    anomaly, events = _timeline_for_anomaly(anomaly_id)
+    if not anomaly:
+        return jsonify(error='not found'), 404
+    return jsonify(anomaly=anomaly, timeline=events)
 
 def op_eval(value, operator, threshold):
     if operator == '>': return value > threshold
@@ -439,6 +935,7 @@ def op_eval(value, operator, threshold):
     return False
 
 def apply_playbooks(anomalies):
+    seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in playbook_runs}
     for anomaly in anomalies:
         for pb in playbooks:
             if not pb.get('enabled', False):
@@ -446,10 +943,13 @@ def apply_playbooks(anomalies):
             if anomaly.get('metric') != pb.get('metric'):
                 continue
             if op_eval(anomaly.get('value', 0), pb.get('operator'), pb.get('threshold')):
+                if (pb['id'], anomaly.get('id')) in seen:
+                    continue
                 run_entry = {
                     'id': len(playbook_runs)+1,
                     'playbook_id': pb['id'],
                     'name': pb['name'],
+                    'anomaly_id': anomaly.get('id'),
                     'metric': anomaly['metric'],
                     'value': anomaly['value'],
                     'threshold': pb['threshold'],
@@ -457,9 +957,11 @@ def apply_playbooks(anomalies):
                     'target': pb['target'],
                     'timestamp': datetime.now().isoformat(),
                     'auto': pb.get('auto', False),
-                    'status': 'executed' if pb.get('auto') else 'ready'
+                    'status': 'executed' if pb.get('auto') else 'ready',
+                    'yaml': pb.get('yaml', '')
                 }
                 playbook_runs.append(run_entry)
+                seen.add((pb['id'], anomaly.get('id')))
                 if pb.get('auto'):
                     notification_queue.put({
                         'type': 'playbook_trigger',
@@ -480,13 +982,15 @@ def api_playbooks():
     new_pb = {
         'id': next_playbook_id,
         'name': payload.get('name', 'New Playbook'),
+        'category': payload.get('category', 'system'),
         'metric': payload.get('metric', 'cpu_percent'),
         'operator': payload.get('operator', '>'),
         'threshold': float(payload.get('threshold', 90)),
         'action': payload.get('action_type', 'block_ip'),
         'target': payload.get('target', 'external'),
         'enabled': bool(payload.get('enabled', True)),
-        'auto': bool(payload.get('auto', False))
+        'auto': bool(payload.get('auto', False)),
+        'yaml': payload.get('yaml', '')
     }
     playbooks.append(new_pb)
     next_playbook_id += 1
@@ -495,26 +999,77 @@ def api_playbooks():
 @app.route('/api/playbook_trigger', methods=['POST'])
 def api_playbook_trigger():
     payload = request.json or {}
-    pb_id = int(payload.get('id', 0))
+    pb_id = int(payload.get('id', 0) or 0)
+    anomaly = None
+    if payload.get('anomaly_id'):
+        anomaly = next((a for a in _load_anomalies(apply_automation=False) if a['id'] == payload.get('anomaly_id')), None)
     pb = next((x for x in playbooks if x['id'] == pb_id), None)
+    if not pb and anomaly:
+        pb = next((x for x in playbooks if x.get('enabled') and x.get('category') == anomaly.get('category')), None)
+    if not pb and anomaly:
+        pb = next((x for x in playbooks if x.get('enabled') and x.get('metric') == anomaly.get('metric')), None)
     if not pb:
         return jsonify(success=False, message='Playbook not found'), 404
     run_entry = {
         'id': len(playbook_runs)+1,
         'playbook_id': pb['id'],
         'name': pb['name'],
-        'metric': payload.get('metric', 'n/a'),
-        'value': payload.get('value', 0),
+        'metric': payload.get('metric') or (anomaly or {}).get('metric', 'n/a'),
+        'value': payload.get('value') or (anomaly or {}).get('value', 0),
         'threshold': pb['threshold'],
         'action': pb['action'],
         'target': pb['target'],
         'timestamp': datetime.now().isoformat(),
         'auto': False,
-        'status': 'manual_triggered'
+        'status': 'manual_triggered',
+        'anomaly_id': payload.get('anomaly_id'),
+        'yaml': pb.get('yaml', '')
     }
     playbook_runs.append(run_entry)
     notification_queue.put({'type':'playbook_manual_trigger','playbook':pb['name'],'details':run_entry})
     return jsonify(success=True, run=run_entry)
+
+@app.route('/api/threat_intel/lookup')
+def api_threat_intel_lookup():
+    indicator_type = request.args.get('type', 'ip')
+    indicator = request.args.get('indicator', '')
+    return jsonify(indicator_type=indicator_type, indicator=indicator, result=_threat_lookup(indicator_type, indicator))
+
+@app.route('/api/reports/summary')
+def api_reports_summary():
+    return jsonify(_report_summary())
+
+@app.route('/api/reports/download.<fmt>')
+def api_reports_download(fmt):
+    summary = _report_summary()
+    if fmt == 'csv':
+        return _csv_response(summary)
+    if fmt == 'pdf':
+        return _pdf_response(summary)
+    return jsonify(error='unsupported format'), 400
+
+@app.route('/api/automation_rules', methods=['GET', 'POST'])
+def api_automation_rules():
+    global next_automation_rule_id
+    if request.method == 'GET':
+        return jsonify(rules=automation_rules, history=automation_history[-100:])
+    payload = request.json or {}
+    if payload.get('action') == 'delete':
+        rid = int(payload.get('id', 0))
+        automation_rules[:] = [r for r in automation_rules if r['id'] != rid]
+        return jsonify(success=True, rules=automation_rules)
+    rule = {
+        'id': next_automation_rule_id,
+        'name': payload.get('name', 'New automation rule'),
+        'field': payload.get('field', 'severity'),
+        'operator': payload.get('operator', 'equals'),
+        'value': payload.get('value', 'critical'),
+        'action': payload.get('run_action', 'Isolate Process'),
+        'enabled': bool(payload.get('enabled', True)),
+    }
+    automation_rules.append(rule)
+    next_automation_rule_id += 1
+    return jsonify(success=True, rule=rule, rules=automation_rules)
 
 @app.route('/api/notifications')
 def api_notifications():
@@ -578,28 +1133,80 @@ def api_logs():
 
 @app.route('/api/audit_summary')
 def api_audit_summary():
-    # Placeholder for audit summary
-    return jsonify(summary="5 critical events in last hour, 23 warnings")
+    rows = _audit_rows(limit=200)
+    warnings = len([r for r in rows if r['severity'] == 'warning'])
+    denied = len([r for r in rows if r['outcome'] == 'denied'])
+    return jsonify(summary=f"{len(rows)} telemetry audit events, {warnings} warnings, {denied} denied outcomes")
 
 @app.route('/api/ai_alerts')
 def api_ai_alerts():
-    # Placeholder for AI alerts
-    return jsonify(alerts="Model drift detected, retraining recommended")
+    anomalies = _load_anomalies(apply_automation=False)
+    if not anomalies:
+        return jsonify(alerts="No anomaly alerts from current telemetry")
+    critical = len([a for a in anomalies if a['severity'] == 'critical'])
+    high_risk = len([a for a in anomalies if a['risk_score'] >= 75])
+    return jsonify(alerts=f"{len(anomalies)} telemetry anomalies, {critical} critical, {high_risk} high risk")
 
 @app.route('/api/security/alerts')
 def api_security_alerts():
-    # Mock security alerts
-    return jsonify(alerts=[
-        {'time': '14:32', 'event': 'Unauthorized access', 'severity': 'High', 'source': '192.168.1.100'},
-        {'time': '14:28', 'event': 'Firewall triggered', 'severity': 'Medium', 'source': 'eth0'}
-    ])
+    alerts = []
+    for anomaly in _load_anomalies(apply_automation=False)[:50]:
+        alerts.append({
+            'id': anomaly['id'],
+            'time': anomaly['timestamp'],
+            'event': f"{anomaly['metric']} anomaly",
+            'severity': anomaly['severity'],
+            'source': anomaly.get('indicator', 'local telemetry'),
+            'status': 'open' if anomaly['risk_score'] >= 75 else 'investigating',
+            'title': f"{anomaly['severity'].title()} {anomaly['metric']} anomaly",
+            'process': anomaly.get('indicator', 'local telemetry'),
+            'confidence': round(float(anomaly.get('confidence', 0)) * 100),
+            'recommendation': 'Trigger matching playbook' if anomaly['risk_score'] >= 75 else 'Review correlated telemetry',
+            'risk_score': anomaly['risk_score'],
+        })
+    return jsonify(alerts=alerts)
 
 @app.route('/api/files/access')
 def api_files_access():
-    # Mock file access
-    return jsonify(access=[
-        {'time': '14:45', 'user': 'user1', 'file': '/home/user1/docs/private.txt', 'action': 'Read', 'classification': 'Private'}
-    ])
+    files = []
+    roots = [BASE_DIR]
+    sensitive_markers = ('secret', 'credential', 'token', 'key', '.env', 'private')
+    confidential_markers = ('log', 'audit', 'config', 'conf', 'csv')
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in {'.git', 'venv', '__pycache__'}]
+            for filename in filenames:
+                path = os.path.join(dirpath, filename)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                lowered = path.lower()
+                if any(marker in lowered for marker in sensitive_markers):
+                    sensitivity = 'restricted'
+                    mac = 'owner only'
+                elif any(marker in lowered for marker in confidential_markers):
+                    sensitivity = 'confidential'
+                    mac = 'read only'
+                elif path.endswith(('.py', '.html', '.css', '.md', '.txt')):
+                    sensitivity = 'internal'
+                    mac = 'read write'
+                else:
+                    sensitivity = 'public'
+                    mac = 'read only'
+                files.append({
+                    'time': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    'filename': filename,
+                    'path': os.path.relpath(path, BASE_DIR),
+                    'sensitivity': sensitivity,
+                    'owner': str(stat.st_uid),
+                    'mac': mac,
+                    'accesses': 0,
+                    'size': stat.st_size,
+                    'action': 'stat',
+                    'classification': sensitivity,
+                })
+    return jsonify(access=sorted(files, key=lambda x: x['time'], reverse=True)[:200])
 
 @app.route('/api/audit/stats')
 def api_audit_stats():
@@ -628,52 +1235,54 @@ def playbooks_page():
 
 @app.route('/api/assets')
 def api_assets():
-    # mocked assets summary, in prod should be from CMDB / service inventory
-    local = {'name': socket.gethostname(), 'ip': socket.gethostbyname(socket.gethostname()), 'health': 'good', 'active_processes': len(psutil.pids()), 'vuln_scan': '2026-03-19 (no findings)'}
-    peers = []
-    for i in range(3):
-        peers.append({
-            'name': f'host-{100+i}',
-            'ip': f'10.0.1.{i+5}',
-            'health': random.choice(['good', 'warning', 'critical']),
-            'active_processes': random.randint(40, 150),
-            'vuln_scan': f'2026-03-{15+i} ' + random.choice(['(no findings)', '(low findings)', '(needs patch)'])
-        })
-    return jsonify(assets=[local] + peers)
+    cpu = psutil.cpu_percent(interval=0.05)
+    mem = psutil.virtual_memory().percent
+    health = 'critical' if cpu > 90 or mem > 90 else ('warning' if cpu > 70 or mem > 80 else 'good')
+    addrs = []
+    for entries in psutil.net_if_addrs().values():
+        for entry in entries:
+            if getattr(entry, 'family', None) == socket.AF_INET and entry.address != '127.0.0.1':
+                addrs.append(entry.address)
+    local = {
+        'name': socket.gethostname(),
+        'ip': addrs[0] if addrs else '127.0.0.1',
+        'health': health,
+        'active_processes': len(psutil.pids()),
+        'vuln_scan': f"live health: CPU {cpu:.1f}% / memory {mem:.1f}%"
+    }
+    return jsonify(assets=[local])
 
 @app.route('/api/threat_trends')
 def api_threat_trends():
-    df = pd.read_csv(LOG_PATH, parse_dates=['timestamp']) if os.path.exists(LOG_PATH) else pd.DataFrame()
-    if df.empty:
+    anomalies = _load_anomalies(apply_automation=False)
+    if not anomalies:
         return jsonify(trends=[])
-
-    df['day'] = df['timestamp'].dt.floor('D')
-    summary = df.groupby('day').agg(anomalies=('cpu_percent','count')).reset_index()
-    # severity distribution mock
-    data = []
-    for _, row in summary.iterrows():
-        data.append({'day': row['day'].strftime('%Y-%m-%d'), 'count': int(row['anomalies']), 'critical': random.randint(0, 4), 'high': random.randint(0, 8), 'medium': random.randint(0,10), 'low': random.randint(0,12)})
+    buckets = {}
+    for anomaly in anomalies:
+        day = pd.to_datetime(anomaly['timestamp']).strftime('%Y-%m-%d')
+        buckets.setdefault(day, {'day': day, 'count': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0})
+        buckets[day]['count'] += 1
+        buckets[day][anomaly.get('severity', 'low')] += 1
+    data = [buckets[key] for key in sorted(buckets)]
     return jsonify(trends=data)
 
 @app.route('/api/net_graph')
 def api_net_graph():
-    # Adult minimal graph - process-to-external ip mapping using live pid connections
     connections = []
     try:
-        # use psutil.net_connections to avoid deprecation warning (p.connections deprecated)
-        proc_map = {p.pid: p.info['name'] for p in psutil.process_iter(attrs=['pid','name'])}
+        proc_map = {p.pid: p.info['name'] for p in psutil.process_iter(attrs=['pid', 'name'])}
         for c in psutil.net_connections(kind='inet'):
             if c.raddr and getattr(c, 'status', None) == 'ESTABLISHED' and c.pid in proc_map:
                 proc_name = proc_map.get(c.pid, f'pid-{c.pid}')
-                connections.append((proc_name, c.raddr.ip))
+                connections.append((c.pid, proc_name, c.raddr.ip))
     except Exception:
         pass
 
     nodes = []
     links = []
     seen_nodes = set()
-    for proc, ip in connections[:20]:
-        proc_id = f'proc-{proc}-{random.randint(1,9999)}'
+    for pid, proc, ip in connections[:40]:
+        proc_id = f'proc-{pid}'
         ext_id = f'ext-{ip}'
         if proc_id not in seen_nodes:
             nodes.append({'id': proc_id, 'label': proc, 'type': 'process'})
@@ -681,11 +1290,8 @@ def api_net_graph():
         if ext_id not in seen_nodes:
             nodes.append({'id': ext_id, 'label': ip, 'type': 'ip'})
             seen_nodes.add(ext_id)
-        links.append({'source': proc_id, 'target': ext_id, 'score': random.uniform(0.2,1.0)})
-
-    if not nodes:
-        nodes = [{'id':'proc-dummy','label':'svc-example','type':'process'},{'id':'ext-8.8.8.8','label':'8.8.8.8','type':'ip'}]
-        links = [{'source':'proc-dummy','target':'ext-8.8.8.8','score':0.8}]
+        threat = _threat_lookup('ip', ip)
+        links.append({'source': proc_id, 'target': ext_id, 'score': threat['confidence'] / 100 if threat['matched'] else 0.0})
 
     return jsonify(graph={'nodes':nodes,'links':links})
 

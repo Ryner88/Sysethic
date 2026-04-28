@@ -81,12 +81,18 @@ function renderPolicyTable() {
 }
 
 async function loadEthicsStats() {
-  // Stat cards (mocked for now)
-  document.getElementById('totalDataPoints').textContent = 37;
-  document.getElementById('anomalyFlags').textContent = 6;
+  const [logsRes, anomaliesRes] = await Promise.all([
+    fetch('/api/logs'),
+    fetch('/api/anomalies')
+  ]);
+  const logs = (await logsRes.json()).logs || [];
+  const anomalies = (await anomaliesRes.json()).anomalies || [];
+  document.getElementById('totalDataPoints').textContent = logs.length;
+  document.getElementById('anomalyFlags').textContent = anomalies.length;
   document.getElementById('anomalyTrend').textContent = 'AI flagged events only';
-  document.getElementById('privacyScore').textContent = '91%';
-  document.getElementById('privacyDesc').textContent = 'Based on ethical principles compliance';
+  const privacyScore = logs.length ? Math.max(70, 100 - anomalies.filter(a=>a.risk_score >= 75).length) : 100;
+  document.getElementById('privacyScore').textContent = `${privacyScore}%`;
+  document.getElementById('privacyDesc').textContent = 'Based on telemetry volume and high-risk anomalies';
 
   // Principles
   document.getElementById('ethicsPrinciples').innerHTML = renderPrinciples();
@@ -99,10 +105,10 @@ async function loadEthicsStats() {
   new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: ['student','guest','admin'],
+      labels: ['system telemetry','anomalies','high risk'],
       datasets: [{
         label: 'Data Points',
-        data: [5,4,3],
+        data: [logs.length, anomalies.length, anomalies.filter(a=>a.risk_score >= 75).length],
         backgroundColor: 'rgba(0,255,176,0.7)',
         borderRadius: 8
       }]
