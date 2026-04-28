@@ -219,23 +219,23 @@ The diagrams below map each dashboard page to the Flask endpoints, browser widge
 ```mermaid
 flowchart LR
     Base[base.html Sidebar]
-    Base --> Dashboard[/ Dashboard]
-    Base --> Processes[/processes Processes]
-    Base --> Analytics[/analytics Analytics]
-    Base --> Visualization[/visualization-lab Visualization Lab]
-    Base --> ThreatTrends[/threat-trends Threat Trends]
-    Base --> Assets[/assets Assets]
-    Base --> Playbooks[/playbooks Playbooks]
-    Base --> Automation[/automation Automation]
-    Base --> Reports[/reports Reports]
-    Base --> Terminal[/terminal Terminal]
-    Base --> Security[/security Security]
-    Base --> AuditLogs[/audit-logs Audit Logs]
-    Base --> Ethics[/ethics Ethics]
-    Base --> Anomalies[/anomalies Anomalies]
-    Base --> Files[/files Files]
+    Base --> Dashboard["/ Dashboard"]
+    Base --> Processes["/processes Processes"]
+    Base --> Analytics["/analytics Analytics"]
+    Base --> Visualization["/visualization-lab Visualization Lab"]
+    Base --> ThreatTrends["/threat-trends Threat Trends"]
+    Base --> Assets["/assets Assets"]
+    Base --> Playbooks["/playbooks Playbooks"]
+    Base --> Automation["/automation Automation"]
+    Base --> Reports["/reports Reports"]
+    Base --> Terminal["/terminal Terminal"]
+    Base --> Security["/security Security"]
+    Base --> AuditLogs["/audit-logs Audit Logs"]
+    Base --> Ethics["/ethics Ethics"]
+    Base --> Anomalies["/anomalies Anomalies"]
+    Base --> Files["/files Files"]
 
-    Base --> Notifications[/api/notifications SSE]
+    Base --> Notifications["/api/notifications SSE"]
 ```
 
 ### Dashboard Page
@@ -243,16 +243,16 @@ flowchart LR
 ```mermaid
 flowchart TB
     DashboardPage[dashboard.html]
-    DashboardPage --> Usage[/api/usage]
-    DashboardPage --> Disk[/api/disk]
-    DashboardPage --> Net[/api/net]
-    DashboardPage --> Procs[/api/procs]
-    DashboardPage --> Local[/api/local_machine]
-    DashboardPage --> Health[/api/system_health]
-    DashboardPage --> Logs[/api/logs]
-    DashboardPage --> Audit[/api/audit_summary]
-    DashboardPage --> SecurityAlerts[/api/security/alerts]
-    DashboardPage --> Anomalies[/api/anomalies]
+    DashboardPage --> Usage["/api/usage"]
+    DashboardPage --> Disk["/api/disk"]
+    DashboardPage --> Net["/api/net"]
+    DashboardPage --> Procs["/api/procs"]
+    DashboardPage --> Local["/api/local_machine"]
+    DashboardPage --> Health["/api/system_health"]
+    DashboardPage --> Logs["/api/logs"]
+    DashboardPage --> Audit["/api/audit_summary"]
+    DashboardPage --> SecurityAlerts["/api/security/alerts"]
+    DashboardPage --> Anomalies["/api/anomalies"]
 
     Usage --> RingBuffers[(CPU and memory buffers)]
     Disk --> RingBuffers
@@ -269,8 +269,8 @@ flowchart TB
 ```mermaid
 flowchart TB
     ProcessesPage[processes.html]
-    ProcessesPage --> ProcessApi[/api/procs]
-    ProcessesPage --> TopProcessApi[/api/procs/top]
+    ProcessesPage --> ProcessApi["/api/procs"]
+    ProcessesPage --> TopProcessApi["/api/procs/top"]
     ProcessApi --> ProcessCache[(2 second process cache)]
     TopProcessApi --> ProcessCache
     ProcessCache --> HostProcesses[Host process list]
@@ -283,11 +283,11 @@ flowchart TB
 ```mermaid
 flowchart TB
     AnalyticsPage[analytics.html]
-    AnalyticsPage --> Usage[/api/usage]
-    AnalyticsPage --> Disk[/api/disk]
-    AnalyticsPage --> Net[/api/net]
-    AnalyticsPage --> Temps[/api/temps]
-    AnalyticsPage --> Gpu[/api/gpu]
+    AnalyticsPage --> Usage["/api/usage"]
+    AnalyticsPage --> Disk["/api/disk"]
+    AnalyticsPage --> Net["/api/net"]
+    AnalyticsPage --> Temps["/api/temps"]
+    AnalyticsPage --> Gpu["/api/gpu"]
 
     Usage --> LineCharts[CPU and memory charts]
     Disk --> DiskCharts[Read and write charts]
@@ -301,7 +301,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     VisualizationPage[visualization_lab.html]
-    VisualizationPage --> VisualizationApi[/api/visualization_lab]
+    VisualizationPage --> VisualizationApi["/api/visualization_lab"]
     VisualizationApi --> UsageSeries[CPU and memory series]
     VisualizationApi --> DiskSeries[Disk read and write series]
     VisualizationApi --> NetSeries[Network RX and TX series]
@@ -317,7 +317,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     ThreatTrendsPage[threat_trends.html]
-    ThreatTrendsPage --> TrendsApi[/api/threat_trends]
+    ThreatTrendsPage --> TrendsApi["/api/threat_trends"]
     TrendsApi --> LoadAnomalies[_load_anomalies]
     LoadAnomalies --> SystemLog[(logs/system_log.csv)]
     LoadAnomalies --> Buckets[Daily severity buckets]
@@ -329,7 +329,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     AssetsPage[assets.html]
-    AssetsPage --> AssetsApi[/api/assets]
+    AssetsPage --> AssetsApi["/api/assets"]
     AssetsApi --> HostIdentity[hostname and local IP]
     AssetsApi --> CpuMemory[CPU and memory health]
     AssetsApi --> ProcessCount[active process count]
@@ -343,7 +343,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     PlaybooksPage[playbooks.html]
-    PlaybooksPage --> PlaybookApi[/api/playbooks]
+    PlaybooksPage --> PlaybookApi["/api/playbooks"]
     PlaybookApi --> PlaybookStore[(In-memory playbooks)]
     PlaybooksPage --> CreatePlaybook[Create playbook form]
     CreatePlaybook --> PlaybookApi
@@ -356,7 +356,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     AutomationPage[automation.html]
-    AutomationPage --> AutomationApi[/api/automation_rules]
+    AutomationPage --> AutomationApi["/api/automation_rules"]
     AutomationApi --> AutomationStore[(In-memory automation rules)]
     AutomationApi --> AutomationHistory[(Automation history)]
     AutomationPage --> RuleForm[Create conditional trigger]
@@ -370,9 +370,9 @@ flowchart TB
 ```mermaid
 flowchart TB
     ReportsPage[reports.html]
-    ReportsPage --> SummaryApi[/api/reports/summary]
-    ReportsPage --> CsvDownload[/api/reports/download.csv]
-    ReportsPage --> PdfDownload[/api/reports/download.pdf]
+    ReportsPage --> SummaryApi["/api/reports/summary"]
+    ReportsPage --> CsvDownload["/api/reports/download.csv"]
+    ReportsPage --> PdfDownload["/api/reports/download.pdf"]
     SummaryApi --> ReportSummary[_report_summary]
     CsvDownload --> ReportSummary
     PdfDownload --> ReportSummary
@@ -386,8 +386,8 @@ flowchart TB
 ```mermaid
 flowchart TB
     TerminalPage[terminal.html]
-    TerminalPage --> StatusApi[/api/terminal/status]
-    TerminalPage --> WebSocket[ws://127.0.0.1:8765]
+    TerminalPage --> StatusApi["/api/terminal/status"]
+    TerminalPage --> WebSocket["wss://127.0.0.1:8765"]
     StatusApi --> Allowlist[Allowed diagnostic commands]
     WebSocket --> Validator[_validate_terminal_command]
     Validator --> Allowlist
@@ -400,7 +400,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     SecurityPage[security.html]
-    SecurityPage --> SecurityAlerts[/api/security/alerts]
+    SecurityPage --> SecurityAlerts["/api/security/alerts"]
     SecurityAlerts --> LoadAnomalies[_load_anomalies]
     LoadAnomalies --> ThreatIntel[_decorate_threat_intel]
     ThreatIntel --> AlertCards[Security alert cards]
@@ -412,8 +412,8 @@ flowchart TB
 ```mermaid
 flowchart TB
     AuditLogsPage[audit_logs.html]
-    AuditLogsPage --> LogsApi[/api/logs]
-    AuditLogsPage --> AuditStats[/api/audit/stats]
+    AuditLogsPage --> LogsApi["/api/logs"]
+    AuditLogsPage --> AuditStats["/api/audit/stats"]
     LogsApi --> SystemLog[(logs/system_log.csv)]
     AuditStats --> SystemLog
     SystemLog --> AuditTable[Audit event table]
@@ -425,8 +425,8 @@ flowchart TB
 ```mermaid
 flowchart TB
     EthicsPage[ethics.html]
-    EthicsPage --> LogsApi[/api/logs]
-    EthicsPage --> AnomaliesApi[/api/anomalies]
+    EthicsPage --> LogsApi["/api/logs"]
+    EthicsPage --> AnomaliesApi["/api/anomalies"]
     LogsApi --> DataPointCount[Telemetry data point count]
     AnomaliesApi --> AnomalyCount[AI flagged anomaly count]
     AnomaliesApi --> PrivacyScore[Privacy score estimate]
@@ -438,10 +438,10 @@ flowchart TB
 ```mermaid
 flowchart TB
     AnomaliesPage[anomalies.html]
-    AnomaliesPage --> AnomaliesApi[/api/anomalies]
-    AnomaliesPage --> HeatmapApi[/api/anomalies/heatmap]
-    AnomaliesPage --> RulesApi[/api/anomaly_rules]
-    AnomaliesPage --> TriggerApi[/api/playbook_trigger]
+    AnomaliesPage --> AnomaliesApi["/api/anomalies"]
+    AnomaliesPage --> HeatmapApi["/api/anomalies/heatmap"]
+    AnomaliesPage --> RulesApi["/api/anomaly_rules"]
+    AnomaliesPage --> TriggerApi["/api/playbook_trigger"]
     AnomaliesApi --> AnomalyTable[Risk enriched anomaly table]
     HeatmapApi --> DensityHeatmap[24 hour density heatmap]
     RulesApi --> RulePanel[Rule configuration panel]
@@ -453,7 +453,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     DetailPage[anomaly_detail.html]
-    DetailPage --> DetailApi[/api/anomalies/:id]
+    DetailPage --> DetailApi["/api/anomalies/:id"]
     DetailApi --> AnomalyLookup[Find decorated anomaly]
     DetailApi --> TimelineBuilder[_timeline_for_anomaly]
     AnomalyLookup --> DetailStats[Value risk indicator frameworks]
@@ -465,7 +465,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     FilesPage[files.html]
-    FilesPage --> FileAccessApi[/api/files/access]
+    FilesPage --> FileAccessApi["/api/files/access"]
     FileAccessApi --> BaseDir[Project filesystem scan]
     FileAccessApi --> Classifier[Sensitivity classifier]
     Classifier --> FileRows[File access rows]
