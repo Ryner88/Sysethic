@@ -27,7 +27,7 @@
     <div class="card">
       <div class="label">Enabled Commands</div>
       <div id="allowedCommands" class="pill-list"></div>
-      <div class="help">Commands run through a local WebSocket service on 127.0.0.1:8765 with shell execution disabled and a short timeout.</div>
+      <div class="help" id="terminalHelp">Commands run through a configured local WebSocket service with shell execution disabled and a short timeout.</div>
     </div>
   </section>
 </div>
@@ -36,6 +36,7 @@
 {% block scripts %}
 <script>
 let ws;
+let terminalWsUrl = 'ws://127.0.0.1:8765';
 const out = document.getElementById('terminalOutput');
 
 function print(text, cls='') {
@@ -48,7 +49,7 @@ function print(text, cls='') {
 
 function connect() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
-  ws = new WebSocket('ws://127.0.0.1:8765');
+  ws = new WebSocket(terminalWsUrl);
   ws.onopen = () => print('websocket connected\n', 'terminal-status');
   ws.onmessage = (event) => print(event.data);
   ws.onclose = () => print('websocket closed\n', 'terminal-status');
@@ -67,6 +68,9 @@ function runCommand() {
 
 fetch('/api/terminal/status').then(r=>r.json()).then(data => {
   document.getElementById('allowedCommands').innerHTML = data.allowed.map(c => `<span class="badge">${c}</span>`).join('');
+  terminalWsUrl = `ws://${data.host}:${data.port}`;
+  document.getElementById('terminalHelp').textContent = `Commands run through ${terminalWsUrl} with shell execution disabled and a short timeout. Status: ${data.running ? 'running' : 'not started'}.`;
+  if (data.running) connect();
 });
 document.getElementById('connectBtn').onclick = connect;
 document.getElementById('runBtn').onclick = runCommand;
@@ -74,6 +78,5 @@ document.getElementById('clearBtn').onclick = () => out.textContent = '';
 document.getElementById('commandInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') runCommand();
 });
-connect();
 </script>
 {% endblock %}

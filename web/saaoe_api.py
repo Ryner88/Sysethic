@@ -15,6 +15,7 @@ import os
 import platform
 import select
 import shlex
+import shutil
 import socketserver
 import struct
 import subprocess
@@ -93,7 +94,14 @@ automation_history = []
 THREAT_INTEL_PATH = os.environ.get('THREAT_INTEL_PATH', os.path.join(BASE_DIR, 'config', 'threat_intel.json'))
 
 DIAGNOSTIC_COMMANDS = {'netstat', 'ss', 'grep', 'rg', 'ps', 'uptime', 'whoami', 'hostname'}
+TERMINAL_WS_HOST = os.environ.get('TERMINAL_WS_HOST', '127.0.0.1')
+TERMINAL_WS_PORT = int(os.environ.get('TERMINAL_WS_PORT', '8765'))
 TERMINAL_WS_STARTED = False
+TERMINAL_WS_SERVER = None
+
+FILES_ACCESS_CACHE_TTL_SECONDS = int(os.environ.get('FILES_ACCESS_CACHE_TTL_SECONDS', '15'))
+_files_access_cache = {'timestamp': 0.0, 'payload': None}
+_threat_intel_cache = {'mtime': None, 'data': None}
 
 # --- Background sampler ---
 
@@ -245,8 +253,20 @@ def _load_threat_intel():
         return {'ips': {}, 'domains': {}, 'hashes': {}}
 
 
+def _get_cached_threat_intel():
+    try:
+        mtime = os.path.getmtime(THREAT_INTEL_PATH)
+    except OSError:
+        mtime = None
+
+    if _threat_intel_cache['data'] is None or _threat_intel_cache['mtime'] != mtime:
+        _threat_intel_cache['data'] = _load_threat_intel()
+        _threat_intel_cache['mtime'] = mtime
+    return _threat_intel_cache['data']
+
+
 def _threat_lookup(indicator_type, indicator):
-    feed = _load_threat_intel().get(f'{indicator_type}s', {})
+    feed = _get_cached_threat_intel().get(f'{indicator_type}s', {})
     hit = feed.get(str(indicator).lower()) or feed.get(str(indicator))
     if not hit:
         return {'matched': False, 'confidence': 0, 'source': 'local feed: no match', 'tags': []}
@@ -367,21 +387,26 @@ def _framework_map(anomaly, risk_score):
     return mappings
 
 
-def _load_anomalies(start=None, end=None, severity=None, apply_automation=True):
+def _load_telemetry_df(start=None, end=None):
     if not os.path.exists(LOG_PATH):
-        return []
+        return pd.DataFrame()
 
     df = pd.read_csv(LOG_PATH, parse_dates=['timestamp'])
     if df.empty:
-        return []
+        return df
 
     if start:
         df = df[df['timestamp'] >= pd.to_datetime(start)]
     if end:
         df = df[df['timestamp'] <= pd.to_datetime(end)]
+    return df
 
+
+def _detect_stat_anomalies(df):
     anomalies = []
     for col in ['cpu_percent', 'memory_percent']:
+        if col not in df.columns:
+            continue
         mean_val = df[col].mean()
         std_val = df[col].std() if len(df) > 1 else 0
         if std_val == 0:
@@ -400,7 +425,11 @@ def _load_anomalies(start=None, end=None, severity=None, apply_automation=True):
                 'category': 'system' if col != 'memory_percent' else 'host',
                 'confidence': min(1.0, abs(z) / 5)
             })
+    return anomalies
 
+
+def _detect_rule_anomalies(df):
+    anomalies = []
     for rule in anomaly_rules:
         if not rule.get('enabled'):
             continue
@@ -419,6 +448,15 @@ def _load_anomalies(start=None, end=None, severity=None, apply_automation=True):
                 'confidence': 0.9,
                 'rule_name': f"Custom {metric} {rule['operator']} {rule['threshold']}"
             })
+    return anomalies
+
+
+def _load_anomalies(start=None, end=None, severity=None, apply_automation=True):
+    df = _load_telemetry_df(start=start, end=end)
+    if df.empty:
+        return []
+
+    anomalies = _detect_stat_anomalies(df) + _detect_rule_anomalies(df)
 
     decorated = [_decorate_threat_intel(a) for a in anomalies]
     sorted_list = sorted(decorated, key=lambda x: x['timestamp'], reverse=True)
@@ -580,12 +618,17 @@ def _validate_terminal_command(command):
         return None, str(exc)
     if not parts:
         return None, 'Enter a diagnostic command.'
-    base = os.path.basename(parts[0])
+    if os.path.basename(parts[0]) != parts[0]:
+        return None, 'Command paths are blocked. Use an enabled diagnostic command name only.'
+    base = parts[0]
     if base not in DIAGNOSTIC_COMMANDS:
         return None, f"Command '{base}' is not enabled. Allowed: {', '.join(sorted(DIAGNOSTIC_COMMANDS))}"
     if any(token.startswith('/') or '..' in token for token in parts[1:]):
         return None, 'Absolute paths and parent directory traversal are blocked in browser diagnostics.'
-    return parts, None
+    executable = shutil.which(base)
+    if not executable:
+        return None, f"Command '{base}' is not installed on this host."
+    return [executable, *parts[1:]], None
 
 
 def _ws_send(sock, text):
@@ -599,23 +642,46 @@ def _ws_send(sock, text):
     sock.sendall(header + payload)
 
 
+def _recv_exact(sock, length):
+    chunks = bytearray()
+    while len(chunks) < length:
+        chunk = sock.recv(length - len(chunks))
+        if not chunk:
+            return None
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
 def _ws_recv(sock):
-    header = sock.recv(2)
-    if len(header) < 2:
+    header = _recv_exact(sock, 2)
+    if header is None:
         return None
     opcode = header[0] & 0x0F
     length = header[1] & 0x7F
     if opcode == 0x8:
         return None
     if length == 126:
-        length = struct.unpack('!H', sock.recv(2))[0]
+        extended = _recv_exact(sock, 2)
+        if extended is None:
+            return None
+        length = struct.unpack('!H', extended)[0]
     elif length == 127:
-        length = struct.unpack('!Q', sock.recv(8))[0]
-    mask = sock.recv(4)
-    data = bytearray(sock.recv(length))
+        extended = _recv_exact(sock, 8)
+        if extended is None:
+            return None
+        length = struct.unpack('!Q', extended)[0]
+    mask = _recv_exact(sock, 4)
+    payload = _recv_exact(sock, length)
+    if mask is None or payload is None:
+        return None
+    data = bytearray(payload)
     for i in range(length):
         data[i] ^= mask[i % 4]
     return data.decode('utf-8', errors='replace')
+
+
+class TerminalWebSocketServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
 
 
 class TerminalWebSocketHandler(socketserver.BaseRequestHandler):
@@ -642,7 +708,14 @@ class TerminalWebSocketHandler(socketserver.BaseRequestHandler):
                 _ws_send(self.request, f"blocked: {error}\n")
                 continue
             try:
-                proc = subprocess.Popen(args, cwd=BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                # args is allowlisted in _validate_terminal_command and shell execution stays disabled.
+                proc = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                    args,
+                    cwd=BASE_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
                 start = time.time()
                 while proc.poll() is None:
                     if time.time() - start > 12:
@@ -665,18 +738,15 @@ class TerminalWebSocketHandler(socketserver.BaseRequestHandler):
 
 
 def start_terminal_ws():
-    global TERMINAL_WS_STARTED
+    global TERMINAL_WS_SERVER, TERMINAL_WS_STARTED
     if TERMINAL_WS_STARTED:
         return
-    TERMINAL_WS_STARTED = True
     try:
-        server = socketserver.ThreadingTCPServer(('127.0.0.1', 8765), TerminalWebSocketHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        TERMINAL_WS_SERVER = TerminalWebSocketServer((TERMINAL_WS_HOST, TERMINAL_WS_PORT), TerminalWebSocketHandler)
+        threading.Thread(target=TERMINAL_WS_SERVER.serve_forever, daemon=True).start()
+        TERMINAL_WS_STARTED = True
     except OSError:
         pass
-
-
-start_terminal_ws()
 
 # --- Routes ---
 @app.route('/')
@@ -837,7 +907,7 @@ def api_visualization_lab():
 
 @app.route('/api/terminal/status')
 def api_terminal_status():
-    return jsonify(host='127.0.0.1', port=8765, allowed=sorted(DIAGNOSTIC_COMMANDS))
+    return jsonify(host=TERMINAL_WS_HOST, port=TERMINAL_WS_PORT, running=TERMINAL_WS_STARTED, allowed=sorted(DIAGNOSTIC_COMMANDS))
 
 @app.route('/api/local_machine')
 def api_local_machine():
@@ -1192,6 +1262,10 @@ def api_security_alerts():
 
 @app.route('/api/files/access')
 def api_files_access():
+    now = time.time()
+    if _files_access_cache['payload'] is not None and now - _files_access_cache['timestamp'] < FILES_ACCESS_CACHE_TTL_SECONDS:
+        return jsonify(_files_access_cache['payload'])
+
     files = []
     roots = [BASE_DIR]
     sensitive_markers = ('secret', 'credential', 'token', 'key', '.env', 'private')
@@ -1230,7 +1304,10 @@ def api_files_access():
                     'action': 'stat',
                     'classification': sensitivity,
                 })
-    return jsonify(access=sorted(files, key=lambda x: x['time'], reverse=True)[:200])
+    payload = {'access': sorted(files, key=lambda x: x['time'], reverse=True)[:200]}
+    _files_access_cache['payload'] = payload
+    _files_access_cache['timestamp'] = now
+    return jsonify(payload)
 
 @app.route('/api/audit/stats')
 def api_audit_stats():
@@ -1320,4 +1397,5 @@ def api_net_graph():
     return jsonify(graph={'nodes':nodes,'links':links})
 
 if __name__ == '__main__':
+    start_terminal_ws()
     app.run(host='0.0.0.0', port=5000, debug=True)
