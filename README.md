@@ -17,7 +17,7 @@ Secure Autonomous Autonomous Operating Environment Monitor
 
 ## Architecture
 
-See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams. See [Future Feature Implmentation](docs/future-feature-implmentation.md) and [Method, Function, List Meaning, and Design](docs/method-function-list-meaning-and-design.md) for roadmap and implementation reference docs.
+See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams. See [Priority Fixes](docs/priority-fixes.md), [Future Feature Implmentation](docs/future-feature-implmentation.md), and [Method, Function, List Meaning, and Design](docs/method-function-list-meaning-and-design.md) for roadmap and implementation reference docs.
 
 ### Entities
 - **AuditLog**: System and user activity logs
