@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SysEthic • First Run Setup</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='sysethic.css') }}">
+</head>
+<body>
+  <main class="main-content" style="margin:0;min-height:100vh;display:grid;place-items:center;">
+    <section class="card" style="width:min(480px, calc(100vw - 32px));">
+      <div class="page-header">
+        <h2>First Run Setup</h2>
+        <span class="label">Create the local administrator</span>
+      </div>
+      {% if error %}<div class="alert-item" style="margin-bottom:14px;">{{ error }}</div>{% endif %}
+      <form method="post">
+        <label for="username" style="display:block;">
+          <span class="label">Admin Username</span>
+          <input id="username" name="username" class="btn" style="width:100%;margin:6px 0 14px;text-align:left;" autocomplete="username" value="{{ username or '' }}" autofocus>
+        </label>
+        <label for="password" style="display:block;">
+          <span class="label">Password</span>
+          <input id="password" name="password" type="password" class="btn" style="width:100%;margin:6px 0 8px;text-align:left;" autocomplete="new-password">
+        </label>
+        <div class="help" style="margin-bottom:14px;">Use at least 10 characters. A longer unique password is recommended.</div>
+        <label for="confirm" style="display:block;">
+          <span class="label">Confirm Password</span>
+          <input id="confirm" name="confirm" type="password" class="btn" style="width:100%;margin:6px 0 12px;text-align:left;" autocomplete="new-password">
+        </label>
+        <button class="btn" type="button" id="togglePassword" style="margin-bottom:18px;">Show Passwords</button>
+        <button class="btn" type="submit" style="width:100%;">Create Local Admin</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const password = document.getElementById('password');
+    const confirmPassword = document.getElementById('confirm');
+    const toggle = document.getElementById('togglePassword');
+    toggle.addEventListener('click', () => {
+      const visible = password.type === 'text';
+      password.type = visible ? 'password' : 'text';
+      confirmPassword.type = visible ? 'password' : 'text';
+      toggle.textContent = visible ? 'Show Passwords' : 'Hide Passwords';
+    });
+  </script>
+</body>
+</html>

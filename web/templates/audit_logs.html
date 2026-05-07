@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}SAAOE • Audit Logs{% endblock %}
+{% block title %}SysEthic • Audit Logs{% endblock %}
 
 {% block content %}
 <div class="wrap">
@@ -76,7 +76,7 @@ function renderLogRow(r) {
 }
 
 async function loadAuditLogs() {
-  const res = await fetch('/api/logs');
+  const res = await fetch('/api/audit_events');
   const data = await res.json();
   const logs = data.logs || [];
 

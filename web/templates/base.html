@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>{% block title %}SAAOE • Secure Environment{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='saaoe.css') }}">
+  <title>{% block title %}SysEthic • Secure Environment{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='sysethic.css') }}">
 </head>
 <body>
   <div class="app">
     <nav class="sidebar">
       <div class="sidebar-header">
-        <h1>SAAOE</h1>
+        <h1>SysEthic</h1>
         <p>Secure Environment</p>
       </div>
       <ul class="nav-list">
@@ -29,8 +29,17 @@
         <li><a href="{{ url_for('ethics') }}" class="{% if request.endpoint == 'ethics' %}active{% endif %}">⚖️ Ethics</a></li>
         <li><a href="{{ url_for('anomalies_page') }}" class="{% if request.endpoint == 'anomalies_page' %}active{% endif %}">🚨 Anomalies</a></li>
         <li><a href="{{ url_for('files') }}" class="{% if request.endpoint == 'files' %}active{% endif %}">📁 Files</a></li>
+        {% if current_user and current_user.role == 'admin' %}
+        <li><a href="{{ url_for('users_page') }}" class="{% if request.endpoint == 'users_page' %}active{% endif %}">👤 Users</a></li>
+        {% endif %}
       </ul>
       <div class="sidebar-footer">
+        {% if current_user %}
+        <div class="status" style="margin-bottom:8px;">
+          <span>{{ current_user.username }} · {{ current_user.role }}</span>
+        </div>
+        <a class="btn" href="{{ url_for('logout') }}" style="display:block;text-align:center;">Logout</a>
+        {% endif %}
         <div class="status">
           <span class="dot" id="connDot"></span>
           <span>System Status</span>

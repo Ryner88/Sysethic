@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}SAAOE • Dashboard{% endblock %}
+{% block title %}SysEthic • Dashboard{% endblock %}
 
 
 {% block content %}
@@ -264,9 +264,9 @@
     const cssVar = (n)=>getComputedStyle(root).getPropertyValue(n).trim();
 
     // --- Preferences & controls ---
-    const densityPref = localStorage.getItem('saaoe-density') || 'normal';
-    const sizePref = localStorage.getItem('saaoe-chart-h') || '80';
-    const autoScalePref = localStorage.getItem('saaoe-autoscale') ?? '1';
+    const densityPref = localStorage.getItem('sysethic-density') || 'normal';
+    const sizePref = localStorage.getItem('sysethic-chart-h') || '80';
+    const autoScalePref = localStorage.getItem('sysethic-autoscale') ?? '1';
     $('density').value = densityPref;
     $('chartSize').value = sizePref;
     $('autoScale').checked = autoScalePref === '1';
@@ -277,21 +277,21 @@
       root.style.setProperty('--grid-gap', cfg.gap+'px');
       root.style.setProperty('--big-font', cfg.big+'px');
       root.style.setProperty('--label-font', cfg.label+'px');
-      localStorage.setItem('saaoe-density', mode);
+      localStorage.setItem('sysethic-density', mode);
     }
-    function applyChartSize(px){ root.style.setProperty('--chart-h',(Number(px)||80)+'px'); localStorage.setItem('saaoe-chart-h', String(px)); window.dispatchEvent(new Event('resize')); }
+    function applyChartSize(px){ root.style.setProperty('--chart-h',(Number(px)||80)+'px'); localStorage.setItem('sysethic-chart-h', String(px)); window.dispatchEvent(new Event('resize')); }
 
     applyDensity($('density').value);
     applyChartSize($('chartSize').value);
 
     $('density').addEventListener('change',e=>applyDensity(e.target.value));
     $('chartSize').addEventListener('change',e=>applyChartSize(e.target.value));
-    $('autoScale').addEventListener('change',e=>{ localStorage.setItem('saaoe-autoscale', e.target.checked?'1':'0'); });
+    $('autoScale').addEventListener('change',e=>{ localStorage.setItem('sysethic-autoscale', e.target.checked?'1':'0'); });
 
     $('themeToggle').addEventListener('click', () => {
       const cur = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       root.setAttribute('data-theme', cur);
-      localStorage.setItem('saaoe-theme', cur);
+      localStorage.setItem('sysethic-theme', cur);
       applyChartTheme();
     });
 

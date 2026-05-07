@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SysEthic • Login</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='sysethic.css') }}">
+</head>
+<body>
+  <main class="login-page">
+    <aside class="login-panel">
+      <div class="login-brand">
+        <div class="brand-mark"><span>S</span></div>
+        <div class="brand-labels">
+          <div class="brand-name">SysEthic</div>
+          <div class="brand-subtitle">Secure access console</div>
+        </div>
+      </div>
+
+      <div class="login-card">
+        <h1>Sign In</h1>
+        <p class="login-intro">Sign in to monitor this computer and manage SysEthic operations.</p>
+        {% if error %}
+          <div class="alert-item login-alert">{{ error }}</div>
+        {% endif %}
+        <form method="post">
+          <div class="login-field username">
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="username" value="{{ username or '' }}" autofocus>
+          </div>
+
+          <div class="login-field password">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password">
+          </div>
+
+          <button class="btn login-submit" type="submit">Login</button>
+        </form>
+      </div>
+    </aside>
+
+    <section class="login-side">
+      <div class="login-side-hero">
+        <div class="hero-logo"></div>
+        <div class="hero-text">SysEthic</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

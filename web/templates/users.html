@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}SysEthic • Users{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>User Access</h2>
+    <span class="label">Local accounts and operational roles</span>
+  </div>
+
+  <section class="grid">
+    <div class="card">
+      <div class="label">Create User</div>
+      <label>Username <input id="newUsername" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
+      <label>Password <input id="newPassword" type="password" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
+      <label>Role
+        <select id="newRole" class="btn" style="width:100%;margin-top:6px;">
+          <option value="viewer">Viewer</option>
+          <option value="analyst">Analyst</option>
+          <option value="admin">Admin</option>
+        </select>
+      </label>
+      <button id="createUser" class="btn" style="margin-top:12px;">Create</button>
+      <div id="userMessage" class="help" style="margin-top:10px;"></div>
+    </div>
+    <div class="card" style="grid-column: span 3;">
+      <div class="label">Users</div>
+      <table class="table" id="usersTable">
+        <thead><tr><th>Username</th><th>Role</th><th>Active</th><th>Created</th><th>Last Login</th><th>Ops</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+<script>
+async function loadUsers(){
+  const data = await fetch('/api/users').then(r=>r.json());
+  const body = document.querySelector('#usersTable tbody');
+  body.innerHTML = (data.users || []).map(u => `
+    <tr>
+      <td>${u.username}</td>
+      <td>${u.role}</td>
+      <td>${u.active ? 'yes' : 'no'}</td>
+      <td>${u.created_at || ''}</td>
+      <td>${u.last_login_at || ''}</td>
+      <td>${u.active ? `<button class="btn btn-small" onclick="disableUser(${u.id})">Disable</button>` : ''}</td>
+    </tr>
+  `).join('');
+}
+async function disableUser(id){
+  const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'disable', id})});
+  const data = await res.json();
+  document.getElementById('userMessage').textContent = data.error || 'User disabled.';
+  loadUsers();
+}
+document.getElementById('createUser').addEventListener('click', async () => {
+  const payload = {
+    username: document.getElementById('newUsername').value,
+    password: document.getElementById('newPassword').value,
+    role: document.getElementById('newRole').value
+  };
+  const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  const data = await res.json();
+  document.getElementById('userMessage').textContent = data.error || 'User created.';
+  if (!data.error) {
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newPassword').value = '';
+  }
+  loadUsers();
+});
+loadUsers();
+</script>
+{% endblock %}
