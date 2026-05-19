@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Approvals{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Response Approvals</h2>
+    <span class="label">Human-gated host actions</span>
+  </div>
+  <section class="grid">
+    <div class="card">
+      <div class="label">Request Action</div>
+      <label>Action
+        <select id="action" class="btn" style="width:100%;margin-top:6px;">
+          <option value="kill_process">Kill process</option>
+          <option value="quarantine_file">Quarantine file</option>
+          <option value="block_ip">Block IP</option>
+          <option value="create_incident_report">Create incident report</option>
+        </select>
+      </label>
+      <label>Target <input id="target" class="btn" style="width:100%;margin-top:6px;text-align:left;" placeholder="PID, file path, or IP"></label>
+      <label>Incident ID <input id="incidentId" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
+      <label><input id="dryRun" type="checkbox" checked> Dry run</label>
+      <button id="requestApproval" class="btn" style="margin-top:10px;">Request Approval</button>
+      <div id="approvalMessage" class="help" style="margin-top:10px;"></div>
+    </div>
+    <div class="card" style="grid-column: span 3;">
+      <div class="label">Approval Queue</div>
+      <table class="table" id="approvalTable">
+        <thead><tr><th>ID</th><th>Action</th><th>Target</th><th>Status</th><th>Requested By</th><th>Ops</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+<script>
+async function loadApprovals(){
+  const data = await fetch('/api/response_approvals').then(r=>r.json());
+  document.querySelector('#approvalTable tbody').innerHTML = (data.approvals || []).map(a => `
+    <tr>
+      <td>${a.id}</td><td>${a.action}</td><td>${a.target}</td><td>${a.status}</td><td>${a.requested_by}</td>
+      <td>
+        <button class="btn btn-small" onclick="approvalCommand('${a.id}','approve')">Approve</button>
+        <button class="btn btn-small" onclick="approvalCommand('${a.id}','reject')">Reject</button>
+        <button class="btn btn-small" onclick="approvalCommand('${a.id}','execute')">Execute</button>
+      </td>
+    </tr>
+  `).join('');
+}
+async function approvalCommand(id, command){
+  const res = await fetch('/api/response_approvals/' + id, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({command})});
+  const data = await res.json();
+  document.getElementById('approvalMessage').textContent = data.error || data.result?.detail || command + ' complete';
+  loadApprovals();
+}
+document.getElementById('requestApproval').addEventListener('click', async () => {
+  const payload = {action: action.value, target: target.value, incident_id: incidentId.value || null, dry_run: dryRun.checked};
+  const res = await fetch('/api/response_approvals', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  const data = await res.json();
+  document.getElementById('approvalMessage').textContent = data.error || data.preview || 'Approval requested.';
+  loadApprovals();
+});
+loadApprovals();
+</script>
+{% endblock %}

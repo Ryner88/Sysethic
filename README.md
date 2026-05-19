@@ -53,13 +53,35 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
    python src/process_monitor.py &
    ```
 
-3. Run the web dashboard:
+3. Configure an operational secret key:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Then edit `.env` and set `SAAOE_SECRET_KEY` to a long random value.
+
+4. Run the web dashboard:
    ```bash
    python web/saaoe_api.py
    ```
 
-4. Open http://localhost:5000 in your browser.
+5. Open http://localhost:5000 in your browser.
+
+6. Complete first-run setup by creating the local admin account.
 
 ## Usage
 
-Navigate through the sidebar to access different monitoring sections. The dashboard provides real-time updates and comprehensive security monitoring for autonomous operations.
+Log in with a local SAAOE account, then navigate through the sidebar to access monitoring sections. Admin users can manage local users, mutate operational rules, trigger playbooks, export reports, and access protected diagnostic surfaces. Viewer users have read-only dashboard access.
+
+By default, SAAOE binds to `127.0.0.1`, stores operational data in `data/saaoe.sqlite3`, and disables Flask debug mode. Configuration can be changed with environment variables or `.env`.
+
+See [Operational Startup](docs/operational-startup.md) for the local startup checklist, health check, and operational defaults.
+
+## Test
+
+Run the security workflow tests:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```

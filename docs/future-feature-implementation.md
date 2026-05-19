@@ -1,6 +1,124 @@
 # Future Feature Implementation
 
-These are valuable but bigger and should come after the app is stable.
+These are valuable but bigger and should come after the operational readiness priorities are stable.
+
+## Operational Future Tasks
+
+### 1. Multi-Host Monitoring
+
+Goal: allow one SAAOE dashboard to monitor more than one computer.
+
+Include:
+
+- Lightweight local agent
+- Agent enrollment
+- Host identity and health
+- Per-host process, network, disk, and anomaly telemetry
+- Agent heartbeat and offline detection
+
+Why future: important for real environments, but it depends on authentication, durable storage, and secure communication first.
+
+### 2. Secure Agent Communication
+
+Goal: protect telemetry and commands between the dashboard and monitored machines.
+
+Include:
+
+- Mutual authentication
+- TLS
+- Agent tokens or certificates
+- Command signing
+- Replay protection
+- Agent revocation
+
+Why future: required before remote response actions are safe.
+
+### 3. Production Rule Engine
+
+Goal: replace simple threshold rules with a reliable policy engine.
+
+Include:
+
+- Rule validation
+- Rule versioning
+- Test mode
+- Evaluation history
+- Conflict detection
+- Per-role approval requirements
+
+Why future: useful after incidents, audit logs, and durable rule storage exist.
+
+### 4. OS-Specific Enforcement Adapters
+
+Goal: support real containment actions across Windows, macOS, and Linux.
+
+Include:
+
+- Process kill/suspend adapters
+- Firewall block adapters
+- File quarantine adapters
+- Service restart adapters
+- Permission checks per operating system
+
+Why future: real enforcement is platform-specific and needs careful testing.
+
+### 5. Signed Evidence and Report Archive
+
+Goal: make reports and incident evidence harder to tamper with.
+
+Include:
+
+- Immutable report records
+- Hashes for exported files
+- Evidence bundles
+- Signed audit snapshots
+- Chain-of-custody metadata
+
+Why future: valuable for compliance, but depends on stable incident and audit storage.
+
+### 6. Plugin System for Detectors and Actions
+
+Goal: let users extend SAAOE without changing core code.
+
+Include:
+
+- Detector plugins
+- Playbook action plugins
+- Validation sandbox
+- Plugin permissions
+- Versioned plugin metadata
+
+Why future: powerful, but it should come after the core security model is defined.
+
+### 7. Notification Integrations
+
+Goal: send operational alerts outside the dashboard.
+
+Include:
+
+- Email
+- Slack or Teams
+- Webhooks
+- Local desktop notifications
+- Escalation rules
+
+Why future: useful once alert severity, incident ownership, and audit logging are reliable.
+
+### 8. Backup, Restore, and Data Retention
+
+Goal: help users preserve and manage SAAOE data safely.
+
+Include:
+
+- Backup command
+- Restore command
+- Retention policies
+- Export/import
+- Storage cleanup jobs
+
+Why future: important for operational use, but should follow durable storage.
+
+## Product Feature Tasks
 
 ## 1. Full Playbook Builder UI
 
@@ -92,9 +210,9 @@ Log:
 
 Why future: makes the project unique, but works best after playbooks/incidents exist.
 
-## 7. Multi-Stage Attack Demo
+## 7. Multi-Stage Operational Scenario
 
-Goal: Simulate several linked events as one incident.
+Goal: safely reproduce several linked telemetry events as one incident for validation and training.
 
 Example:
 
@@ -105,7 +223,7 @@ Example:
 - Critical incident created
 - Isolation playbook recommended
 
-Why future: excellent final demo, but requires demo system and incident system first.
+Why future: valuable for operational readiness, but requires controlled validation events and the incident system first.
 
 ## 8. Live Network Relationship Graph
 

@@ -22,6 +22,9 @@
         <li><a href="{{ url_for('assets_page') }}" class="{% if request.endpoint == 'assets_page' %}active{% endif %}">🖥️ Assets</a></li>
         <li><a href="{{ url_for('playbooks_page') }}" class="{% if request.endpoint == 'playbooks_page' %}active{% endif %}">🛠️ Playbooks</a></li>
         <li><a href="{{ url_for('automation_page') }}" class="{% if request.endpoint == 'automation_page' %}active{% endif %}">⚙️ Automation</a></li>
+        <li><a href="{{ url_for('incidents_page') }}" class="{% if request.endpoint == 'incidents_page' %}active{% endif %}">🧾 Incidents</a></li>
+        <li><a href="{{ url_for('approvals_page') }}" class="{% if request.endpoint == 'approvals_page' %}active{% endif %}">✅ Approvals</a></li>
+        <li><a href="{{ url_for('validation_page') }}" class="{% if request.endpoint == 'validation_page' %}active{% endif %}">🧪 Validation</a></li>
         <li><a href="{{ url_for('reports_page') }}" class="{% if request.endpoint == 'reports_page' %}active{% endif %}">📄 Reports</a></li>
         <li><a href="{{ url_for('terminal_page') }}" class="{% if request.endpoint == 'terminal_page' %}active{% endif %}">⌨️ Terminal</a></li>
         <li><a href="{{ url_for('security') }}" class="{% if request.endpoint == 'security' %}active{% endif %}">🛡️ Security</a></li>

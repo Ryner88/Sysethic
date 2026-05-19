@@ -527,7 +527,7 @@ sequenceDiagram
     API->>Anoms: Find anomaly
     API->>Store: Find enabled matching playbook
     Store-->>API: Return playbook
-    API->>Runs: Record simulated response run
+    API->>Runs: Record response run
     API-->>UI: Return run status and YAML
 ```
 

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}SAAOE • Validation{% endblock %}
+
+{% block content %}
+<div class="wrap">
+  <div class="page-header">
+    <h2>Operational Validation</h2>
+    <span class="label">Safe end-to-end workflow checks</span>
+  </div>
+  <section class="card">
+    <div class="label">Create Controlled Validation Event</div>
+    <button class="btn" onclick="runValidation('cpu_pressure')">CPU Pressure</button>
+    <button class="btn" onclick="runValidation('memory_pressure')">Memory Pressure</button>
+    <button class="btn" onclick="runValidation('suspicious_network')">Suspicious Network</button>
+    <button class="btn" onclick="runValidation('sensitive_file_access')">Sensitive File</button>
+    <div id="validationMessage" class="help" style="margin-top:12px;"></div>
+  </section>
+  <section class="card" style="margin-top:14px;">
+    <div class="label">Validation History</div>
+    <table class="table" id="validationTable">
+      <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Anomaly</th><th>Incident</th><th>Created</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</div>
+<script>
+async function loadValidation(){
+  const data = await fetch('/api/validation_events').then(r=>r.json());
+  document.querySelector('#validationTable tbody').innerHTML = (data.events || []).map(e => `
+    <tr><td>${e.id}</td><td>${e.event_type}</td><td>${e.status}</td><td>${e.anomaly_id || ''}</td><td>${e.incident_id || ''}</td><td>${e.created_at}</td></tr>
+  `).join('');
+}
+async function runValidation(event_type){
+  const res = await fetch('/api/validation_events', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({event_type})});
+  const data = await res.json();
+  document.getElementById('validationMessage').textContent = data.error || `Created ${data.event_id} and incident ${data.incident.id}`;
+  loadValidation();
+}
+loadValidation();
+</script>
+{% endblock %}

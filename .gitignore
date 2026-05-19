@@ -82,6 +82,7 @@ ipython_config.py
 # Environments / secrets
 .env
 .env.*
+!.env.example
 .envrc
 .venv/
 venv/
@@ -126,6 +127,10 @@ node_modules/
 
 # Logs
 *.log
+
+# Local operational storage
+data/*.sqlite3
+data/*.sqlite3-*
 
 # Virtual environments
 venv/
