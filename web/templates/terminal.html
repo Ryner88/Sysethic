@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}SAAOE • Terminal{% endblock %}
+{% block title %}SAAOE • Owner Console{% endblock %}
 
 {% block content %}
 <div class="wrap">
   <div class="page-header">
     <div>
-      <h2>Diagnostic Terminal</h2>
+      <h2>Owner Console</h2>
       <div class="label">Audited constrained security diagnostics</div>
     </div>
     <div class="controls">
@@ -24,9 +24,9 @@
       </div>
     </div>
     <div class="card">
-      <div class="label">Enabled Commands</div>
+      <div class="label">Owner Commands</div>
       <div id="allowedCommands" class="pill-list"></div>
-      <div class="help" id="terminalHelp">Commands run through an authenticated API with shell execution disabled, output limits, and audit logging.</div>
+      <div class="help" id="terminalHelp">Platform-owner diagnostics are separate from workspace administration.</div>
     </div>
   </section>
 </div>
@@ -57,7 +57,7 @@ async function runCommand() {
 
 fetch('/api/terminal/status').then(r=>r.json()).then(data => {
   document.getElementById('allowedCommands').innerHTML = data.allowed.map(c => `<span class="badge">${c}</span>`).join('');
-  document.getElementById('terminalHelp').textContent = `Commands run through the authenticated terminal API with shell execution disabled. Legacy WebSocket status: ${data.running ? 'running' : 'disabled'}.`;
+  document.getElementById('terminalHelp').textContent = `Platform-owner commands run through a constrained API with shell execution disabled. Legacy WebSocket status: ${data.running ? 'running' : 'disabled'}.`;
 });
 document.getElementById('runBtn').onclick = runCommand;
 document.getElementById('clearBtn').onclick = () => out.textContent = '';

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SysEthic • Join Workspace</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='sysethic.css') }}">
+</head>
+<body>
+  <main class="login-page">
+    <aside class="login-panel">
+      <div class="login-brand">
+        <div class="brand-mark"><span>S</span></div>
+        <div class="brand-labels">
+          <div class="brand-name">SysEthic</div>
+          <div class="brand-subtitle">Join a workspace</div>
+        </div>
+      </div>
+
+      <div class="login-card">
+        <h1>Join Workspace</h1>
+        <p class="login-intro">Enter a workspace code to join an existing workspace. Your access depends on the workspace's membership settings.</p>
+        {% if error %}
+          <div class="alert-item login-alert">{{ error }}</div>
+        {% endif %}
+        {% if message %}
+          <div class="alert-item login-alert">{{ message }}</div>
+        {% endif %}
+        <form method="post">
+          <div class="login-field">
+            <label for="workspace_code">Workspace Code</label>
+            <input id="workspace_code" name="workspace_code" value="{{ workspace_code or '' }}" autofocus>
+          </div>
+
+          <div class="login-field">
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="username" value="{{ username or '' }}">
+          </div>
+
+          <div class="login-field password">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="new-password">
+          </div>
+
+          <div class="login-field password">
+            <label for="confirm">Confirm Password</label>
+            <input id="confirm" name="confirm" type="password" autocomplete="new-password">
+          </div>
+
+          <button class="btn login-submit" type="submit">Continue</button>
+        </form>
+        <div class="auth-switch">
+          <span>Already have an account?</span>
+          <a href="{{ url_for('login') }}">Log in</a>
+        </div>
+      </div>
+    </aside>
+
+    <section class="login-side">
+      <div class="login-side-hero">
+        <div class="hero-logo"></div>
+        <div class="hero-text">SYSETHIC</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

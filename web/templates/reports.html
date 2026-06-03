@@ -9,10 +9,12 @@
       <h2>Compliance Reports</h2>
       <div class="label">Historical anomalies and audit logs mapped to NIST and CIS controls</div>
     </div>
+    {% if can('admin') %}
     <div class="controls">
       <a class="btn" href="/api/reports/download.csv">Download CSV</a>
       <a class="btn" href="/api/reports/download.pdf">Download PDF</a>
     </div>
+    {% endif %}
   </div>
 
   <section class="stat-grid">

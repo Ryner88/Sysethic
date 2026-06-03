@@ -11,13 +11,17 @@
     <section class="card" style="width:min(480px, calc(100vw - 32px));">
       <div class="page-header">
         <h2>First Run Setup</h2>
-        <span class="label">Create the local administrator</span>
+        <span class="label">Create the first workspace owner</span>
       </div>
       {% if error %}<div class="alert-item" style="margin-bottom:14px;">{{ error }}</div>{% endif %}
       <form method="post">
         <label for="username" style="display:block;">
-          <span class="label">Admin Username</span>
+          <span class="label">Owner Username</span>
           <input id="username" name="username" class="btn" style="width:100%;margin:6px 0 14px;text-align:left;" autocomplete="username" value="{{ username or '' }}" autofocus>
+        </label>
+        <label for="organization" style="display:block;">
+          <span class="label">Workspace Name</span>
+          <input id="organization" name="organization" class="btn" style="width:100%;margin:6px 0 14px;text-align:left;" value="Local Workspace">
         </label>
         <label for="password" style="display:block;">
           <span class="label">Password</span>
@@ -29,7 +33,7 @@
           <input id="confirm" name="confirm" type="password" class="btn" style="width:100%;margin:6px 0 12px;text-align:left;" autocomplete="new-password">
         </label>
         <button class="btn" type="button" id="togglePassword" style="margin-bottom:18px;">Show Passwords</button>
-        <button class="btn" type="submit" style="width:100%;">Create Local Admin</button>
+        <button class="btn" type="submit" style="width:100%;">Create Workspace</button>
       </form>
     </section>
   </main>

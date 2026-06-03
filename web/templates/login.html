@@ -18,11 +18,25 @@
       </div>
 
       <div class="login-card">
-        <h1>Sign In</h1>
-        <p class="login-intro">Sign in to monitor this computer and manage SysEthic operations.</p>
+        <h1>Welcome</h1>
+        <p class="login-intro">Choose how you want to access SysEthic.</p>
         {% if error %}
           <div class="alert-item login-alert">{{ error }}</div>
         {% endif %}
+        <div class="auth-options">
+          <a class="auth-option active" href="{{ url_for('login') }}">
+            <strong>Log in</strong>
+            <span>Access your existing account.</span>
+          </a>
+          <a class="auth-option" href="{{ url_for('signup') }}">
+            <strong>Create workspace</strong>
+            <span>Start a workspace for your company, class project, or team.</span>
+          </a>
+          <a class="auth-option" href="{{ url_for('join') }}">
+            <strong>Join workspace</strong>
+            <span>Use a workspace code to join an existing workspace.</span>
+          </a>
+        </div>
         <form method="post">
           <div class="login-field username">
             <label for="username">Username</label>

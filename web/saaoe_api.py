@@ -1,7 +1,7 @@
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import queue
 import secrets
 import sqlite3
@@ -15,7 +15,6 @@ import ipaddress
 import io
 import os
 import platform
-import select
 import shlex
 import shutil
 import socketserver
@@ -81,6 +80,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE='Lax',
     PERMANENT_SESSION_LIFETIME=int(os.environ.get('SAAOE_SESSION_SECONDS', '28800')),
 )
+SESSION_TIMEOUT_SECONDS = int(os.environ.get('SAAOE_SESSION_SECONDS', '28800'))
 
 # --- Ring buffers ---
 MAX_SAMPLES = 240          # ~4 minutes @ 1s
@@ -155,6 +155,7 @@ STATUSES = {'open', 'investigating', 'waiting_for_approval', 'resolved', 'dismis
 RESPONSE_ACTIONS = {'kill_process', 'quarantine_file', 'block_ip', 'create_incident_report'}
 QUARANTINE_DIR = _resolve_path('SAAOE_QUARANTINE_DIR', os.path.join(BASE_DIR, 'quarantine'))
 TERMINAL_OUTPUT_LIMIT = int(os.environ.get('SAAOE_TERMINAL_OUTPUT_LIMIT', '12000'))
+APPROVAL_TTL_SECONDS = int(os.environ.get('SAAOE_APPROVAL_TTL_SECONDS', '86400'))
 
 
 def _db():
@@ -206,12 +207,43 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('admin', 'analyst', 'viewer')),
                 active INTEGER NOT NULL DEFAULT 1,
+                organization_id INTEGER,
                 created_at TEXT NOT NULL,
                 last_login_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS organizations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                join_policy TEXT NOT NULL DEFAULT 'join_with_code',
+                join_code TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_permissions (
+                user_id INTEGER NOT NULL,
+                permission TEXT NOT NULL,
+                granted_by TEXT NOT NULL,
+                granted_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, permission)
+            );
+
+            CREATE TABLE IF NOT EXISTS join_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                organization_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_at TEXT NOT NULL,
+                decided_at TEXT,
+                decided_by TEXT,
+                detail TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                organization_id INTEGER,
                 timestamp TEXT NOT NULL,
                 actor TEXT NOT NULL,
                 role TEXT NOT NULL,
@@ -235,6 +267,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS playbooks (
                 id INTEGER PRIMARY KEY,
+                organization_id INTEGER,
                 name TEXT NOT NULL,
                 category TEXT NOT NULL,
                 metric TEXT NOT NULL,
@@ -249,6 +282,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS playbook_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                organization_id INTEGER,
                 playbook_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 anomaly_id TEXT,
@@ -286,6 +320,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS incidents (
                 id TEXT PRIMARY KEY,
+                organization_id INTEGER,
                 title TEXT NOT NULL,
                 severity TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -299,6 +334,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS incident_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                organization_id INTEGER,
                 incident_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 actor TEXT NOT NULL,
@@ -308,6 +344,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS response_approvals (
                 id TEXT PRIMARY KEY,
+                organization_id INTEGER,
                 incident_id TEXT,
                 anomaly_id TEXT,
                 action TEXT NOT NULL,
@@ -319,12 +356,14 @@ def init_db():
                 dry_run INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                expires_at TEXT,
                 executed_at TEXT,
                 result TEXT
             );
 
             CREATE TABLE IF NOT EXISTS validation_events (
                 id TEXT PRIMARY KEY,
+                organization_id INTEGER,
                 event_type TEXT NOT NULL,
                 status TEXT NOT NULL,
                 anomaly_id TEXT,
@@ -333,11 +372,70 @@ def init_db():
                 created_at TEXT NOT NULL,
                 detail TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS file_classifications (
+                path TEXT PRIMARY KEY,
+                sensitivity TEXT NOT NULL,
+                owner TEXT,
+                classification TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS report_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                generated_at TEXT NOT NULL,
+                fmt TEXT NOT NULL,
+                generated_by TEXT NOT NULL,
+                detail TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS app_configuration (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            );
             """
         )
+        _ensure_column(conn, 'users', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'organizations', 'join_policy', "TEXT NOT NULL DEFAULT 'join_with_code'")
+        _ensure_column(conn, 'organizations', 'join_code', "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, 'join_requests', 'detail', 'TEXT')
+        _ensure_column(conn, 'audit_events', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'playbooks', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'playbook_runs', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'incidents', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'incident_events', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'response_approvals', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'validation_events', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'response_approvals', 'expires_at', 'TEXT')
+        default_org = conn.execute("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',)).fetchone()
+        if not default_org:
+            cur = conn.execute(
+                "INSERT INTO organizations (name, created_at, created_by) VALUES (?, ?, ?)",
+                ('Local Workspace', datetime.now().isoformat(), 'system')
+            )
+            default_org_id = cur.lastrowid
+        else:
+            default_org_id = default_org[0]
+        for org in conn.execute("SELECT id FROM organizations WHERE join_code = '' OR join_code IS NULL").fetchall():
+            conn.execute("UPDATE organizations SET join_code = ? WHERE id = ?", (secrets.token_urlsafe(6), org[0]))
+        conn.execute("UPDATE users SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE audit_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE incidents SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE incident_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE response_approvals SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE validation_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_column(conn, table, column, definition):
+    columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _table_count(name):
@@ -404,6 +502,7 @@ def load_persistent_state():
     for row in _db_query("SELECT * FROM playbooks ORDER BY id"):
         playbooks.append({
             'id': row['id'],
+            'organization_id': row.get('organization_id'),
             'name': row['name'],
             'category': row['category'],
             'metric': row['metric'],
@@ -421,6 +520,7 @@ def load_persistent_state():
     for row in _db_query("SELECT * FROM playbook_runs ORDER BY id DESC LIMIT 100"):
         playbook_runs.append({
             'id': row['id'],
+            'organization_id': row.get('organization_id'),
             'playbook_id': row['playbook_id'],
             'name': row['name'],
             'anomaly_id': row['anomaly_id'],
@@ -457,6 +557,55 @@ def users_exist():
     return _table_count('users') > 0
 
 
+def active_admin_exists():
+    rows = _db_query("SELECT COUNT(*) AS count FROM users WHERE role = ? AND active = 1", ('admin',))
+    return int(rows[0]['count']) > 0 if rows else False
+
+
+def normalize_join_policy(policy):
+    policy = str(policy or '').strip()
+    if policy == 'open_with_code':
+        return 'join_with_code'
+    if policy == 'invite_only':
+        return 'admin_invites_only'
+    if policy in {'join_with_code', 'request_to_join', 'admin_invites_only'}:
+        return policy
+    return 'join_with_code'
+
+
+def create_organization(name, created_by='system'):
+    name = str(name or '').strip() or 'Local Workspace'
+    existing = get_organization_by_name(name)
+    if existing:
+        return existing['id']
+    now = datetime.now().isoformat()
+    join_code = secrets.token_urlsafe(6)
+    _db_exec(
+        "INSERT INTO organizations (name, join_policy, join_code, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+        (name, 'join_with_code', join_code, now, created_by)
+    )
+    rows = _db_query("SELECT id FROM organizations WHERE name = ?", (name,))
+    return rows[0]['id']
+
+
+def get_organization_by_name(name):
+    rows = _db_query("SELECT * FROM organizations WHERE name = ?", (str(name or '').strip(),))
+    return rows[0] if rows else None
+
+
+def get_organization_by_code(code):
+    rows = _db_query("SELECT * FROM organizations WHERE join_code = ?", (str(code or '').strip(),))
+    return rows[0] if rows else None
+
+
+def organization_for_user(user):
+    org_id = user.get('organization_id') if user else None
+    if not org_id:
+        return None
+    rows = _db_query("SELECT * FROM organizations WHERE id = ?", (org_id,))
+    return rows[0] if rows else None
+
+
 def get_user_by_username(username):
     rows = _db_query("SELECT * FROM users WHERE username = ?", (username,))
     return rows[0] if rows else None
@@ -467,22 +616,26 @@ def get_user_by_id(user_id):
     return rows[0] if rows else None
 
 
-def create_user(username, password, role='admin'):
+def create_user(username, password, role='admin', active=True, organization_id=None):
     now = datetime.now().isoformat()
+    if organization_id is None:
+        org = _db_query("SELECT id FROM organizations ORDER BY id LIMIT 1")
+        organization_id = org[0]['id'] if org else create_organization('Local Workspace')
     _db_exec(
-        "INSERT INTO users (username, password_hash, role, active, created_at) VALUES (?, ?, ?, 1, ?)",
-        (username, generate_password_hash(password), role, now)
+        "INSERT INTO users (username, password_hash, role, active, organization_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (username, generate_password_hash(password), role, int(bool(active)), organization_id, now)
     )
 
 
-def audit_event(event_type, target, result='success', detail='', actor=None, role=None):
+def audit_event(event_type, target, result='success', detail='', actor=None, role=None, organization_id=None):
     user = current_user()
     actor = actor or (user['username'] if user else 'anonymous')
     role = role or (user['role'] if user else 'anonymous')
+    organization_id = organization_id if organization_id is not None else (user.get('organization_id') if user else None)
     source = request.remote_addr if request else 'local'
     _db_exec(
-        "INSERT INTO audit_events (timestamp, actor, role, event_type, target, result, source, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (datetime.now().isoformat(), actor, role, event_type, target, result, source, detail)
+        "INSERT INTO audit_events (organization_id, timestamp, actor, role, event_type, target, result, source, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (organization_id, datetime.now().isoformat(), actor, role, event_type, target, result, source, detail)
     )
 
 
@@ -496,12 +649,18 @@ def normalize_status(value, default='open'):
     return value if value in STATUSES else default
 
 
-def _incident_event(incident_id, event_type, detail, actor=None):
+def _incident_event(incident_id, event_type, detail, actor=None, organization_id=None):
     user = current_user()
     actor = actor or (user['username'] if user else 'system')
+    if organization_id is None:
+        if user:
+            organization_id = user.get('organization_id')
+        else:
+            incident = _db_query("SELECT organization_id FROM incidents WHERE id = ?", (incident_id,))
+            organization_id = incident[0].get('organization_id') if incident else None
     _db_exec(
-        "INSERT INTO incident_events (incident_id, timestamp, actor, event_type, detail) VALUES (?, ?, ?, ?, ?)",
-        (incident_id, datetime.now().isoformat(), actor, event_type, detail)
+        "INSERT INTO incident_events (organization_id, incident_id, timestamp, actor, event_type, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (organization_id, incident_id, datetime.now().isoformat(), actor, event_type, detail)
     )
 
 
@@ -519,8 +678,11 @@ def _recommended_playbook(anomaly):
     return None
 
 
-def create_incident_from_anomaly(anomaly, actor='system'):
-    existing = _db_query("SELECT * FROM incidents WHERE anomaly_id = ?", (anomaly['id'],))
+def create_incident_from_anomaly(anomaly, actor='system', organization_id=None):
+    if organization_id is None:
+        user = current_user()
+        organization_id = user.get('organization_id') if user else anomaly.get('organization_id')
+    existing = _db_query("SELECT * FROM incidents WHERE anomaly_id = ? AND organization_id IS ?", (anomaly['id'], organization_id))
     if existing:
         return existing[0]
     now = datetime.now().isoformat()
@@ -528,19 +690,26 @@ def create_incident_from_anomaly(anomaly, actor='system'):
     pb = _recommended_playbook(anomaly)
     title = f"{normalize_severity(anomaly.get('severity')).title()} {anomaly.get('metric')} anomaly"
     _db_exec(
-        "INSERT INTO incidents (id, title, severity, status, owner, anomaly_id, recommended_playbook_id, created_at, updated_at, resolution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (incident_id, title, normalize_severity(anomaly.get('severity')), 'open', None, anomaly['id'], pb['id'] if pb else None, now, now, None)
+        "INSERT INTO incidents (id, organization_id, title, severity, status, owner, anomaly_id, recommended_playbook_id, created_at, updated_at, resolution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (incident_id, organization_id, title, normalize_severity(anomaly.get('severity')), 'open', None, anomaly['id'], pb['id'] if pb else None, now, now, None)
     )
-    _incident_event(incident_id, 'incident_created', f"Linked anomaly {anomaly['id']}", actor=actor)
+    _incident_event(incident_id, 'incident_created', f"Linked anomaly {anomaly['id']}", actor=actor, organization_id=organization_id)
     if pb:
-        _incident_event(incident_id, 'playbook_recommended', f"Recommended {pb['name']}", actor=actor)
+        _incident_event(incident_id, 'playbook_recommended', f"Recommended {pb['name']}", actor=actor, organization_id=organization_id)
     audit_event('incident_created', f"incident:{incident_id}", 'success', title, actor=actor, role='system' if actor == 'system' else None)
     return _db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0]
 
 
-def _validation_anomalies():
+def _validation_anomalies(organization_id=None):
     anomalies = []
-    for row in _db_query("SELECT * FROM validation_events WHERE anomaly_id IS NOT NULL ORDER BY created_at DESC LIMIT 100"):
+    if organization_id is None:
+        rows = _db_query("SELECT * FROM validation_events WHERE anomaly_id IS NOT NULL ORDER BY created_at DESC LIMIT 100")
+    else:
+        rows = _db_query(
+            "SELECT * FROM validation_events WHERE anomaly_id IS NOT NULL AND organization_id = ? ORDER BY created_at DESC LIMIT 100",
+            (organization_id,)
+        )
+    for row in rows:
         if row['event_type'] == 'cpu_pressure':
             metric, value, severity, category = 'cpu_percent', 96.0, 'critical', 'system'
         elif row['event_type'] == 'memory_pressure':
@@ -551,6 +720,7 @@ def _validation_anomalies():
             metric, value, severity, category = 'sensitive_file_access', 1.0, 'high', 'file'
         anomaly = {
             'id': row['anomaly_id'],
+            'organization_id': row.get('organization_id'),
             'timestamp': row['created_at'],
             'metric': metric,
             'value': value,
@@ -922,35 +1092,61 @@ def _detect_rule_anomalies(df):
     return anomalies
 
 
-def _load_anomalies(start=None, end=None, severity=None, apply_automation=True):
+def _load_anomalies(start=None, end=None, severity=None, apply_automation=True, organization_id=None):
     df = _load_telemetry_df(start=start, end=end)
     if df.empty:
-        return []
+        validation_only = _validation_anomalies(organization_id)
+        if severity:
+            validation_only = [a for a in validation_only if a.get('severity') == severity]
+        return validation_only[:200]
 
     anomalies = _detect_stat_anomalies(df) + _detect_rule_anomalies(df)
 
-    decorated = [_decorate_threat_intel(a) for a in anomalies] + _validation_anomalies()
+    decorated = [_decorate_threat_intel(a) for a in anomalies] + _validation_anomalies(organization_id)
     sorted_list = sorted(decorated, key=lambda x: x['timestamp'], reverse=True)
     if apply_automation:
         apply_playbooks(sorted_list)
         apply_automation_rules(sorted_list)
         for anomaly in sorted_list:
             if normalize_severity(anomaly.get('severity')) in {'high', 'critical'}:
-                create_incident_from_anomaly(anomaly)
+                create_incident_from_anomaly(anomaly, organization_id=organization_id)
     if severity:
         sorted_list = [a for a in sorted_list if a.get('severity') == severity]
     return sorted_list[:200]
 
 
-def _audit_rows(limit=100):
+def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None, end=None, organization_id=None):
+    where = []
+    params = []
+    if organization_id is not None:
+        where.append("organization_id = ?")
+        params.append(organization_id)
+    if actor:
+        where.append("actor = ?")
+        params.append(actor)
+    if event_type:
+        where.append("event_type = ?")
+        params.append(event_type)
+    if result:
+        where.append("result = ?")
+        params.append(result)
+    if start:
+        where.append("timestamp >= ?")
+        params.append(start)
+    if end:
+        where.append("timestamp <= ?")
+        params.append(end)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(limit)
     logs = []
     for row in _db_query(
-        "SELECT timestamp, actor, role, event_type, target, result, detail FROM audit_events ORDER BY id DESC LIMIT ?",
-        (limit,)
+        f"SELECT timestamp, actor, role, event_type, target, result, detail FROM audit_events {where_sql} ORDER BY id DESC LIMIT ?",
+        tuple(params)
     ):
         severity = 'warning' if row['result'] in {'denied', 'failed'} else 'info'
         logs.append({
             'timestamp': row['timestamp'],
+            'actor': row['actor'],
             'action': row['event_type'],
             'role': row['role'],
             'severity': severity,
@@ -958,8 +1154,18 @@ def _audit_rows(limit=100):
             'resource': row['target'],
             'details': row.get('detail') or f"actor {row['actor']}",
         })
-    if os.path.exists(LOG_PATH):
+    include_metric_logs = (
+        organization_id is None and
+        (not actor or actor == 'system') and
+        (not event_type or event_type == 'metric_sample') and
+        (not result or result in {'allowed', 'flagged'})
+    )
+    if include_metric_logs and os.path.exists(LOG_PATH):
         df = pd.read_csv(LOG_PATH, parse_dates=['timestamp']).tail(limit)
+        if start:
+            df = df[df['timestamp'] >= pd.to_datetime(start)]
+        if end:
+            df = df[df['timestamp'] <= pd.to_datetime(end)]
         for _, row in df.iterrows():
             sev = 'warning' if row.get('cpu_percent', 0) > 70 else 'info'
             outcome = 'flagged' if sev == 'warning' else 'allowed'
@@ -976,8 +1182,10 @@ def _audit_rows(limit=100):
 
 
 def _report_summary():
-    anomalies = _load_anomalies(apply_automation=False)
-    audits = _audit_rows()
+    user = current_user()
+    org_id = user.get('organization_id') if user else None
+    anomalies = _load_anomalies(apply_automation=False, organization_id=org_id)
+    audits = _audit_rows(organization_id=org_id)
     return {
         'generated_at': datetime.now().isoformat(),
         'anomaly_count': len(anomalies),
@@ -1151,8 +1359,26 @@ def _run_terminal_command(command):
 
 
 def _approval_row(approval_id):
-    rows = _db_query("SELECT * FROM response_approvals WHERE id = ?", (approval_id,))
+    user = current_user()
+    if user:
+        rows = _db_query(
+            "SELECT * FROM response_approvals WHERE id = ? AND organization_id = ?",
+            (approval_id, user.get('organization_id'))
+        )
+    else:
+        rows = _db_query("SELECT * FROM response_approvals WHERE id = ?", (approval_id,))
     return rows[0] if rows else None
+
+
+def _approval_expired(approval, now=None):
+    expires_at = approval.get('expires_at')
+    if not expires_at:
+        return False
+    now = now or datetime.now()
+    try:
+        return now > datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
 
 
 def _dry_run_response_action(action, target):
@@ -1268,43 +1494,7 @@ class TerminalWebSocketHandler(socketserver.BaseRequestHandler):
             'Connection: Upgrade\r\n'
             f'Sec-WebSocket-Accept: {accept}\r\n\r\n'
         ).encode('utf-8'))
-        _ws_send(self.request, 'Connected to SAAOE diagnostic terminal. Allowed commands: ' + ', '.join(sorted(DIAGNOSTIC_COMMANDS)) + '\n')
-        while True:
-            command = _ws_recv(self.request)
-            if command is None:
-                break
-            args, error = _validate_terminal_command(command)
-            if error:
-                _ws_send(self.request, f"blocked: {error}\n")
-                continue
-            try:
-                # args is allowlisted in _validate_terminal_command and shell execution stays disabled.
-                proc = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                    args,
-                    cwd=BASE_DIR,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                start = time.time()
-                while proc.poll() is None:
-                    if time.time() - start > 12:
-                        proc.kill()
-                        _ws_send(self.request, '\ncommand timed out after 12 seconds\n')
-                        break
-                    ready, _, _ = select.select([proc.stdout], [], [], 0.2)
-                    if ready:
-                        line = proc.stdout.readline()
-                        if line:
-                            _ws_send(self.request, line)
-                if proc.stdout:
-                    for line in proc.stdout.readlines():
-                        _ws_send(self.request, line)
-                _ws_send(self.request, f"\nexit {proc.returncode if proc.returncode is not None else 'timeout'}\n")
-            except FileNotFoundError:
-                _ws_send(self.request, f"{args[0]} is not installed on this host\n")
-            except Exception as exc:
-                _ws_send(self.request, f"terminal error: {exc}\n")
+        _ws_send(self.request, 'Legacy diagnostic WebSocket is disabled. Use the platform-owner console.\n')
 
 
 def start_terminal_ws():
@@ -1342,57 +1532,151 @@ def _is_api_request():
 def _auth_failed(status, message):
     if _is_api_request():
         return jsonify(error=message), status
-    return redirect(url_for('login', next=request.full_path if request.query_string else request.path))
+    if status == 401:
+        return redirect(url_for('login', next=request.full_path if request.query_string else request.path))
+    return render_template('login.html', error=message, username=''), status
 
+
+ROLES = {'viewer': 1, 'analyst': 2, 'admin': 3, 'system': 4}
+PERMISSIONS = {'manage_members', 'mutate_playbooks', 'access_terminal'}
+
+PUBLIC_ENDPOINTS = {'static', 'login', 'logout', 'setup', 'signup', 'join', 'health'}
 
 ADMIN_ENDPOINTS = {
-    'terminal_page',
-    'api_terminal_status',
+    'automation_page',
+    'api_automation_rules',
     'api_reports_download',
-    'users_page',
-    'api_users',
 }
 
-MUTATION_ENDPOINTS = {
-    'api_playbooks',
-    'api_playbook_trigger',
-    'api_automation_rules',
-    'api_anomaly_rules',
+SYSTEM_ONLY_ENDPOINTS = {
     'api_test_anomaly',
 }
+
+ANALYST_ENDPOINTS = {
+    'approvals_page',
+    'validation_page',
+    'api_response_approvals',
+    'api_response_approval_detail',
+}
+
+ANALYST_MUTATION_ENDPOINTS = {
+    'api_response_approvals',
+    'api_validation_events',
+}
+
+ADMIN_MUTATION_ENDPOINTS = {
+    'api_anomaly_rules',
+    'api_organization',
+}
+
+
+def _role_allows(user, minimum_role):
+    return ROLES.get(user.get('role'), 0) >= ROLES[minimum_role]
+
+
+def _minimum_role_for_request(endpoint):
+    if endpoint in SYSTEM_ONLY_ENDPOINTS:
+        return 'system'
+    if endpoint in ADMIN_ENDPOINTS:
+        return 'admin'
+    if endpoint in ANALYST_ENDPOINTS:
+        return 'analyst'
+    if request.method != 'GET' and endpoint in ANALYST_MUTATION_ENDPOINTS:
+        return 'analyst'
+    if request.method != 'GET' and endpoint in ADMIN_MUTATION_ENDPOINTS:
+        return 'admin'
+    return 'viewer'
+
+
+def get_user_permissions(user_id):
+    rows = _db_query("SELECT permission FROM user_permissions WHERE user_id = ?", (user_id,))
+    return {row['permission'] for row in rows}
+
+
+def _user_has_permission(user, permission):
+    if not user:
+        return False
+    if user.get('role') == 'admin' and permission in {'manage_members', 'mutate_playbooks'}:
+        return True
+    permissions = getattr(g, 'user_permissions', None)
+    if permissions is None:
+        permissions = get_user_permissions(user['id'])
+        g.user_permissions = permissions
+    return permission in permissions
+
+
+def require_permission(permission):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not _user_has_permission(user, permission):
+                audit_event('access_denied', request.endpoint or fn.__name__, 'denied', f"{permission} required")
+                return _auth_failed(403, f"{permission.replace('_', ' ').capitalize()} required")
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 @app.before_request
 def require_authentication():
     endpoint = request.endpoint or ''
-    if endpoint in {'static', 'login', 'logout', 'setup', 'health'}:
+    if endpoint in PUBLIC_ENDPOINTS:
         return None
 
-    if not users_exist():
+    if not active_admin_exists():
         if endpoint == 'setup':
             return None
         if _is_api_request():
-            return jsonify(error='first-run admin setup required'), 503
+            return jsonify(error='first workspace setup required'), 503
         return redirect(url_for('setup'))
 
     user = current_user()
     if not user:
+        audit_event('access_denied', endpoint or request.path, 'denied', 'authentication required', actor='anonymous', role='anonymous')
         return _auth_failed(401, 'authentication required')
 
-    if user.get('role') != 'admin' and endpoint in ADMIN_ENDPOINTS:
-        audit_event('access_denied', endpoint, 'denied', 'admin role required')
-        return _auth_failed(403, 'admin role required')
+    last_seen_at = session.get('last_seen_at')
+    if last_seen_at is not None:
+        try:
+            idle_seconds = time.time() - float(last_seen_at)
+        except (TypeError, ValueError):
+            idle_seconds = SESSION_TIMEOUT_SECONDS + 1
+        if idle_seconds > SESSION_TIMEOUT_SECONDS:
+            audit_event('logout', f"user:{user['username']}", 'success', 'session timed out')
+            session.clear()
+            g.current_user = None
+            return _auth_failed(401, 'session timed out')
+    session['last_seen_at'] = time.time()
 
-    if request.method != 'GET' and endpoint in MUTATION_ENDPOINTS and user.get('role') != 'admin':
-        audit_event('access_denied', endpoint, 'denied', 'admin role required for mutation')
-        return _auth_failed(403, 'admin role required')
+    minimum_role = _minimum_role_for_request(endpoint)
+    if not _role_allows(user, minimum_role):
+        label = 'platform owner' if minimum_role == 'system' else ('workspace admin' if minimum_role == 'admin' else 'regular user')
+        audit_event('access_denied', endpoint, 'denied', f"{label} role required")
+        return _auth_failed(403, f"{label} role required")
 
     return None
 
 
 @app.context_processor
 def inject_auth_context():
-    return {'current_user': current_user(), 'users_configured': users_exist()}
+    user = current_user()
+    organization = organization_for_user(user)
+
+    def can(minimum_role):
+        return bool(user and _role_allows(user, minimum_role))
+
+    def has_permission(permission):
+        return bool(user and _user_has_permission(user, permission))
+
+    return {
+        'current_user': user,
+        'current_organization': organization,
+        'users_configured': users_exist(),
+        'admin_configured': active_admin_exists(),
+        'can': can,
+        'has_permission': has_permission,
+    }
 
 
 def require_admin(fn):
@@ -1400,8 +1684,8 @@ def require_admin(fn):
     def wrapper(*args, **kwargs):
         user = current_user()
         if not user or user.get('role') != 'admin':
-            audit_event('access_denied', request.endpoint or fn.__name__, 'denied', 'admin role required')
-            return _auth_failed(403, 'admin role required')
+            audit_event('access_denied', request.endpoint or fn.__name__, 'denied', 'workspace admin role required')
+            return _auth_failed(403, 'workspace admin role required')
         return fn(*args, **kwargs)
     return wrapper
 
@@ -1409,12 +1693,13 @@ def require_admin(fn):
 # --- Routes ---
 @app.route('/setup', methods=['GET', 'POST'])
 def setup():
-    if users_exist():
+    if active_admin_exists():
         return redirect(url_for('dashboard'))
     error = None
     username = ''
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
+        organization = request.form.get('organization', '').strip() or 'Local Workspace'
         password = request.form.get('password', '')
         confirm = request.form.get('confirm', '')
         if not username:
@@ -1424,20 +1709,22 @@ def setup():
         elif password != confirm:
             error = 'Passwords do not match.'
         else:
-            create_user(username, password, 'admin')
+            org_id = create_organization(organization, created_by=username)
+            create_user(username, password, 'admin', organization_id=org_id)
             user = get_user_by_username(username)
             session.clear()
             session.permanent = True
             session['user_id'] = user['id']
-            audit_event('user_created', f"user:{username}", 'success', 'first-run admin created', actor=username, role='admin')
-            audit_event('login', f"user:{username}", 'success', 'first-run admin session started', actor=username, role='admin')
+            session['last_seen_at'] = time.time()
+            audit_event('user_created', f"user:{username}", 'success', 'first workspace owner created', actor=username, role='admin')
+            audit_event('login', f"user:{username}", 'success', 'first workspace session started', actor=username, role='admin')
             return redirect(url_for('dashboard'))
     return render_template('setup.html', error=error, username=username)
 
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if not users_exist():
+    if not active_admin_exists():
         return redirect(url_for('setup'))
     error = None
     username = ''
@@ -1449,6 +1736,7 @@ def login():
             session.clear()
             session.permanent = True
             session['user_id'] = user['id']
+            session['last_seen_at'] = time.time()
             _db_exec("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user['id']))
             audit_event('login', f"user:{username}", 'success', 'interactive login', actor=username, role=user['role'])
             next_url = request.args.get('next') or url_for('dashboard')
@@ -1460,11 +1748,103 @@ def login():
     return render_template('login.html', error=error, username=username)
 
 
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    error = None
+    message = None
+    username = ''
+    organization = ''
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        organization = request.form.get('organization', '').strip()
+        password = request.form.get('password', '')
+        confirm = request.form.get('confirm', '')
+        if not username:
+            error = 'Username is required.'
+        elif not organization:
+            error = 'Workspace name is required.'
+        elif get_organization_by_name(organization):
+            error = 'Workspace name is already in use.'
+        elif len(password) < 10:
+            error = 'Password must be at least 10 characters.'
+        elif password != confirm:
+            error = 'Passwords do not match.'
+        elif get_user_by_username(username):
+            error = 'That username is already registered.'
+        else:
+            org_id = create_organization(organization, created_by=username)
+            create_user(username, password, 'admin', active=True, organization_id=org_id)
+            user = get_user_by_username(username)
+            session.clear()
+            session.permanent = True
+            session['user_id'] = user['id']
+            session['last_seen_at'] = time.time()
+            audit_event('organization_created', f"organization:{organization}", 'success', 'workspace created', actor=username, role='admin')
+            audit_event('user_created', f"user:{username}", 'success', 'workspace admin created', actor=username, role='admin')
+            audit_event('login', f"user:{username}", 'success', 'signup session started', actor=username, role='admin')
+            return redirect(url_for('dashboard'))
+    return render_template('signup.html', error=error, message=message, username=username, organization=organization)
+
+
+@app.route('/join', methods=['GET', 'POST'])
+def join():
+    error = None
+    message = None
+    username = ''
+    workspace_code = request.args.get('code', '').strip()
+    if request.method == 'POST':
+        workspace_code = request.form.get('workspace_code', '').strip()
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        confirm = request.form.get('confirm', '')
+        organization = get_organization_by_code(workspace_code)
+        if not workspace_code:
+            error = 'Workspace code is required.'
+        elif not organization:
+            error = 'Workspace code was not found.'
+        elif not username:
+            error = 'Username is required.'
+        elif get_user_by_username(username):
+            error = 'That username is already registered.'
+        elif _db_query("SELECT id FROM join_requests WHERE username = ? AND status = ?", (username, 'pending')):
+            error = 'There is already a pending join request for that username.'
+        elif len(password) < 10:
+            error = 'Password must be at least 10 characters.'
+        elif password != confirm:
+            error = 'Passwords do not match.'
+        if not error:
+            policy = normalize_join_policy(organization.get('join_policy'))
+            if policy == 'admin_invites_only':
+                audit_event('join_denied', f"organization:{organization['id']}", 'denied', 'admin-invites-only workspace', actor=username or 'anonymous', role='anonymous', organization_id=organization['id'])
+                error = 'This workspace only accepts admin-created invites. Ask a Workspace Admin to add you.'
+            elif policy == 'request_to_join':
+                _db_exec(
+                    "INSERT INTO join_requests (organization_id, username, password_hash, status, requested_at, detail) VALUES (?, ?, ?, ?, ?, ?)",
+                    (organization['id'], username, generate_password_hash(password), 'pending', datetime.now().isoformat(), 'requested via workspace code')
+                )
+                audit_event('join_requested', f"user:{username}", 'success', 'workspace join request submitted', actor=username, role='viewer', organization_id=organization['id'])
+                message = 'Request sent. A Workspace Admin must approve your request before you can access this workspace.'
+                username = ''
+            else:
+                create_user(username, password, 'viewer', active=True, organization_id=organization['id'])
+                user = get_user_by_username(username)
+                session.clear()
+                session.permanent = True
+                session['user_id'] = user['id']
+                session['last_seen_at'] = time.time()
+                audit_event('user_created', f"user:{username}", 'success', 'joined workspace with code', actor=username, role='viewer', organization_id=organization['id'])
+                audit_event('login', f"user:{username}", 'success', 'join session started', actor=username, role='viewer', organization_id=organization['id'])
+                return redirect(url_for('dashboard'))
+    return render_template('join.html', error=error, message=message, username=username, workspace_code=workspace_code)
+
+
 @app.route('/logout')
 def logout():
     user = current_user()
     if user:
         audit_event('logout', f"user:{user['username']}", 'success', 'interactive logout')
+    else:
+        audit_event('logout', 'user:anonymous', 'success', 'logout requested without active session', actor='anonymous', role='anonymous')
     session.clear()
     return redirect(url_for('login'))
 
@@ -1503,6 +1883,10 @@ def files():
 
 @app.route('/terminal')
 def terminal_page():
+    user = current_user()
+    if not _user_has_permission(user, 'access_terminal'):
+        audit_event('access_denied', 'terminal_page', 'denied', 'access_terminal permission required')
+        return _auth_failed(403, 'Access terminal permission required')
     return render_template('terminal.html')
 
 @app.route('/reports')
@@ -1526,28 +1910,86 @@ def validation_page():
     return render_template('validation.html')
 
 @app.route('/users')
-@require_admin
 def users_page():
+    user = current_user()
+    if not _user_has_permission(user, 'manage_members'):
+        audit_event('access_denied', 'users_page', 'denied', 'manage_members permission required')
+        return _auth_failed(403, 'Manage members permission required')
     return render_template('users.html')
 
 @app.route('/api/users', methods=['GET', 'POST'])
-@require_admin
+@require_permission('manage_members')
 def api_users():
+    user = current_user()
+    org_id = user.get('organization_id')
     if request.method == 'GET':
-        users = _db_query("SELECT id, username, role, active, created_at, last_login_at FROM users ORDER BY username")
+        users = _db_query(
+            "SELECT id, username, role, active, created_at, last_login_at FROM users WHERE organization_id = ? ORDER BY username",
+            (org_id,)
+        )
+        for user_row in users:
+            user_row['permissions'] = sorted(get_user_permissions(user_row['id']))
         return jsonify(users=users)
 
     payload = request.json or {}
     action = payload.get('action', 'create')
+    if action == 'permissions':
+        if user.get('role') != 'admin':
+            audit_event('access_denied', 'api_users.permissions', 'denied', 'workspace admin required for permission changes')
+            return jsonify(error='workspace admin role required for permission changes'), 403
+        uid = int(payload.get('id', 0))
+        requested_permissions = payload.get('permissions') or []
+        if not isinstance(requested_permissions, list):
+            return jsonify(error='permissions must be an array'), 400
+        invalid_permissions = [p for p in requested_permissions if p not in PERMISSIONS]
+        if invalid_permissions:
+            return jsonify(error=f"invalid permissions: {', '.join(invalid_permissions)}"), 400
+        target = get_user_by_id(uid)
+        if not target:
+            return jsonify(error='user not found'), 404
+        if target.get('organization_id') != org_id:
+            audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace permission change blocked')
+            return jsonify(error='user not found'), 404
+        existing = get_user_permissions(uid)
+        requested = set(requested_permissions)
+        to_add = requested - existing
+        to_remove = existing - requested
+        now = datetime.now().isoformat()
+        for perm in to_add:
+            _db_exec(
+                "INSERT OR IGNORE INTO user_permissions (user_id, permission, granted_by, granted_at) VALUES (?, ?, ?, ?)",
+                (uid, perm, user['username'], now)
+            )
+            audit_event('permission_granted', f"user:{target['username']}", 'success', f"permission={perm}; target={target['username']}; workspace={org_id}", actor=user['username'], role=user['role'], organization_id=org_id)
+        for perm in to_remove:
+            _db_exec("DELETE FROM user_permissions WHERE user_id = ? AND permission = ?", (uid, perm))
+            audit_event('permission_revoked', f"user:{target['username']}", 'success', f"permission={perm}; target={target['username']}; workspace={org_id}", actor=user['username'], role=user['role'], organization_id=org_id)
+        return jsonify(success=True, permissions=sorted(requested))
+
     if action == 'disable':
         uid = int(payload.get('id', 0))
         target = get_user_by_id(uid)
         if not target:
             return jsonify(error='user not found'), 404
+        if target.get('organization_id') != org_id:
+            audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace user disable blocked')
+            return jsonify(error='user not found'), 404
         if target['id'] == session.get('user_id'):
             return jsonify(error='cannot disable current user'), 400
         _db_exec("UPDATE users SET active = 0 WHERE id = ?", (uid,))
-        audit_event('user_disabled', f"user:{target['username']}", 'success', 'admin disabled user')
+        audit_event('user_disabled', f"user:{target['username']}", 'success', 'workspace admin disabled member')
+        return jsonify(success=True)
+
+    if action == 'enable':
+        uid = int(payload.get('id', 0))
+        target = get_user_by_id(uid)
+        if not target:
+            return jsonify(error='user not found'), 404
+        if target.get('organization_id') != org_id:
+            audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace user enable blocked')
+            return jsonify(error='user not found'), 404
+        _db_exec("UPDATE users SET active = 1 WHERE id = ?", (uid,))
+        audit_event('user_enabled', f"user:{target['username']}", 'success', 'workspace admin enabled member')
         return jsonify(success=True)
 
     username = str(payload.get('username', '')).strip()
@@ -1561,9 +2003,86 @@ def api_users():
         return jsonify(error='password must be at least 10 characters'), 400
     if get_user_by_username(username):
         return jsonify(error='username already exists'), 409
-    create_user(username, password, role)
+    create_user(username, password, role, organization_id=org_id)
     audit_event('user_created', f"user:{username}", 'success', f"role={role}")
     return jsonify(success=True)
+
+
+@app.route('/api/organization', methods=['GET', 'POST'])
+def api_organization():
+    user = current_user()
+    organization = organization_for_user(user)
+    if not organization:
+        return jsonify(error='workspace not found'), 404
+    if request.method == 'GET':
+        organization['join_policy'] = normalize_join_policy(organization.get('join_policy'))
+        return jsonify(organization=organization)
+    if user.get('role') != 'admin':
+        audit_event('access_denied', 'api_organization', 'denied', 'workspace admin required')
+        return jsonify(error='workspace admin role required'), 403
+    payload = request.json or {}
+    name = str(payload.get('name', '')).strip()
+    join_policy = normalize_join_policy(payload.get('join_policy', organization.get('join_policy') or 'join_with_code'))
+    if join_policy not in {'join_with_code', 'request_to_join', 'admin_invites_only'}:
+        return jsonify(error='unsupported join policy'), 400
+    if not name:
+        return jsonify(error='workspace name is required'), 400
+    existing = get_organization_by_name(name)
+    if existing and existing['id'] != organization['id']:
+        return jsonify(error='workspace name is already in use'), 409
+    _db_exec("UPDATE organizations SET name = ?, join_policy = ? WHERE id = ?", (name, join_policy, organization['id']))
+    audit_event('organization_updated', f"organization:{organization['id']}", 'success', f"name={name}; join_policy={join_policy}")
+    return jsonify(success=True, organization=organization_for_user(user))
+
+
+@app.route('/api/join_requests', methods=['GET', 'POST'])
+@require_admin
+def api_join_requests():
+    user = current_user()
+    org_id = user.get('organization_id')
+    if request.method == 'GET':
+        rows = _db_query(
+            "SELECT id, username, status, requested_at, decided_at, decided_by, detail FROM join_requests WHERE organization_id = ? ORDER BY requested_at DESC",
+            (org_id,)
+        )
+        return jsonify(requests=rows)
+
+    payload = request.json or {}
+    request_id = int(payload.get('id', 0))
+    action = str(payload.get('action', '')).strip()
+    rows = _db_query("SELECT * FROM join_requests WHERE id = ? AND organization_id = ?", (request_id, org_id))
+    if not rows:
+        return jsonify(error='join request not found'), 404
+    join_request = rows[0]
+    if join_request['status'] != 'pending':
+        return jsonify(error='join request has already been decided'), 409
+    now = datetime.now().isoformat()
+    if action == 'approve':
+        if get_user_by_username(join_request['username']):
+            _db_exec(
+                "UPDATE join_requests SET status = ?, decided_at = ?, decided_by = ?, detail = ? WHERE id = ?",
+                ('denied', now, user['username'], 'username already exists', request_id)
+            )
+            return jsonify(error='username already exists'), 409
+        _db_exec(
+            "INSERT INTO users (username, password_hash, role, active, organization_id, created_at) VALUES (?, ?, ?, 1, ?, ?)",
+            (join_request['username'], join_request['password_hash'], 'viewer', org_id, now)
+        )
+        _db_exec(
+            "UPDATE join_requests SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?",
+            ('approved', now, user['username'], request_id)
+        )
+        audit_event('join_request_approved', f"user:{join_request['username']}", 'success', 'regular user added to workspace')
+        return jsonify(success=True)
+    if action == 'deny':
+        _db_exec(
+            "UPDATE join_requests SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?",
+            ('denied', now, user['username'], request_id)
+        )
+        audit_event('join_request_denied', f"user:{join_request['username']}", 'success', 'workspace join request denied')
+        return jsonify(success=True)
+    return jsonify(error='unsupported action'), 400
+
 
 @app.route('/api/usage')
 def api_usage():
@@ -1679,6 +2198,10 @@ def api_visualization_lab():
 
 @app.route('/api/terminal/status')
 def api_terminal_status():
+    user = current_user()
+    if not _user_has_permission(user, 'access_terminal'):
+        audit_event('access_denied', 'api_terminal_status', 'denied', 'access_terminal permission required')
+        return jsonify(error='Access terminal permission required'), 403
     return jsonify(
         host=TERMINAL_WS_HOST,
         port=TERMINAL_WS_PORT,
@@ -1688,7 +2211,7 @@ def api_terminal_status():
     )
 
 @app.route('/api/terminal/run', methods=['POST'])
-@require_admin
+@require_permission('access_terminal')
 def api_terminal_run():
     payload = request.json or {}
     command = payload.get('command', '')
@@ -1777,15 +2300,18 @@ def anomaly_detail_page(anomaly_id):
 
 @app.route('/api/anomalies')
 def api_anomalies():
+    user = current_user()
     return jsonify(anomalies=_load_anomalies(
         start=request.args.get('start'),
         end=request.args.get('end'),
-        severity=request.args.get('severity')
+        severity=request.args.get('severity'),
+        organization_id=user.get('organization_id') if user else None
     ))
 
 @app.route('/api/anomalies/heatmap')
 def api_anomalies_heatmap():
-    anomalies = _load_anomalies(apply_automation=False)
+    user = current_user()
+    anomalies = _load_anomalies(apply_automation=False, organization_id=user.get('organization_id') if user else None)
     now = pd.Timestamp.now()
     buckets = []
     for hour in range(23, -1, -1):
@@ -1803,21 +2329,31 @@ def api_anomalies_heatmap():
 @app.route('/api/anomalies/<anomaly_id>')
 def api_anomaly_detail(anomaly_id):
     anomaly, events = _timeline_for_anomaly(anomaly_id)
+    user = current_user()
+    if anomaly and anomaly.get('organization_id') not in {None, user.get('organization_id')}:
+        anomaly = None
     if not anomaly:
         return jsonify(error='not found'), 404
     return jsonify(anomaly=anomaly, timeline=events)
 
 @app.route('/api/incidents', methods=['GET', 'POST'])
 def api_incidents():
+    user = current_user()
+    org_id = user.get('organization_id')
     if request.method == 'GET':
-        rows = _db_query("SELECT * FROM incidents ORDER BY created_at DESC LIMIT ?", (int(request.args.get('limit', 100)),))
+        rows = _db_query(
+            "SELECT * FROM incidents WHERE organization_id = ? ORDER BY created_at DESC LIMIT ?",
+            (org_id, int(request.args.get('limit', 100)))
+        )
         return jsonify(incidents=rows)
-    if current_user()['role'] == 'viewer':
-        audit_event('access_denied', 'api_incidents', 'denied', 'viewer cannot mutate incidents')
-        return jsonify(error='analyst or admin role required'), 403
     payload = request.json or {}
+    if user['role'] != 'admin':
+        allowed = {'id', 'note'}
+        if set(payload.keys()) - allowed or not str(payload.get('note', '')).strip():
+            audit_event('access_denied', 'api_incidents', 'denied', 'workspace admin required for incident management')
+            return jsonify(error='workspace admin role required'), 403
     incident_id = payload.get('id')
-    rows = _db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))
+    rows = _db_query("SELECT * FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, org_id))
     if not rows:
         return jsonify(error='incident not found'), 404
     updates = []
@@ -1831,34 +2367,54 @@ def api_incidents():
     if 'resolution' in payload:
         updates.append('resolution = ?')
         params.append(payload.get('resolution') or None)
-    if not updates:
+    note = str(payload.get('note', '')).strip()
+    if not updates and not note:
         return jsonify(error='no supported update fields'), 400
-    updates.append('updated_at = ?')
-    params.append(datetime.now().isoformat())
-    params.append(incident_id)
-    _db_exec(f"UPDATE incidents SET {', '.join(updates)} WHERE id = ?", tuple(params))
-    _incident_event(incident_id, 'incident_updated', json.dumps({k: payload[k] for k in payload if k != 'id'}))
-    audit_event('incident_updated', f"incident:{incident_id}", 'success', 'incident fields updated')
+    now = datetime.now().isoformat()
+    if updates:
+        updates.append('updated_at = ?')
+        params.append(now)
+        params.append(incident_id)
+        _db_exec(f"UPDATE incidents SET {', '.join(updates)} WHERE id = ?", tuple(params))
+    else:
+        _db_exec("UPDATE incidents SET updated_at = ? WHERE id = ?", (now, incident_id))
+    detail = {k: payload[k] for k in payload if k not in {'id', 'note'}}
+    if detail:
+        _incident_event(incident_id, 'incident_updated', json.dumps(detail))
+    if note:
+        _incident_event(incident_id, 'note_added', note)
+    audit_detail = 'incident fields updated'
+    if note and not detail:
+        audit_detail = 'incident note added'
+    elif note:
+        audit_detail = 'incident fields updated; note added'
+    audit_event('incident_updated', f"incident:{incident_id}", 'success', audit_detail)
     return jsonify(success=True, incident=_db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0])
 
 
 @app.route('/api/incidents/<incident_id>')
 def api_incident_detail(incident_id):
-    rows = _db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))
+    org_id = current_user().get('organization_id')
+    rows = _db_query("SELECT * FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, org_id))
     if not rows:
         return jsonify(error='incident not found'), 404
-    events = _db_query("SELECT * FROM incident_events WHERE incident_id = ? ORDER BY timestamp", (incident_id,))
-    approvals = _db_query("SELECT * FROM response_approvals WHERE incident_id = ? ORDER BY created_at DESC", (incident_id,))
+    events = _db_query("SELECT * FROM incident_events WHERE incident_id = ? AND organization_id = ? ORDER BY timestamp", (incident_id, org_id))
+    approvals = _db_query("SELECT * FROM response_approvals WHERE incident_id = ? AND organization_id = ? ORDER BY created_at DESC", (incident_id, org_id))
     return jsonify(incident=rows[0], timeline=events, approvals=approvals)
 
 
 @app.route('/api/validation_events', methods=['GET', 'POST'])
 def api_validation_events():
+    user = current_user()
+    org_id = user.get('organization_id')
     if request.method == 'GET':
-        return jsonify(events=_db_query("SELECT * FROM validation_events ORDER BY created_at DESC LIMIT 100"))
-    if current_user()['role'] == 'viewer':
-        audit_event('access_denied', 'api_validation_events', 'denied', 'viewer cannot create validation events')
-        return jsonify(error='analyst or admin role required'), 403
+        return jsonify(events=_db_query(
+            "SELECT * FROM validation_events WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100",
+            (org_id,)
+        ))
+    if user['role'] == 'viewer':
+        audit_event('access_denied', 'api_validation_events', 'denied', 'regular user cannot create validation events')
+        return jsonify(error='workspace admin role required'), 403
     payload = request.json or {}
     event_type = payload.get('event_type', 'cpu_pressure')
     if event_type not in {'cpu_pressure', 'memory_pressure', 'suspicious_network', 'sensitive_file_access'}:
@@ -1866,13 +2422,12 @@ def api_validation_events():
     event_id = f"VE-{uuid.uuid4().hex[:10]}"
     anomaly_id = f"validation-{event_id.lower()}"
     now = datetime.now().isoformat()
-    user = current_user()
     _db_exec(
-        "INSERT INTO validation_events (id, event_type, status, anomaly_id, incident_id, created_by, created_at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (event_id, event_type, 'created', anomaly_id, None, user['username'], now, payload.get('detail', 'controlled validation event'))
+        "INSERT INTO validation_events (id, organization_id, event_type, status, anomaly_id, incident_id, created_by, created_at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (event_id, org_id, event_type, 'created', anomaly_id, None, user['username'], now, payload.get('detail', 'controlled validation event'))
     )
-    anomaly = next(a for a in _validation_anomalies() if a['id'] == anomaly_id)
-    incident = create_incident_from_anomaly(anomaly, actor=user['username'])
+    anomaly = next(a for a in _validation_anomalies(org_id) if a['id'] == anomaly_id)
+    incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
     _db_exec("UPDATE validation_events SET incident_id = ?, status = ? WHERE id = ?", (incident['id'], 'incident_created', event_id))
     audit_event('validation_event_created', f"validation_event:{event_id}", 'success', event_type)
     notification_queue.put({'type': 'validation_event', 'event_type': event_type, 'anomaly_id': anomaly_id, 'incident_id': incident['id']})
@@ -1881,11 +2436,16 @@ def api_validation_events():
 
 @app.route('/api/response_approvals', methods=['GET', 'POST'])
 def api_response_approvals():
+    user = current_user()
+    org_id = user.get('organization_id')
     if request.method == 'GET':
-        return jsonify(approvals=_db_query("SELECT * FROM response_approvals ORDER BY created_at DESC LIMIT 100"))
-    if current_user()['role'] == 'viewer':
-        audit_event('access_denied', 'api_response_approvals', 'denied', 'viewer cannot request approvals')
-        return jsonify(error='analyst or admin role required'), 403
+        return jsonify(approvals=_db_query(
+            "SELECT * FROM response_approvals WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100",
+            (org_id,)
+        ))
+    if user['role'] == 'viewer':
+        audit_event('access_denied', 'api_response_approvals', 'denied', 'regular user cannot request approvals')
+        return jsonify(error='workspace admin role required'), 403
     payload = request.json or {}
     action = payload.get('action')
     target = str(payload.get('target', '')).strip()
@@ -1897,16 +2457,20 @@ def api_response_approvals():
         preview = _dry_run_response_action(action, target)
     except Exception as exc:
         return jsonify(error=str(exc)), 400
-    user = current_user()
+    if payload.get('incident_id'):
+        incident = _db_query("SELECT id FROM incidents WHERE id = ? AND organization_id = ?", (payload.get('incident_id'), org_id))
+        if not incident:
+            return jsonify(error='incident not found'), 404
     approval_id = f"RA-{uuid.uuid4().hex[:10]}"
     now = datetime.now().isoformat()
+    expires_at = (datetime.now() + timedelta(seconds=APPROVAL_TTL_SECONDS)).isoformat()
     _db_exec(
-        "INSERT INTO response_approvals (id, incident_id, anomaly_id, action, target, requested_by, approved_by, status, reason, dry_run, created_at, updated_at, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (approval_id, payload.get('incident_id'), payload.get('anomaly_id'), action, target, user['username'], None, 'pending', payload.get('reason'), int(bool(payload.get('dry_run', True))), now, now, preview)
+        "INSERT INTO response_approvals (id, organization_id, incident_id, anomaly_id, action, target, requested_by, approved_by, status, reason, dry_run, created_at, updated_at, expires_at, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (approval_id, org_id, payload.get('incident_id'), payload.get('anomaly_id'), action, target, user['username'], None, 'pending', payload.get('reason'), int(bool(payload.get('dry_run', True))), now, now, expires_at, preview)
     )
     if payload.get('incident_id'):
-        _incident_event(payload.get('incident_id'), 'approval_requested', f"{action} target={target}")
-        _db_exec("UPDATE incidents SET status = ?, updated_at = ? WHERE id = ?", ('waiting_for_approval', now, payload.get('incident_id')))
+        _incident_event(payload.get('incident_id'), 'approval_requested', f"{action} target={target}", organization_id=org_id)
+        _db_exec("UPDATE incidents SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?", ('waiting_for_approval', now, payload.get('incident_id'), org_id))
     audit_event('response_approval_requested', f"approval:{approval_id}", 'success', f"{action} target={target}")
     return jsonify(success=True, approval=_approval_row(approval_id), preview=preview)
 
@@ -1922,6 +2486,12 @@ def api_response_approval_detail(approval_id):
     user = current_user()
     now = datetime.now().isoformat()
     if command in {'approve', 'reject'}:
+        if command == 'approve' and _approval_expired(approval, datetime.fromisoformat(now)):
+            _db_exec("UPDATE response_approvals SET status = ?, updated_at = ? WHERE id = ?", ('expired', now, approval_id))
+            if approval.get('incident_id'):
+                _incident_event(approval['incident_id'], 'approval_expired', f"{approval['action']} target={approval['target']}")
+            audit_event('response_approval_expired', f"approval:{approval_id}", 'denied', approval['action'])
+            return jsonify(error='approval request has expired', approval=_approval_row(approval_id)), 409
         status = 'approved' if command == 'approve' else 'rejected'
         _db_exec(
             "UPDATE response_approvals SET status = ?, approved_by = ?, updated_at = ? WHERE id = ?",
@@ -1934,7 +2504,14 @@ def api_response_approval_detail(approval_id):
     if command == 'execute':
         if approval['status'] != 'approved':
             return jsonify(error='approval must be approved before execution'), 409
+        if _approval_expired(approval, datetime.fromisoformat(now)):
+            _db_exec("UPDATE response_approvals SET status = ?, updated_at = ? WHERE id = ?", ('expired', now, approval_id))
+            if approval.get('incident_id'):
+                _incident_event(approval['incident_id'], 'approval_expired', f"{approval['action']} target={approval['target']}")
+            audit_event('response_action_started', f"approval:{approval_id}", 'denied', 'approval expired')
+            return jsonify(error='approval request has expired', approval=_approval_row(approval_id)), 409
         try:
+            audit_event('response_action_started', f"approval:{approval_id}", 'success', approval['action'])
             result = _execute_response_action(approval['action'], approval['target'], dry_run=bool(approval['dry_run']))
             status = 'executed_dry_run' if approval['dry_run'] else 'executed'
             _db_exec(
@@ -2002,20 +2579,37 @@ def apply_playbooks(anomalies):
                         'details': run_entry
                     })
 
+
+def _workspace_playbooks(organization_id):
+    return [pb for pb in playbooks if pb.get('organization_id') in {None, organization_id}]
+
+
 @app.route('/api/playbooks', methods=['GET', 'POST'])
 def api_playbooks():
     global next_playbook_id
+    user = current_user()
+    org_id = user.get('organization_id')
     if request.method == 'GET':
-        return jsonify(playbooks=playbooks, runs=playbook_runs)
+        scoped_playbooks = _workspace_playbooks(org_id)
+        scoped_ids = {pb['id'] for pb in scoped_playbooks}
+        scoped_runs = [run for run in playbook_runs if run.get('playbook_id') in scoped_ids and run.get('organization_id') in {None, org_id}]
+        return jsonify(playbooks=scoped_playbooks, runs=scoped_runs)
+    if not _user_has_permission(user, 'mutate_playbooks'):
+        audit_event('access_denied', 'api_playbooks', 'denied', 'mutate_playbooks permission required')
+        return jsonify(error='Mutate playbooks permission required'), 403
     payload = request.json or {}
     if payload.get('action') == 'delete':
         pid = int(payload.get('id', 0))
-        playbooks[:] = [pb for pb in playbooks if pb['id'] != pid]
-        _db_exec("DELETE FROM playbooks WHERE id = ?", (pid,))
+        pb = next((item for item in playbooks if item['id'] == pid), None)
+        if not pb or pb.get('organization_id') != org_id:
+            return jsonify(error='workspace playbook not found'), 404
+        playbooks[:] = [item for item in playbooks if item['id'] != pid]
+        _db_exec("DELETE FROM playbooks WHERE id = ? AND organization_id = ?", (pid, org_id))
         audit_event('playbook_deleted', f"playbook:{pid}", 'success', 'playbook deleted')
-        return jsonify(success=True, playbooks=playbooks)
+        return jsonify(success=True, playbooks=_workspace_playbooks(org_id))
     new_pb = {
         'id': next_playbook_id,
+        'organization_id': org_id,
         'name': payload.get('name', 'New Playbook'),
         'category': payload.get('category', 'system'),
         'metric': payload.get('metric', 'cpu_percent'),
@@ -2029,29 +2623,32 @@ def api_playbooks():
     }
     playbooks.append(new_pb)
     _db_exec(
-        "INSERT INTO playbooks (id, name, category, metric, operator, threshold, action, target, enabled, auto, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (new_pb['id'], new_pb['name'], new_pb['category'], new_pb['metric'], new_pb['operator'], new_pb['threshold'], new_pb['action'], new_pb['target'], int(new_pb['enabled']), int(new_pb['auto']), new_pb['yaml'])
+        "INSERT INTO playbooks (id, organization_id, name, category, metric, operator, threshold, action, target, enabled, auto, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (new_pb['id'], new_pb['organization_id'], new_pb['name'], new_pb['category'], new_pb['metric'], new_pb['operator'], new_pb['threshold'], new_pb['action'], new_pb['target'], int(new_pb['enabled']), int(new_pb['auto']), new_pb['yaml'])
     )
     next_playbook_id += 1
     audit_event('playbook_created', f"playbook:{new_pb['id']}", 'success', new_pb['name'])
-    return jsonify(success=True, playbook=new_pb, playbooks=playbooks)
+    return jsonify(success=True, playbook=new_pb, playbooks=_workspace_playbooks(org_id))
 
 @app.route('/api/playbook_trigger', methods=['POST'])
 def api_playbook_trigger():
     payload = request.json or {}
+    org_id = current_user().get('organization_id')
+    available_playbooks = _workspace_playbooks(org_id)
     pb_id = int(payload.get('id', 0) or 0)
     anomaly = None
     if payload.get('anomaly_id'):
         anomaly = next((a for a in _load_anomalies(apply_automation=False) if a['id'] == payload.get('anomaly_id')), None)
-    pb = next((x for x in playbooks if x['id'] == pb_id), None)
+    pb = next((x for x in available_playbooks if x['id'] == pb_id), None)
     if not pb and anomaly:
-        pb = next((x for x in playbooks if x.get('enabled') and x.get('category') == anomaly.get('category')), None)
+        pb = next((x for x in available_playbooks if x.get('enabled') and x.get('category') == anomaly.get('category')), None)
     if not pb and anomaly:
-        pb = next((x for x in playbooks if x.get('enabled') and x.get('metric') == anomaly.get('metric')), None)
+        pb = next((x for x in available_playbooks if x.get('enabled') and x.get('metric') == anomaly.get('metric')), None)
     if not pb:
         return jsonify(success=False, message='Playbook not found'), 404
     run_entry = {
         'id': len(playbook_runs)+1,
+        'organization_id': org_id,
         'playbook_id': pb['id'],
         'name': pb['name'],
         'metric': payload.get('metric') or (anomaly or {}).get('metric', 'n/a'),
@@ -2067,8 +2664,8 @@ def api_playbook_trigger():
     }
     playbook_runs.append(run_entry)
     _db_exec(
-        "INSERT INTO playbook_runs (playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
+        "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_entry['organization_id'], run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
     )
     audit_event('playbook_triggered', f"playbook:{pb['id']}", 'success', f"anomaly={payload.get('anomaly_id') or 'manual'}")
     notification_queue.put({'type':'playbook_manual_trigger','playbook':pb['name'],'details':run_entry})
@@ -2088,9 +2685,19 @@ def api_reports_summary():
 def api_reports_download(fmt):
     summary = _report_summary()
     if fmt == 'csv':
+        user = current_user()
+        _db_exec(
+            "INSERT INTO report_history (generated_at, fmt, generated_by, detail) VALUES (?, ?, ?, ?)",
+            (summary['generated_at'], fmt, user['username'] if user else 'system', 'security compliance CSV')
+        )
         audit_event('report_downloaded', 'reports:csv', 'success', 'security compliance CSV')
         return _csv_response(summary)
     if fmt == 'pdf':
+        user = current_user()
+        _db_exec(
+            "INSERT INTO report_history (generated_at, fmt, generated_by, detail) VALUES (?, ?, ?, ?)",
+            (summary['generated_at'], fmt, user['username'] if user else 'system', 'security compliance PDF')
+        )
         audit_event('report_downloaded', 'reports:pdf', 'success', 'security compliance PDF')
         return _pdf_response(summary)
     return jsonify(error='unsupported format'), 400
@@ -2195,11 +2802,21 @@ def api_logs():
 
 @app.route('/api/audit_events')
 def api_audit_events():
-    return jsonify(logs=_audit_rows(limit=int(request.args.get('limit', 200))))
+    user = current_user()
+    return jsonify(logs=_audit_rows(
+        limit=int(request.args.get('limit', 200)),
+        actor=request.args.get('actor') or None,
+        event_type=request.args.get('event_type') or None,
+        result=request.args.get('result') or None,
+        start=request.args.get('start') or None,
+        end=request.args.get('end') or None,
+        organization_id=user.get('organization_id') if user else None,
+    ))
 
 @app.route('/api/audit_summary')
 def api_audit_summary():
-    rows = _audit_rows(limit=200)
+    user = current_user()
+    rows = _audit_rows(limit=200, organization_id=user.get('organization_id') if user else None)
     warnings = len([r for r in rows if r['severity'] == 'warning'])
     denied = len([r for r in rows if r['outcome'] == 'denied'])
     return jsonify(summary=f"{len(rows)} telemetry audit events, {warnings} warnings, {denied} denied outcomes")

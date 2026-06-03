@@ -1,57 +1,169 @@
 {% extends "base.html" %}
 
-{% block title %}SysEthic • Users{% endblock %}
+{% block title %}SysEthic • Workspace Members{% endblock %}
 
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h2>User Access</h2>
-    <span class="label">Local accounts and operational roles</span>
+    <h2>Workspace Members</h2>
+    <span class="label">{{ current_organization.name if current_organization else 'Workspace' }} members and roles</span>
   </div>
 
   <section class="grid">
+    {% if has_permission('manage_members') %}
     <div class="card">
-      <div class="label">Create User</div>
+      <div class="label">Invite Member</div>
       <label>Username <input id="newUsername" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
       <label>Password <input id="newPassword" type="password" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
       <label>Role
         <select id="newRole" class="btn" style="width:100%;margin-top:6px;">
-          <option value="viewer">Viewer</option>
-          <option value="analyst">Analyst</option>
-          <option value="admin">Admin</option>
+          <option value="viewer">Regular User</option>
+          <option value="admin">Workspace Admin</option>
         </select>
       </label>
-      <button id="createUser" class="btn" style="margin-top:12px;">Create</button>
+      <button id="createUser" class="btn" style="margin-top:12px;">Invite</button>
       <div id="userMessage" class="help" style="margin-top:10px;"></div>
     </div>
+    {% endif %}
+    {% if can('admin') %}
+    <div class="card">
+      <div class="label">Membership Access</div>
+      <label>Workspace Name <input id="workspaceName" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
+      <label>Membership Access
+        <select id="joinPolicy" class="btn" style="width:100%;margin-top:6px;">
+          <option value="join_with_code">Join with workspace code</option>
+          <option value="request_to_join">Request to join</option>
+          <option value="admin_invites_only">Admin-created invites only</option>
+        </select>
+      </label>
+      <div class="help" id="membershipHelp" style="margin-top:10px;">
+        Anyone with the workspace code can join as a Regular User. Requests must be approved by an admin. Only admins can add members directly.
+      </div>
+      <div class="help" id="workspaceCodeHelp" style="margin-top:10px;"></div>
+      <button id="saveWorkspace" class="btn" style="margin-top:12px;">Save Settings</button>
+    </div>
+    <div class="card">
+      <div class="label">Workspace Permissions</div>
+      <label>User
+        <select id="permissionUser" class="btn" style="width:100%;margin-top:6px;"></select>
+      </label>
+      <div class="help" style="margin-top:10px;">Grant or revoke workspace permissions for members.</div>
+      <label style="display:block;margin-top:12px;"><input type="checkbox" id="perm_manage_members"> Manage members</label>
+      <label style="display:block;"><input type="checkbox" id="perm_mutate_playbooks"> Mutate playbooks</label>
+      <label style="display:block;"><input type="checkbox" id="perm_access_terminal"> Access terminal diagnostics</label>
+      <button id="savePermissions" class="btn" style="margin-top:12px;">Save Permissions</button>
+      <div id="permissionMessage" class="help" style="margin-top:10px;"></div>
+    </div>
+    {% endif %}
     <div class="card" style="grid-column: span 3;">
-      <div class="label">Users</div>
+      <div class="label">Members</div>
       <table class="table" id="usersTable">
-        <thead><tr><th>Username</th><th>Role</th><th>Active</th><th>Created</th><th>Last Login</th><th>Ops</th></tr></thead>
+        <thead><tr><th>Username</th><th>Role</th><th>Permissions</th><th>Active</th><th>Created</th><th>Last Login</th><th>Ops</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
+    {% if can('admin') %}
+    <div class="card" style="grid-column: span 4;">
+      <div class="label">Pending Join Requests</div>
+      <table class="table" id="joinRequestsTable">
+        <thead><tr><th>Username</th><th>Status</th><th>Requested</th><th>Ops</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    {% endif %}
   </section>
 </div>
 <script>
+const CAN_WORKSPACE_ADMIN = {{ 'true' if can('admin') else 'false' }};
+async function loadWorkspace(){
+  if (!CAN_WORKSPACE_ADMIN) return;
+  const data = await fetch('/api/organization').then(r=>r.json());
+  const org = data.organization || {};
+  document.getElementById('workspaceName').value = org.name || '';
+  let joinPolicy = org.join_policy || 'join_with_code';
+  if (joinPolicy === 'open_with_code') joinPolicy = 'join_with_code';
+  if (joinPolicy === 'invite_only') joinPolicy = 'admin_invites_only';
+  document.getElementById('joinPolicy').value = joinPolicy;
+  document.getElementById('workspaceCodeHelp').textContent = org.join_code ? `Workspace code: ${org.join_code}` : '';
+}
+let currentUsers = [];
+
 async function loadUsers(){
   const data = await fetch('/api/users').then(r=>r.json());
   const body = document.querySelector('#usersTable tbody');
-  body.innerHTML = (data.users || []).map(u => `
+  const userSelect = document.getElementById('permissionUser');
+  const roleLabel = role => role === 'admin' ? 'Workspace Admin' : 'Regular User';
+  currentUsers = data.users || [];
+  if (userSelect) {
+    userSelect.innerHTML = `<option value="">Select user</option>${currentUsers.map(u => `<option value="${u.id}">${u.username}</option>`).join('')}`;
+  }
+  body.innerHTML = currentUsers.map(u => `
     <tr>
       <td>${u.username}</td>
-      <td>${u.role}</td>
+      <td>${roleLabel(u.role)}</td>
+      <td>${(u.permissions || []).join(', ')}</td>
       <td>${u.active ? 'yes' : 'no'}</td>
       <td>${u.created_at || ''}</td>
       <td>${u.last_login_at || ''}</td>
-      <td>${u.active ? `<button class="btn btn-small" onclick="disableUser(${u.id})">Disable</button>` : ''}</td>
+      <td>${u.active ? `<button class="btn btn-small" onclick="disableUser(${u.id})">Disable</button>` : `<button class="btn btn-small" onclick="enableUser(${u.id})">Enable</button>`}</td>
     </tr>
   `).join('');
 }
+async function loadJoinRequests(){
+  if (!CAN_WORKSPACE_ADMIN) return;
+  const data = await fetch('/api/join_requests').then(r=>r.json());
+  const body = document.querySelector('#joinRequestsTable tbody');
+  body.innerHTML = (data.requests || []).map(r => `
+    <tr>
+      <td>${r.username}</td>
+      <td>${r.status}</td>
+      <td>${r.requested_at || ''}</td>
+      <td>${r.status === 'pending' ? `<button class="btn btn-small" onclick="decideJoin(${r.id}, 'approve')">Approve</button> <button class="btn btn-small" onclick="decideJoin(${r.id}, 'deny')">Deny</button>` : ''}</td>
+    </tr>
+  `).join('');
+}
+async function decideJoin(id, action){
+  const res = await fetch('/api/join_requests', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, action})});
+  const data = await res.json();
+  document.getElementById('userMessage').textContent = data.error || (action === 'approve' ? 'Join request approved.' : 'Join request denied.');
+  await loadUsers();
+  await loadJoinRequests();
+}
+
+if (CAN_WORKSPACE_ADMIN) document.getElementById('permissionUser').addEventListener('change', () => {
+  const selectedId = Number(document.getElementById('permissionUser').value);
+  const selected = currentUsers.find(u => u.id === selectedId) || {permissions: []};
+  document.getElementById('perm_manage_members').checked = selected.permissions.includes('manage_members');
+  document.getElementById('perm_mutate_playbooks').checked = selected.permissions.includes('mutate_playbooks');
+  document.getElementById('perm_access_terminal').checked = selected.permissions.includes('access_terminal');
+});
+
+if (CAN_WORKSPACE_ADMIN) document.getElementById('savePermissions').addEventListener('click', async () => {
+  const userId = Number(document.getElementById('permissionUser').value);
+  if (!userId) {
+    document.getElementById('permissionMessage').textContent = 'Select a user first.';
+    return;
+  }
+  const permissions = [
+    document.getElementById('perm_manage_members').checked ? 'manage_members' : null,
+    document.getElementById('perm_mutate_playbooks').checked ? 'mutate_playbooks' : null,
+    document.getElementById('perm_access_terminal').checked ? 'access_terminal' : null,
+  ].filter(Boolean);
+  const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'permissions', id: userId, permissions})});
+  const data = await res.json();
+  document.getElementById('permissionMessage').textContent = data.error || 'Permissions updated.';
+  await loadUsers();
+});
 async function disableUser(id){
   const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'disable', id})});
   const data = await res.json();
   document.getElementById('userMessage').textContent = data.error || 'User disabled.';
+  loadUsers();
+}
+async function enableUser(id){
+  const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'enable', id})});
+  const data = await res.json();
+  document.getElementById('userMessage').textContent = data.error || 'User enabled.';
   loadUsers();
 }
 document.getElementById('createUser').addEventListener('click', async () => {
@@ -62,13 +174,25 @@ document.getElementById('createUser').addEventListener('click', async () => {
   };
   const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
   const data = await res.json();
-  document.getElementById('userMessage').textContent = data.error || 'User created.';
+  document.getElementById('userMessage').textContent = data.error || 'Member invited.';
   if (!data.error) {
     document.getElementById('newUsername').value = '';
     document.getElementById('newPassword').value = '';
   }
   loadUsers();
 });
+if (CAN_WORKSPACE_ADMIN) document.getElementById('saveWorkspace').addEventListener('click', async () => {
+  const payload = {
+    name: document.getElementById('workspaceName').value,
+    join_policy: document.getElementById('joinPolicy').value
+  };
+  const res = await fetch('/api/organization', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  const data = await res.json();
+  document.getElementById('userMessage').textContent = data.error || 'Workspace settings saved.';
+  loadWorkspace();
+});
+loadWorkspace();
 loadUsers();
+loadJoinRequests();
 </script>
 {% endblock %}

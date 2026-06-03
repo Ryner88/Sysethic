@@ -21,6 +21,7 @@
   </section>
 </div>
 <script>
+const CAN_ANALYST = {{ 'true' if can('analyst') else 'false' }};
 async function loadIncidents(){
   const data = await fetch('/api/incidents').then(r=>r.json());
   const body = document.querySelector('#incidentTable tbody');
@@ -34,18 +35,31 @@ async function loadIncidents(){
 async function openIncident(id){
   const data = await fetch('/api/incidents/' + id).then(r=>r.json());
   const events = (data.timeline || []).map(e => `<div class="event-item"><strong>${e.event_type}</strong><span>${e.timestamp} · ${e.actor}</span><small>${e.detail}</small></div>`).join('');
+  const controls = CAN_ANALYST ? `
+    <div style="margin:10px 0;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-small" onclick="updateIncident('${id}', {status:'investigating'})">Investigating</button>
+      <button class="btn btn-small" onclick="updateIncident('${id}', {status:'open'})">Reopen</button>
+      <button class="btn btn-small" onclick="updateIncident('${id}', {status:'resolved', resolution:document.getElementById('incidentResolution').value})">Resolve</button>
+      <button class="btn btn-small" onclick="updateIncident('${id}', {status:'dismissed', resolution:document.getElementById('incidentResolution').value})">Dismiss</button>
+    </div>
+    <div class="controls" style="flex-direction:column;align-items:stretch;margin:10px 0;">
+      <input id="incidentOwner" class="btn" style="text-align:left;" placeholder="Owner" value="${data.incident.owner || ''}">
+      <textarea id="incidentNote" class="btn" style="text-align:left;min-height:70px;" placeholder="Investigation note"></textarea>
+      <textarea id="incidentResolution" class="btn" style="text-align:left;min-height:70px;" placeholder="Resolution summary">${data.incident.resolution || ''}</textarea>
+      <div>
+        <button class="btn btn-small" onclick="updateIncident('${id}', {owner:document.getElementById('incidentOwner').value})">Assign</button>
+        <button class="btn btn-small" onclick="updateIncident('${id}', {note:document.getElementById('incidentNote').value})">Add Note</button>
+      </div>
+    </div>
+  ` : '';
   document.getElementById('incidentDetail').innerHTML = `
     <div><strong>${data.incident.title}</strong> · ${data.incident.status}</div>
-    <div style="margin:10px 0;">
-      <button class="btn btn-small" onclick="updateIncident('${id}','investigating')">Investigating</button>
-      <button class="btn btn-small" onclick="updateIncident('${id}','resolved')">Resolve</button>
-      <button class="btn btn-small" onclick="updateIncident('${id}','dismissed')">Dismiss</button>
-    </div>
+    ${controls}
     ${events || '<div class="label">No timeline events.</div>'}
   `;
 }
-async function updateIncident(id, status){
-  await fetch('/api/incidents', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, status})});
+async function updateIncident(id, changes){
+  await fetch('/api/incidents', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, ...changes})});
   await loadIncidents();
   await openIncident(id);
 }

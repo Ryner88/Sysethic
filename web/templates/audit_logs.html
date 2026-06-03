@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}SysEthic • Audit Logs{% endblock %}
+{% block title %}SysEthic • Workspace Audit{% endblock %}
 
 {% block content %}
 <div class="wrap">
   <div class="page-header">
-    <h1 style="font-size:2.2rem;font-family:var(--font-mono);margin-bottom:0;">Audit Logs</h1>
-    <div style="color:var(--muted);font-size:1.1rem;margin-bottom:18px;">Transparent logging of all system actions &amp; access events</div>
+    <h1 style="font-size:2.2rem;font-family:var(--font-mono);margin-bottom:0;">Workspace Audit</h1>
+    <div style="color:var(--muted);font-size:1.1rem;margin-bottom:18px;">Workspace-scoped activity, findings, and access events</div>
   </div>
 
   <div class="stat-grid" style="margin-bottom:18px;">
@@ -25,9 +25,13 @@
   </div>
 
   <div style="display:flex;gap:12px;margin-bottom:18px;">
+    <input id="actorFilter" class="btn" placeholder="Actor" style="min-width:140px;text-align:left;">
+    <input id="eventFilter" class="btn" placeholder="Event type" style="min-width:160px;text-align:left;">
     <select id="roleFilter" class="btn" style="min-width:140px;"></select>
     <select id="severityFilter" class="btn" style="min-width:140px;"></select>
     <select id="outcomeFilter" class="btn" style="min-width:140px;"></select>
+    <input id="startFilter" class="btn" type="datetime-local" style="min-width:180px;">
+    <input id="endFilter" class="btn" type="datetime-local" style="min-width:180px;">
   </div>
 
   <div class="card" style="margin-bottom:24px;">
@@ -76,7 +80,19 @@ function renderLogRow(r) {
 }
 
 async function loadAuditLogs() {
-  const res = await fetch('/api/audit_events');
+  const params = new URLSearchParams();
+  const actor = document.getElementById('actorFilter').value.trim();
+  const eventType = document.getElementById('eventFilter').value.trim();
+  const result = document.getElementById('outcomeFilter').value;
+  const start = document.getElementById('startFilter').value;
+  const end = document.getElementById('endFilter').value;
+  if (actor) params.set('actor', actor);
+  if (eventType) params.set('event_type', eventType);
+  if (result) params.set('result', result);
+  if (start) params.set('start', new Date(start).toISOString());
+  if (end) params.set('end', new Date(end).toISOString());
+  const url = '/api/audit_events' + (params.toString() ? '?' + params.toString() : '');
+  const res = await fetch(url);
   const data = await res.json();
   const logs = data.logs || [];
 
@@ -111,9 +127,13 @@ async function loadAuditLogs() {
   document.getElementById('eventCount').textContent = filtered.length;
 }
 
+document.getElementById('actorFilter').addEventListener('input', loadAuditLogs);
+document.getElementById('eventFilter').addEventListener('input', loadAuditLogs);
 document.getElementById('roleFilter').addEventListener('change', loadAuditLogs);
 document.getElementById('severityFilter').addEventListener('change', loadAuditLogs);
 document.getElementById('outcomeFilter').addEventListener('change', loadAuditLogs);
+document.getElementById('startFilter').addEventListener('change', loadAuditLogs);
+document.getElementById('endFilter').addEventListener('change', loadAuditLogs);
 loadAuditLogs();
 setInterval(loadAuditLogs, 10000);
 </script>

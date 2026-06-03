@@ -14,32 +14,38 @@
         <p>Secure Environment</p>
       </div>
       <ul class="nav-list">
-        <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">📊 Dashboard</a></li>
+        <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">📊 Workspace Dashboard</a></li>
         <li><a href="{{ url_for('processes') }}" class="{% if request.endpoint == 'processes' %}active{% endif %}">🔒 Processes</a></li>
         <li><a href="{{ url_for('analytics') }}" class="{% if request.endpoint == 'analytics' %}active{% endif %}">📈 Analytics</a></li>
         <li><a href="{{ url_for('visualization_lab') }}" class="{% if request.endpoint == 'visualization_lab' %}active{% endif %}">🧪 Visualization Lab</a></li>
         <li><a href="{{ url_for('threat_trends_page') }}" class="{% if request.endpoint == 'threat_trends_page' %}active{% endif %}">📉 Threat Trends</a></li>
         <li><a href="{{ url_for('assets_page') }}" class="{% if request.endpoint == 'assets_page' %}active{% endif %}">🖥️ Assets</a></li>
         <li><a href="{{ url_for('playbooks_page') }}" class="{% if request.endpoint == 'playbooks_page' %}active{% endif %}">🛠️ Playbooks</a></li>
+        {% if can('admin') %}
         <li><a href="{{ url_for('automation_page') }}" class="{% if request.endpoint == 'automation_page' %}active{% endif %}">⚙️ Automation</a></li>
+        {% endif %}
         <li><a href="{{ url_for('incidents_page') }}" class="{% if request.endpoint == 'incidents_page' %}active{% endif %}">🧾 Incidents</a></li>
+        {% if can('analyst') %}
         <li><a href="{{ url_for('approvals_page') }}" class="{% if request.endpoint == 'approvals_page' %}active{% endif %}">✅ Approvals</a></li>
         <li><a href="{{ url_for('validation_page') }}" class="{% if request.endpoint == 'validation_page' %}active{% endif %}">🧪 Validation</a></li>
+        {% endif %}
         <li><a href="{{ url_for('reports_page') }}" class="{% if request.endpoint == 'reports_page' %}active{% endif %}">📄 Reports</a></li>
-        <li><a href="{{ url_for('terminal_page') }}" class="{% if request.endpoint == 'terminal_page' %}active{% endif %}">⌨️ Terminal</a></li>
         <li><a href="{{ url_for('security') }}" class="{% if request.endpoint == 'security' %}active{% endif %}">🛡️ Security</a></li>
-        <li><a href="{{ url_for('audit_logs') }}" class="{% if request.endpoint == 'audit_logs' %}active{% endif %}">📋 Audit Logs</a></li>
+        <li><a href="{{ url_for('audit_logs') }}" class="{% if request.endpoint == 'audit_logs' %}active{% endif %}">📋 Workspace Audit</a></li>
         <li><a href="{{ url_for('ethics') }}" class="{% if request.endpoint == 'ethics' %}active{% endif %}">⚖️ Ethics</a></li>
         <li><a href="{{ url_for('anomalies_page') }}" class="{% if request.endpoint == 'anomalies_page' %}active{% endif %}">🚨 Anomalies</a></li>
         <li><a href="{{ url_for('files') }}" class="{% if request.endpoint == 'files' %}active{% endif %}">📁 Files</a></li>
-        {% if current_user and current_user.role == 'admin' %}
-        <li><a href="{{ url_for('users_page') }}" class="{% if request.endpoint == 'users_page' %}active{% endif %}">👤 Users</a></li>
+        {% if has_permission('access_terminal') %}
+        <li><a href="{{ url_for('terminal_page') }}" class="{% if request.endpoint == 'terminal_page' %}active{% endif %}">⌨️ Owner Console</a></li>
+        {% endif %}
+        {% if has_permission('manage_members') %}
+        <li><a href="{{ url_for('users_page') }}" class="{% if request.endpoint == 'users_page' %}active{% endif %}">👤 Workspace Members</a></li>
         {% endif %}
       </ul>
       <div class="sidebar-footer">
         {% if current_user %}
         <div class="status" style="margin-bottom:8px;">
-          <span>{{ current_user.username }} · {{ current_user.role }}</span>
+          <span>{{ current_user.username }} · {% if current_user.role == 'admin' %}Workspace Admin{% else %}Regular User{% endif %}</span>
         </div>
         <a class="btn" href="{{ url_for('logout') }}" style="display:block;text-align:center;">Logout</a>
         {% endif %}
@@ -104,5 +110,6 @@
     console.log('SSE error');
   };
   </script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

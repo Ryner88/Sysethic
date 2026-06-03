@@ -68,11 +68,11 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
 
 5. Open http://localhost:5000 in your browser.
 
-6. Complete first-run setup by creating the local admin account.
+6. Complete first-run setup by creating the first workspace owner.
 
 ## Usage
 
-Log in with a local SAAOE account, then navigate through the sidebar to access monitoring sections. Admin users can manage local users, mutate operational rules, trigger playbooks, export reports, and access protected diagnostic surfaces. Viewer users have read-only dashboard access.
+Log in with a SysEthic workspace account, then navigate through the sidebar to access monitoring sections. Workspace Admins manage members, workspace settings, playbooks, audits, and reports for their own workspace. Regular Users can view assigned dashboards, run allowed playbooks, and submit incident findings. Platform-owner diagnostics are separate from workspace administration.
 
 By default, SAAOE binds to `127.0.0.1`, stores operational data in `data/saaoe.sqlite3`, and disables Flask debug mode. Configuration can be changed with environment variables or `.env`.
 

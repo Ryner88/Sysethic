@@ -35,15 +35,16 @@
   </section>
 </div>
 <script>
+const CAN_ADMIN = {{ 'true' if can('admin') else 'false' }};
 async function loadApprovals(){
   const data = await fetch('/api/response_approvals').then(r=>r.json());
   document.querySelector('#approvalTable tbody').innerHTML = (data.approvals || []).map(a => `
     <tr>
       <td>${a.id}</td><td>${a.action}</td><td>${a.target}</td><td>${a.status}</td><td>${a.requested_by}</td>
       <td>
-        <button class="btn btn-small" onclick="approvalCommand('${a.id}','approve')">Approve</button>
+        ${CAN_ADMIN ? `<button class="btn btn-small" onclick="approvalCommand('${a.id}','approve')">Approve</button>
         <button class="btn btn-small" onclick="approvalCommand('${a.id}','reject')">Reject</button>
-        <button class="btn btn-small" onclick="approvalCommand('${a.id}','execute')">Execute</button>
+        <button class="btn btn-small" onclick="approvalCommand('${a.id}','execute')">Execute</button>` : ''}
       </td>
     </tr>
   `).join('');

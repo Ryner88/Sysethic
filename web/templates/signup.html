@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SysEthic • Create Workspace</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='sysethic.css') }}">
+</head>
+<body>
+  <main class="login-page">
+    <aside class="login-panel">
+      <div class="login-brand">
+        <div class="brand-mark"><span>S</span></div>
+        <div class="brand-labels">
+          <div class="brand-name">SysEthic</div>
+          <div class="brand-subtitle">Create your workspace</div>
+        </div>
+      </div>
+
+      <div class="login-card">
+        <h1>Create Workspace</h1>
+        <p class="login-intro">Create a new workspace for your company, class project, or team. You'll become the Workspace Admin for this workspace.</p>
+        {% if error %}
+          <div class="alert-item login-alert">{{ error }}</div>
+        {% endif %}
+        {% if message %}
+          <div class="alert-item login-alert">{{ message }}</div>
+        {% endif %}
+        <div class="auth-options">
+          <a class="auth-option active" href="{{ url_for('signup') }}">
+            <strong>Create workspace</strong>
+            <span>Start a new workspace and become its Workspace Admin.</span>
+          </a>
+          <a class="auth-option" href="{{ url_for('join') }}">
+            <strong>Join workspace</strong>
+            <span>Use a workspace code to join an existing workspace as a Regular User.</span>
+          </a>
+          <a class="auth-option" href="{{ url_for('login') }}">
+            <strong>Log in</strong>
+            <span>Access an account you already have.</span>
+          </a>
+        </div>
+        <form method="post">
+          <div class="login-field">
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="username" value="{{ username or '' }}" autofocus>
+          </div>
+
+          <div class="login-field">
+            <label for="organization">Workspace Name</label>
+            <input id="organization" name="organization" value="{{ organization or '' }}" autocomplete="organization">
+          </div>
+
+          <div class="login-field password">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="new-password">
+          </div>
+
+          <div class="login-field password">
+            <label for="confirm">Confirm Password</label>
+            <input id="confirm" name="confirm" type="password" autocomplete="new-password">
+          </div>
+
+          <button class="btn login-submit" type="submit">Create Workspace</button>
+        </form>
+      </div>
+    </aside>
+
+    <section class="login-side">
+      <div class="login-side-hero">
+        <div class="hero-logo"></div>
+        <div class="hero-text">SYSETHIC</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

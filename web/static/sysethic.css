@@ -298,6 +298,7 @@
   --good:#008000; --bad:#ff0000; --warn:#ff8000; --border:#cccccc;
 }
 
+*, *::before, *::after { box-sizing: border-box; }
 html,body{height:100%; margin:0; font-family: var(--font-main);}
 body{background:var(--bg);color:var(--text);}
 
@@ -404,16 +405,18 @@ select{padding:6px 8px}
 .login-page {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(320px, 420px) 1fr;
+  grid-template-columns: minmax(340px, 520px) 1fr;
 }
 
 .login-panel {
   background: #050608;
   color: #f4f4f6;
-  padding: 48px 42px;
+  padding: 56px clamp(28px, 5vw, 56px);
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
+  min-width: 0;
+  border-right: 1px solid rgba(255,255,255,0.08);
 }
 
 .login-brand {
@@ -464,7 +467,7 @@ select{padding:6px 8px}
 }
 
 .login-card {
-  max-width: 360px;
+  width: min(100%, 420px);
   margin-top: 48px;
 }
 
@@ -483,6 +486,42 @@ select{padding:6px 8px}
 
 .login-alert {
   margin-bottom: 20px;
+}
+
+.auth-options {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 28px;
+}
+
+.auth-option {
+  display: block;
+  color: rgba(255,255,255,0.76);
+  text-decoration: none;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.035);
+}
+
+.auth-option strong {
+  display: block;
+  color: #ffffff;
+  font-size: 0.95rem;
+  margin-bottom: 4px;
+}
+
+.auth-option span {
+  display: block;
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.auth-option:hover,
+.auth-option:focus,
+.auth-option.active {
+  border-color: rgba(130,181,255,0.65);
+  background: rgba(59,92,255,0.14);
 }
 
 .login-field {
@@ -547,6 +586,28 @@ select{padding:6px 8px}
   text-transform: uppercase;
   cursor: pointer;
   transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.auth-switch {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 20px;
+  color: rgba(255,255,255,0.58);
+  font-size: 0.92rem;
+}
+
+.auth-switch a {
+  color: #82b5ff;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.auth-switch a:hover,
+.auth-switch a:focus {
+  color: #ffffff;
+  text-decoration: underline;
 }
 
 .login-submit:hover,
