@@ -188,6 +188,13 @@ def _db_query(sql, params=()):
         conn.close()
 
 
+@app.errorhandler(sqlite3.Error)
+def storage_error(exc):
+    if _is_api_request():
+        return jsonify(error='storage write failed', detail=str(exc)), 500
+    return render_template('login.html', error=f"Storage error: {exc}", username=''), 500
+
+
 @app.teardown_appcontext
 def close_db(exc):
     conn = g.pop('db', None)
@@ -373,8 +380,30 @@ def init_db():
                 detail TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS anomalies (
+                id TEXT PRIMARY KEY,
+                organization_id INTEGER,
+                timestamp TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value REAL NOT NULL,
+                threshold REAL NOT NULL,
+                severity TEXT NOT NULL,
+                category TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0,
+                rule_name TEXT,
+                indicator_type TEXT,
+                indicator TEXT,
+                threat_intel TEXT NOT NULL DEFAULT '{}',
+                risk_score INTEGER NOT NULL DEFAULT 0,
+                frameworks TEXT NOT NULL DEFAULT '[]',
+                validation INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS file_classifications (
                 path TEXT PRIMARY KEY,
+                organization_id INTEGER,
                 sensitivity TEXT NOT NULL,
                 owner TEXT,
                 classification TEXT NOT NULL,
@@ -384,6 +413,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS report_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                organization_id INTEGER,
                 generated_at TEXT NOT NULL,
                 fmt TEXT NOT NULL,
                 generated_by TEXT NOT NULL,
@@ -392,6 +422,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS app_configuration (
                 key TEXT PRIMARY KEY,
+                organization_id INTEGER,
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 updated_by TEXT NOT NULL
@@ -410,6 +441,9 @@ def init_db():
         _ensure_column(conn, 'response_approvals', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'validation_events', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'response_approvals', 'expires_at', 'TEXT')
+        _ensure_column(conn, 'file_classifications', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'app_configuration', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'report_history', 'organization_id', 'INTEGER')
         default_org = conn.execute("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',)).fetchone()
         if not default_org:
             cur = conn.execute(
@@ -427,6 +461,11 @@ def init_db():
         conn.execute("UPDATE incident_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE response_approvals SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE validation_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE file_classifications SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE app_configuration SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE file_classifications SET path = 'org:' || organization_id || ':' || path WHERE path NOT LIKE 'org:%'")
+        conn.execute("UPDATE app_configuration SET key = 'org:' || organization_id || ':' || key WHERE key NOT LIKE 'org:%'")
         conn.commit()
     finally:
         conn.close()
@@ -478,6 +517,182 @@ def _seed_db():
 
 def _bool_row(row, key):
     return bool(row.get(key))
+
+
+def _json_dumps(value):
+    return json.dumps(value if value is not None else {}, sort_keys=True)
+
+
+def _json_loads(value, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _anomaly_from_row(row):
+    return {
+        'id': row['id'],
+        'organization_id': row.get('organization_id'),
+        'timestamp': row['timestamp'],
+        'metric': row['metric'],
+        'value': row['value'],
+        'threshold': row['threshold'],
+        'severity': row['severity'],
+        'category': row['category'],
+        'confidence': row.get('confidence') or 0,
+        'rule_name': row.get('rule_name'),
+        'indicator_type': row.get('indicator_type'),
+        'indicator': row.get('indicator'),
+        'threat_intel': _json_loads(row.get('threat_intel'), {}),
+        'risk_score': row.get('risk_score') or 0,
+        'frameworks': _json_loads(row.get('frameworks'), []),
+        'validation': bool(row.get('validation')),
+    }
+
+
+def _persist_anomaly(anomaly, organization_id=None):
+    now = datetime.now().isoformat()
+    organization_id = organization_id if organization_id is not None else anomaly.get('organization_id')
+    anomaly['organization_id'] = organization_id
+    if 'id' not in anomaly:
+        _decorate_threat_intel(anomaly)
+    if 'risk_score' not in anomaly:
+        anomaly['risk_score'] = 0
+    if 'frameworks' not in anomaly:
+        anomaly['frameworks'] = []
+    if 'threat_intel' not in anomaly:
+        anomaly['threat_intel'] = {}
+    _db_exec(
+        """
+        INSERT INTO anomalies (
+            id, organization_id, timestamp, metric, value, threshold, severity, category,
+            confidence, rule_name, indicator_type, indicator, threat_intel, risk_score,
+            frameworks, validation, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            organization_id = excluded.organization_id,
+            timestamp = excluded.timestamp,
+            metric = excluded.metric,
+            value = excluded.value,
+            threshold = excluded.threshold,
+            severity = excluded.severity,
+            category = excluded.category,
+            confidence = excluded.confidence,
+            rule_name = excluded.rule_name,
+            indicator_type = excluded.indicator_type,
+            indicator = excluded.indicator,
+            threat_intel = excluded.threat_intel,
+            risk_score = excluded.risk_score,
+            frameworks = excluded.frameworks,
+            validation = excluded.validation,
+            updated_at = excluded.updated_at
+        """,
+        (
+            anomaly['id'], organization_id, anomaly['timestamp'], anomaly['metric'],
+            float(anomaly.get('value', 0)), float(anomaly.get('threshold', 0)),
+            normalize_severity(anomaly.get('severity')), anomaly.get('category') or 'system',
+            float(anomaly.get('confidence', 0)), anomaly.get('rule_name'),
+            anomaly.get('indicator_type'), anomaly.get('indicator'),
+            _json_dumps(anomaly.get('threat_intel')), int(anomaly.get('risk_score', 0)),
+            _json_dumps(anomaly.get('frameworks') or []), int(bool(anomaly.get('validation'))),
+            now, now,
+        )
+    )
+    return anomaly
+
+
+def _persist_anomalies(anomalies, organization_id=None):
+    for anomaly in anomalies:
+        _persist_anomaly(anomaly, organization_id=organization_id)
+    return anomalies
+
+
+def _stored_anomalies(start=None, end=None, severity=None, organization_id=None, limit=200):
+    where = []
+    params = []
+    if organization_id is not None:
+        where.append("organization_id = ?")
+        params.append(organization_id)
+    if start:
+        where.append("timestamp >= ?")
+        params.append(start)
+    if end:
+        where.append("timestamp <= ?")
+        params.append(end)
+    if severity:
+        where.append("severity = ?")
+        params.append(severity)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(limit)
+    return [
+        _anomaly_from_row(row)
+        for row in _db_query(f"SELECT * FROM anomalies {where_sql} ORDER BY timestamp DESC LIMIT ?", tuple(params))
+    ]
+
+
+def _playbooks_from_db(organization_id=None):
+    if organization_id is None:
+        rows = _db_query("SELECT * FROM playbooks ORDER BY id")
+    else:
+        rows = _db_query("SELECT * FROM playbooks WHERE organization_id IS NULL OR organization_id = ? ORDER BY id", (organization_id,))
+    return [{
+        'id': row['id'],
+        'organization_id': row.get('organization_id'),
+        'name': row['name'],
+        'category': row['category'],
+        'metric': row['metric'],
+        'operator': row['operator'],
+        'threshold': row['threshold'],
+        'action': row['action'],
+        'target': row['target'],
+        'enabled': _bool_row(row, 'enabled'),
+        'auto': _bool_row(row, 'auto'),
+        'yaml': row['yaml'],
+    } for row in rows]
+
+
+def _playbook_runs_from_db(organization_id=None, playbook_ids=None, limit=100):
+    where = []
+    params = []
+    if organization_id is not None:
+        where.append("(organization_id IS NULL OR organization_id = ?)")
+        params.append(organization_id)
+    if playbook_ids:
+        placeholders = ','.join(['?'] * len(playbook_ids))
+        where.append(f"playbook_id IN ({placeholders})")
+        params.extend(playbook_ids)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(limit)
+    rows = _db_query(f"SELECT * FROM playbook_runs {where_sql} ORDER BY id DESC LIMIT ?", tuple(params))
+    return list(reversed(rows))
+
+
+def _automation_rules_from_db():
+    return [{
+        'id': row['id'],
+        'name': row['name'],
+        'field': row['field'],
+        'operator': row['operator'],
+        'value': row['value'],
+        'action': row['action'],
+        'enabled': _bool_row(row, 'enabled'),
+    } for row in _db_query("SELECT * FROM automation_rules ORDER BY id")]
+
+
+def _anomaly_rules_from_db():
+    return [{
+        'id': row['id'],
+        'metric': row['metric'],
+        'operator': row['operator'],
+        'threshold': row['threshold'],
+        'severity': row['severity'],
+        'enabled': _bool_row(row, 'enabled'),
+        'alert_in_app': _bool_row(row, 'alert_in_app'),
+        'alert_email': _bool_row(row, 'alert_email'),
+    } for row in _db_query("SELECT * FROM anomaly_rules ORDER BY id")]
 
 
 def load_persistent_state():
@@ -682,6 +897,7 @@ def create_incident_from_anomaly(anomaly, actor='system', organization_id=None):
     if organization_id is None:
         user = current_user()
         organization_id = user.get('organization_id') if user else anomaly.get('organization_id')
+    _persist_anomaly(anomaly, organization_id=organization_id)
     existing = _db_query("SELECT * FROM incidents WHERE anomaly_id = ? AND organization_id IS ?", (anomaly['id'], organization_id))
     if existing:
         return existing[0]
@@ -1095,15 +1311,21 @@ def _detect_rule_anomalies(df):
 def _load_anomalies(start=None, end=None, severity=None, apply_automation=True, organization_id=None):
     df = _load_telemetry_df(start=start, end=end)
     if df.empty:
-        validation_only = _validation_anomalies(organization_id)
-        if severity:
-            validation_only = [a for a in validation_only if a.get('severity') == severity]
-        return validation_only[:200]
+        _persist_anomalies(_validation_anomalies(organization_id), organization_id=organization_id)
+        stored = _stored_anomalies(start=start, end=end, severity=severity, organization_id=organization_id)
+        if apply_automation:
+            apply_playbooks(stored)
+            apply_automation_rules(stored)
+            for anomaly in stored:
+                if normalize_severity(anomaly.get('severity')) in {'high', 'critical'}:
+                    create_incident_from_anomaly(anomaly, organization_id=organization_id)
+        return stored[:200]
 
     anomalies = _detect_stat_anomalies(df) + _detect_rule_anomalies(df)
 
     decorated = [_decorate_threat_intel(a) for a in anomalies] + _validation_anomalies(organization_id)
-    sorted_list = sorted(decorated, key=lambda x: x['timestamp'], reverse=True)
+    _persist_anomalies(decorated, organization_id=organization_id)
+    sorted_list = _stored_anomalies(start=start, end=end, severity=None, organization_id=organization_id)
     if apply_automation:
         apply_playbooks(sorted_list)
         apply_automation_rules(sorted_list)
@@ -1265,9 +1487,9 @@ def automation_matches(rule, anomaly):
 
 
 def apply_automation_rules(anomalies):
-    seen = {(h.get('rule_id'), h.get('anomaly_id')) for h in automation_history}
+    seen = {(h.get('rule_id'), h.get('anomaly_id')) for h in _db_query("SELECT rule_id, anomaly_id FROM automation_history")}
     for anomaly in anomalies[:25]:
-        for rule in automation_rules:
+        for rule in _automation_rules_from_db():
             if not rule.get('enabled') or (rule['id'], anomaly['id']) in seen:
                 continue
             if automation_matches(rule, anomaly):
@@ -1281,16 +1503,18 @@ def apply_automation_rules(anomalies):
                     'status': 'executed',
                     'details': f"{rule['field']} {rule['operator']} {rule['value']} matched {anomaly['metric']}"
                 }
-                automation_history.append(entry)
-                _db_exec(
+                cur = _db_exec(
                     "INSERT INTO automation_history (rule_id, rule_name, anomaly_id, action, timestamp, status, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (entry['rule_id'], entry['rule_name'], entry['anomaly_id'], entry['action'], entry['timestamp'], entry['status'], entry['details'])
                 )
+                entry['id'] = cur.lastrowid
+                automation_history.append(entry)
                 notification_queue.put({'type': 'automation_action', 'rule': rule['name'], 'details': entry})
 
 
 def _timeline_for_anomaly(anomaly_id):
-    anomaly = next((a for a in _load_anomalies(apply_automation=False) if a['id'] == anomaly_id), None)
+    stored = _db_query("SELECT * FROM anomalies WHERE id = ?", (anomaly_id,))
+    anomaly = _anomaly_from_row(stored[0]) if stored else next((a for a in _load_anomalies(apply_automation=False) if a['id'] == anomaly_id), None)
     if not anomaly:
         return None, []
     center = pd.to_datetime(anomaly['timestamp'])
@@ -1567,6 +1791,7 @@ ANALYST_MUTATION_ENDPOINTS = {
 ADMIN_MUTATION_ENDPOINTS = {
     'api_anomaly_rules',
     'api_organization',
+    'api_configuration',
 }
 
 
@@ -1593,10 +1818,42 @@ def get_user_permissions(user_id):
     return {row['permission'] for row in rows}
 
 
+def _config_storage_key(organization_id, key):
+    return f"org:{organization_id}:{key}"
+
+
+def _config_public_key(organization_id, key):
+    prefix = f"org:{organization_id}:"
+    return key[len(prefix):] if key.startswith(prefix) else key
+
+
+def _configuration_rows(organization_id):
+    prefix = f"org:{organization_id}:%"
+    rows = _db_query(
+        "SELECT key, value, updated_at, updated_by FROM app_configuration WHERE key LIKE ? ORDER BY key",
+        (prefix,)
+    )
+    return [{
+        'key': _config_public_key(organization_id, row['key']),
+        'value': _json_loads(row.get('value'), row.get('value')),
+        'updated_at': row['updated_at'],
+        'updated_by': row['updated_by'],
+    } for row in rows]
+
+
+def _file_classification_storage_path(organization_id, path):
+    return f"org:{organization_id}:{path}"
+
+
+def _file_classification_public_path(organization_id, path):
+    prefix = f"org:{organization_id}:"
+    return path[len(prefix):] if path.startswith(prefix) else path
+
+
 def _user_has_permission(user, permission):
     if not user:
         return False
-    if user.get('role') == 'admin' and permission in {'manage_members', 'mutate_playbooks'}:
+    if user.get('role') == 'admin' and permission in PERMISSIONS:
         return True
     permissions = getattr(g, 'user_permissions', None)
     if permissions is None:
@@ -2035,6 +2292,38 @@ def api_organization():
     return jsonify(success=True, organization=organization_for_user(user))
 
 
+@app.route('/api/configuration', methods=['GET', 'POST'])
+def api_configuration():
+    user = current_user()
+    org_id = user.get('organization_id')
+    if request.method == 'GET':
+        return jsonify(configuration=_configuration_rows(org_id))
+    if user.get('role') != 'admin':
+        audit_event('access_denied', 'api_configuration', 'denied', 'workspace admin required')
+        return jsonify(error='workspace admin role required'), 403
+    payload = request.json or {}
+    key = str(payload.get('key', '')).strip()
+    if not key:
+        return jsonify(error='configuration key is required'), 400
+    value = payload.get('value')
+    now = datetime.now().isoformat()
+    storage_key = _config_storage_key(org_id, key)
+    _db_exec(
+        """
+        INSERT INTO app_configuration (key, organization_id, value, updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            organization_id = excluded.organization_id,
+            value = excluded.value,
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+        """,
+        (storage_key, org_id, _json_dumps(value), now, user['username'])
+    )
+    audit_event('configuration_updated', f"configuration:{key}", 'success', f"key={key}")
+    return jsonify(success=True, configuration=_configuration_rows(org_id))
+
+
 @app.route('/api/join_requests', methods=['GET', 'POST'])
 @require_admin
 def api_join_requests():
@@ -2427,6 +2716,7 @@ def api_validation_events():
         (event_id, org_id, event_type, 'created', anomaly_id, None, user['username'], now, payload.get('detail', 'controlled validation event'))
     )
     anomaly = next(a for a in _validation_anomalies(org_id) if a['id'] == anomaly_id)
+    _persist_anomaly(anomaly, organization_id=org_id)
     incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
     _db_exec("UPDATE validation_events SET incident_id = ?, status = ? WHERE id = ?", (incident['id'], 'incident_created', event_id))
     audit_event('validation_event_created', f"validation_event:{event_id}", 'success', event_type)
@@ -2541,9 +2831,9 @@ def op_eval(value, operator, threshold):
     return False
 
 def apply_playbooks(anomalies):
-    seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in playbook_runs}
+    seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in _playbook_runs_from_db(limit=1000)}
     for anomaly in anomalies:
-        for pb in playbooks:
+        for pb in _playbooks_from_db(anomaly.get('organization_id')):
             if not pb.get('enabled', False):
                 continue
             if anomaly.get('metric') != pb.get('metric'):
@@ -2552,7 +2842,6 @@ def apply_playbooks(anomalies):
                 if (pb['id'], anomaly.get('id')) in seen:
                     continue
                 run_entry = {
-                    'id': len(playbook_runs)+1,
                     'playbook_id': pb['id'],
                     'name': pb['name'],
                     'anomaly_id': anomaly.get('id'),
@@ -2566,11 +2855,13 @@ def apply_playbooks(anomalies):
                     'status': 'executed' if pb.get('auto') else 'ready',
                     'yaml': pb.get('yaml', '')
                 }
-                playbook_runs.append(run_entry)
-                _db_exec(
-                    "INSERT INTO playbook_runs (playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
+                cur = _db_exec(
+                    "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (anomaly.get('organization_id'), run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
                 )
+                run_entry['id'] = cur.lastrowid
+                run_entry['organization_id'] = anomaly.get('organization_id')
+                playbook_runs.append(run_entry)
                 seen.add((pb['id'], anomaly.get('id')))
                 if pb.get('auto'):
                     notification_queue.put({
@@ -2581,7 +2872,7 @@ def apply_playbooks(anomalies):
 
 
 def _workspace_playbooks(organization_id):
-    return [pb for pb in playbooks if pb.get('organization_id') in {None, organization_id}]
+    return _playbooks_from_db(organization_id)
 
 
 @app.route('/api/playbooks', methods=['GET', 'POST'])
@@ -2592,7 +2883,7 @@ def api_playbooks():
     if request.method == 'GET':
         scoped_playbooks = _workspace_playbooks(org_id)
         scoped_ids = {pb['id'] for pb in scoped_playbooks}
-        scoped_runs = [run for run in playbook_runs if run.get('playbook_id') in scoped_ids and run.get('organization_id') in {None, org_id}]
+        scoped_runs = _playbook_runs_from_db(org_id, scoped_ids)
         return jsonify(playbooks=scoped_playbooks, runs=scoped_runs)
     if not _user_has_permission(user, 'mutate_playbooks'):
         audit_event('access_denied', 'api_playbooks', 'denied', 'mutate_playbooks permission required')
@@ -2603,8 +2894,8 @@ def api_playbooks():
         pb = next((item for item in playbooks if item['id'] == pid), None)
         if not pb or pb.get('organization_id') != org_id:
             return jsonify(error='workspace playbook not found'), 404
-        playbooks[:] = [item for item in playbooks if item['id'] != pid]
         _db_exec("DELETE FROM playbooks WHERE id = ? AND organization_id = ?", (pid, org_id))
+        load_persistent_state()
         audit_event('playbook_deleted', f"playbook:{pid}", 'success', 'playbook deleted')
         return jsonify(success=True, playbooks=_workspace_playbooks(org_id))
     new_pb = {
@@ -2621,11 +2912,11 @@ def api_playbooks():
         'auto': bool(payload.get('auto', False)),
         'yaml': payload.get('yaml', '')
     }
-    playbooks.append(new_pb)
     _db_exec(
         "INSERT INTO playbooks (id, organization_id, name, category, metric, operator, threshold, action, target, enabled, auto, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (new_pb['id'], new_pb['organization_id'], new_pb['name'], new_pb['category'], new_pb['metric'], new_pb['operator'], new_pb['threshold'], new_pb['action'], new_pb['target'], int(new_pb['enabled']), int(new_pb['auto']), new_pb['yaml'])
     )
+    playbooks.append(new_pb)
     next_playbook_id += 1
     audit_event('playbook_created', f"playbook:{new_pb['id']}", 'success', new_pb['name'])
     return jsonify(success=True, playbook=new_pb, playbooks=_workspace_playbooks(org_id))
@@ -2662,11 +2953,12 @@ def api_playbook_trigger():
         'anomaly_id': payload.get('anomaly_id'),
         'yaml': pb.get('yaml', '')
     }
-    playbook_runs.append(run_entry)
-    _db_exec(
+    cur = _db_exec(
         "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (run_entry['organization_id'], run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
     )
+    run_entry['id'] = cur.lastrowid
+    playbook_runs.append(run_entry)
     audit_event('playbook_triggered', f"playbook:{pb['id']}", 'success', f"anomaly={payload.get('anomaly_id') or 'manual'}")
     notification_queue.put({'type':'playbook_manual_trigger','playbook':pb['name'],'details':run_entry})
     return jsonify(success=True, run=run_entry)
@@ -2681,22 +2973,32 @@ def api_threat_intel_lookup():
 def api_reports_summary():
     return jsonify(_report_summary())
 
+
+@app.route('/api/reports/history')
+def api_reports_history():
+    user = current_user()
+    return jsonify(history=_db_query(
+        "SELECT id, generated_at, fmt, generated_by, detail FROM report_history WHERE organization_id = ? ORDER BY generated_at DESC LIMIT 100",
+        (user.get('organization_id'),)
+    ))
+
+
 @app.route('/api/reports/download.<fmt>')
 def api_reports_download(fmt):
     summary = _report_summary()
     if fmt == 'csv':
         user = current_user()
         _db_exec(
-            "INSERT INTO report_history (generated_at, fmt, generated_by, detail) VALUES (?, ?, ?, ?)",
-            (summary['generated_at'], fmt, user['username'] if user else 'system', 'security compliance CSV')
+            "INSERT INTO report_history (organization_id, generated_at, fmt, generated_by, detail) VALUES (?, ?, ?, ?, ?)",
+            (user.get('organization_id') if user else None, summary['generated_at'], fmt, user['username'] if user else 'system', 'security compliance CSV')
         )
         audit_event('report_downloaded', 'reports:csv', 'success', 'security compliance CSV')
         return _csv_response(summary)
     if fmt == 'pdf':
         user = current_user()
         _db_exec(
-            "INSERT INTO report_history (generated_at, fmt, generated_by, detail) VALUES (?, ?, ?, ?)",
-            (summary['generated_at'], fmt, user['username'] if user else 'system', 'security compliance PDF')
+            "INSERT INTO report_history (organization_id, generated_at, fmt, generated_by, detail) VALUES (?, ?, ?, ?, ?)",
+            (user.get('organization_id') if user else None, summary['generated_at'], fmt, user['username'] if user else 'system', 'security compliance PDF')
         )
         audit_event('report_downloaded', 'reports:pdf', 'success', 'security compliance PDF')
         return _pdf_response(summary)
@@ -2706,14 +3008,17 @@ def api_reports_download(fmt):
 def api_automation_rules():
     global next_automation_rule_id
     if request.method == 'GET':
-        return jsonify(rules=automation_rules, history=automation_history[-100:])
+        return jsonify(
+            rules=_automation_rules_from_db(),
+            history=list(reversed(_db_query("SELECT * FROM automation_history ORDER BY id DESC LIMIT 100")))
+        )
     payload = request.json or {}
     if payload.get('action') == 'delete':
         rid = int(payload.get('id', 0))
-        automation_rules[:] = [r for r in automation_rules if r['id'] != rid]
         _db_exec("DELETE FROM automation_rules WHERE id = ?", (rid,))
+        load_persistent_state()
         audit_event('automation_rule_deleted', f"automation_rule:{rid}", 'success', 'automation rule deleted')
-        return jsonify(success=True, rules=automation_rules)
+        return jsonify(success=True, rules=_automation_rules_from_db())
     rule = {
         'id': next_automation_rule_id,
         'name': payload.get('name', 'New automation rule'),
@@ -2723,14 +3028,14 @@ def api_automation_rules():
         'action': payload.get('run_action', 'Isolate Process'),
         'enabled': bool(payload.get('enabled', True)),
     }
-    automation_rules.append(rule)
     _db_exec(
         "INSERT INTO automation_rules (id, name, field, operator, value, action, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (rule['id'], rule['name'], rule['field'], rule['operator'], rule['value'], rule['action'], int(rule['enabled']))
     )
+    automation_rules.append(rule)
     next_automation_rule_id += 1
     audit_event('automation_rule_created', f"automation_rule:{rule['id']}", 'success', rule['name'])
-    return jsonify(success=True, rule=rule, rules=automation_rules)
+    return jsonify(success=True, rule=rule, rules=_automation_rules_from_db())
 
 @app.route('/api/notifications')
 def api_notifications():
@@ -2747,15 +3052,15 @@ def api_notifications():
 def api_anomaly_rules():
     global next_rule_id
     if request.method == 'GET':
-        return jsonify(rules=anomaly_rules)
+        return jsonify(rules=_anomaly_rules_from_db())
 
     payload = request.json or {}
     if 'action' in payload and payload['action'] == 'delete':
         rid = int(payload.get('id', 0))
-        anomaly_rules[:] = [r for r in anomaly_rules if r['id'] != rid]
         _db_exec("DELETE FROM anomaly_rules WHERE id = ?", (rid,))
+        load_persistent_state()
         audit_event('anomaly_rule_deleted', f"anomaly_rule:{rid}", 'success', 'anomaly rule deleted')
-        return jsonify(success=True, rules=anomaly_rules)
+        return jsonify(success=True, rules=_anomaly_rules_from_db())
 
     rule = {
         'id': next_rule_id,
@@ -2767,14 +3072,14 @@ def api_anomaly_rules():
         'alert_in_app': bool(payload.get('alert_in_app', True)),
         'alert_email': bool(payload.get('alert_email', False))
     }
-    anomaly_rules.append(rule)
     _db_exec(
         "INSERT INTO anomaly_rules (id, metric, operator, threshold, severity, enabled, alert_in_app, alert_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (rule['id'], rule['metric'], rule['operator'], rule['threshold'], rule['severity'], int(rule['enabled']), int(rule['alert_in_app']), int(rule['alert_email']))
     )
+    anomaly_rules.append(rule)
     next_rule_id += 1
     audit_event('anomaly_rule_created', f"anomaly_rule:{rule['id']}", 'success', f"{rule['metric']} {rule['operator']} {rule['threshold']}")
-    return jsonify(success=True, rule=rule, rules=anomaly_rules)
+    return jsonify(success=True, rule=rule, rules=_anomaly_rules_from_db())
 
 @app.route('/api/system_health')
 def api_system_health():
@@ -2851,6 +3156,8 @@ def api_security_alerts():
 
 @app.route('/api/files/access')
 def api_files_access():
+    user = current_user()
+    org_id = user.get('organization_id') if user else None
     now = time.time()
     if _files_access_cache['payload'] is not None and now - _files_access_cache['timestamp'] < FILES_ACCESS_CACHE_TTL_SECONDS:
         return jsonify(_files_access_cache['payload'])
@@ -2893,7 +3200,40 @@ def api_files_access():
                     'action': 'stat',
                     'classification': sensitivity,
                 })
-    payload = {'access': sorted(files, key=lambda x: x['time'], reverse=True)[:200]}
+    updated_at = datetime.now().isoformat()
+    for item in files:
+        storage_path = _file_classification_storage_path(org_id, item['path'])
+        _db_exec(
+            """
+            INSERT INTO file_classifications (path, organization_id, sensitivity, owner, classification, updated_at, updated_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                organization_id = excluded.organization_id,
+                sensitivity = excluded.sensitivity,
+                owner = excluded.owner,
+                classification = excluded.classification,
+                updated_at = excluded.updated_at,
+                updated_by = excluded.updated_by
+            """,
+            (storage_path, org_id, item['sensitivity'], item['owner'], item['classification'], updated_at, user['username'] if user else 'system')
+        )
+    prefix = _file_classification_storage_path(org_id, '')
+    rows = _db_query(
+        "SELECT path, sensitivity, owner, classification, updated_at FROM file_classifications WHERE organization_id = ? AND path LIKE ? ORDER BY updated_at DESC LIMIT 200",
+        (org_id, f"{prefix}%")
+    )
+    payload = {'access': [{
+        'time': row['updated_at'],
+        'filename': os.path.basename(_file_classification_public_path(org_id, row['path'])),
+        'path': _file_classification_public_path(org_id, row['path']),
+        'sensitivity': row['sensitivity'],
+        'owner': row.get('owner'),
+        'mac': 'owner only' if row['sensitivity'] == 'restricted' else ('read write' if row['sensitivity'] == 'internal' else 'read only'),
+        'accesses': 0,
+        'size': 0,
+        'action': 'classification',
+        'classification': row['classification'],
+    } for row in rows]}
     _files_access_cache['payload'] = payload
     _files_access_cache['timestamp'] = now
     return jsonify(payload)

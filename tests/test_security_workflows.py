@@ -186,11 +186,15 @@ class SecurityWorkflowTests(unittest.TestCase):
         response = self.client.post(f'/api/response_approvals/{expired_id}', json={'command': 'execute'})
         self.assertEqual(response.status_code, 409)
 
+        response = self.client.get('/terminal')
+        self.assertEqual(response.status_code, 200)
+        response = self.client.get('/api/terminal/status')
+        self.assertEqual(response.status_code, 200)
         response = self.client.post('/api/terminal/run', json={'command': 'hostname'})
-        self.assertEqual(response.status_code, 403)
+        self.assertIn(response.status_code, {200, 400})
 
         response = self.client.post('/api/terminal/run', json={'command': 'cat /etc/passwd'})
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 400)
 
         response = self.client.get('/api/audit_events')
         self.assertEqual(response.status_code, 200)
@@ -345,6 +349,25 @@ class SecurityWorkflowTests(unittest.TestCase):
             self.appmod.create_user('member', 'longpassword9', 'viewer', organization_id=org_id)
             member = self.appmod.get_user_by_username('member')
             client = self.appmod.app.test_client()
+
+            client.post('/login', data={'username': 'owner', 'password': 'longpassword8'})
+            owner = self.appmod.get_user_by_username('owner')
+            permission_rows = self.appmod._db_query("SELECT * FROM user_permissions WHERE user_id = ?", (owner['id'],))
+            self.assertEqual(permission_rows, [])
+            response = client.get('/users')
+            self.assertEqual(response.status_code, 200)
+            response = client.get('/terminal')
+            self.assertEqual(response.status_code, 200)
+            response = client.get('/api/terminal/status')
+            self.assertEqual(response.status_code, 200)
+            response = client.post('/api/terminal/run', json={'command': 'hostname'})
+            self.assertIn(response.status_code, {200, 400})
+            response = client.post('/api/playbooks', json={'name': 'admin implicit mutation'})
+            self.assertEqual(response.status_code, 200)
+            admin_playbook_id = response.json['playbook']['id']
+            response = client.post('/api/playbooks', json={'action': 'delete', 'id': admin_playbook_id})
+            self.assertEqual(response.status_code, 200)
+            client.get('/logout')
 
             client.post('/login', data={'username': 'member', 'password': 'longpassword9'})
             response = client.get('/users')

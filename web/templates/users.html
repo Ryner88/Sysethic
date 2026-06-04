@@ -37,7 +37,7 @@
         </select>
       </label>
       <div class="help" id="membershipHelp" style="margin-top:10px;">
-        Anyone with the workspace code can join as a Regular User. Requests must be approved by an admin. Only admins can add members directly.
+        Anyone with this workspace code can join as a Regular User.
       </div>
       <div class="help" id="workspaceCodeHelp" style="margin-top:10px;"></div>
       <button id="saveWorkspace" class="btn" style="margin-top:12px;">Save Settings</button>
@@ -48,6 +48,7 @@
         <select id="permissionUser" class="btn" style="width:100%;margin-top:6px;"></select>
       </label>
       <div class="help" style="margin-top:10px;">Grant or revoke workspace permissions for members.</div>
+      <div class="help" id="fullAccessHelp" style="margin-top:10px;display:none;">Workspace Admins have Full access automatically.</div>
       <label style="display:block;margin-top:12px;"><input type="checkbox" id="perm_manage_members"> Manage members</label>
       <label style="display:block;"><input type="checkbox" id="perm_mutate_playbooks"> Mutate playbooks</label>
       <label style="display:block;"><input type="checkbox" id="perm_access_terminal"> Access terminal diagnostics</label>
@@ -75,6 +76,17 @@
 </div>
 <script>
 const CAN_WORKSPACE_ADMIN = {{ 'true' if can('admin') else 'false' }};
+const MEMBERSHIP_POLICY_HELP = {
+  join_with_code: 'Anyone with this workspace code can join as a Regular User.',
+  request_to_join: 'Anyone with this workspace code can request access. A Workspace Admin must approve the request.',
+  admin_invites_only: 'Only Workspace Admins can add members directly. The workspace code cannot be used for self-join.'
+};
+function updateMembershipHelp(){
+  const select = document.getElementById('joinPolicy');
+  const help = document.getElementById('membershipHelp');
+  if (!select || !help) return;
+  help.textContent = MEMBERSHIP_POLICY_HELP[select.value] || MEMBERSHIP_POLICY_HELP.join_with_code;
+}
 async function loadWorkspace(){
   if (!CAN_WORKSPACE_ADMIN) return;
   const data = await fetch('/api/organization').then(r=>r.json());
@@ -84,6 +96,7 @@ async function loadWorkspace(){
   if (joinPolicy === 'open_with_code') joinPolicy = 'join_with_code';
   if (joinPolicy === 'invite_only') joinPolicy = 'admin_invites_only';
   document.getElementById('joinPolicy').value = joinPolicy;
+  updateMembershipHelp();
   document.getElementById('workspaceCodeHelp').textContent = org.join_code ? `Workspace code: ${org.join_code}` : '';
 }
 let currentUsers = [];
@@ -97,11 +110,12 @@ async function loadUsers(){
   if (userSelect) {
     userSelect.innerHTML = `<option value="">Select user</option>${currentUsers.map(u => `<option value="${u.id}">${u.username}</option>`).join('')}`;
   }
+  const permissionLabel = u => u.role === 'admin' ? 'Full access' : ((u.permissions || []).join(', ') || 'None');
   body.innerHTML = currentUsers.map(u => `
     <tr>
       <td>${u.username}</td>
       <td>${roleLabel(u.role)}</td>
-      <td>${(u.permissions || []).join(', ')}</td>
+      <td>${permissionLabel(u)}</td>
       <td>${u.active ? 'yes' : 'no'}</td>
       <td>${u.created_at || ''}</td>
       <td>${u.last_login_at || ''}</td>
@@ -133,15 +147,29 @@ async function decideJoin(id, action){
 if (CAN_WORKSPACE_ADMIN) document.getElementById('permissionUser').addEventListener('change', () => {
   const selectedId = Number(document.getElementById('permissionUser').value);
   const selected = currentUsers.find(u => u.id === selectedId) || {permissions: []};
-  document.getElementById('perm_manage_members').checked = selected.permissions.includes('manage_members');
-  document.getElementById('perm_mutate_playbooks').checked = selected.permissions.includes('mutate_playbooks');
-  document.getElementById('perm_access_terminal').checked = selected.permissions.includes('access_terminal');
+  const isAdmin = selected.role === 'admin';
+  const checkboxes = [
+    document.getElementById('perm_manage_members'),
+    document.getElementById('perm_mutate_playbooks'),
+    document.getElementById('perm_access_terminal')
+  ];
+  document.getElementById('fullAccessHelp').style.display = isAdmin ? 'block' : 'none';
+  document.getElementById('savePermissions').disabled = isAdmin;
+  checkboxes.forEach(box => { box.disabled = isAdmin; });
+  document.getElementById('perm_manage_members').checked = isAdmin || selected.permissions.includes('manage_members');
+  document.getElementById('perm_mutate_playbooks').checked = isAdmin || selected.permissions.includes('mutate_playbooks');
+  document.getElementById('perm_access_terminal').checked = isAdmin || selected.permissions.includes('access_terminal');
 });
 
 if (CAN_WORKSPACE_ADMIN) document.getElementById('savePermissions').addEventListener('click', async () => {
   const userId = Number(document.getElementById('permissionUser').value);
   if (!userId) {
     document.getElementById('permissionMessage').textContent = 'Select a user first.';
+    return;
+  }
+  const selected = currentUsers.find(u => u.id === userId);
+  if (selected && selected.role === 'admin') {
+    document.getElementById('permissionMessage').textContent = 'Workspace Admins have Full access automatically.';
     return;
   }
   const permissions = [
@@ -191,6 +219,7 @@ if (CAN_WORKSPACE_ADMIN) document.getElementById('saveWorkspace').addEventListen
   document.getElementById('userMessage').textContent = data.error || 'Workspace settings saved.';
   loadWorkspace();
 });
+if (CAN_WORKSPACE_ADMIN) document.getElementById('joinPolicy').addEventListener('change', updateMembershipHelp);
 loadWorkspace();
 loadUsers();
 loadJoinRequests();

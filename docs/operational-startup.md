@@ -43,11 +43,30 @@ The health check confirms that the Flask app is reachable and that protected tel
 - The app binds to `127.0.0.1` by default.
 - Flask debug mode is disabled by default.
 - Operational data is stored in `data/saaoe.sqlite3`.
+- SQLite initialization runs automatically during app startup via `init_db()`, creates missing tables, and applies additive column migrations for older local databases.
 - Approval requests expire after `SAAOE_APPROVAL_TTL_SECONDS` seconds, defaulting to 24 hours.
 - Audit logs can be filtered by actor, event type, result, and time range.
 - Local SQLite databases are ignored by git.
 - The legacy diagnostic WebSocket fails closed even if started; browser diagnostics use the authenticated API.
 - The browser terminal uses the authenticated `/api/terminal/run` endpoint.
+
+## Durable Storage Checklist
+
+The following operational records are initialized in SQLite and must survive process restarts:
+
+- Workspace accounts, roles, workspace membership, join requests, and explicit user permissions.
+- Workspace audit events.
+- Incidents, incident timeline events, response approvals, and validation events.
+- Anomalies, anomaly rules, automation rules, automation history, playbooks, and playbook runs.
+- File classifications, report generation history, and workspace app configuration.
+
+Operational API writes insert or update SQLite before returning success. In-memory lists are only runtime caches and are reloaded from SQLite on startup. API storage failures return JSON errors with `error: "storage write failed"` and an explanatory `detail` field.
+
+Database setup is automatic when the Flask app imports. For a manual initialization check, run:
+
+```bash
+venv/bin/python -c "import web.saaoe_api; print(web.saaoe_api.DB_PATH)"
+```
 
 ## Phase 1 Access Checklist
 

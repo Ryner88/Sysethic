@@ -1,0 +1,12 @@
+id   id   timestamp                   actor       role       event_type        target             result   source     detail                   organization_id
+---  ---  --------------------------  ----------  ---------  ----------------  -----------------  -------  ---------  -----------------------  ---------------
+289  289  2026-06-04T16:13:59.179659  anonymous   anonymous  access_denied     api_audit_events   denied   127.0.0.1  authentication required                 
+288  288  2026-06-04T16:13:49.734758  anonymous   anonymous  access_denied     api_audit_events   denied   127.0.0.1  authentication required                 
+287  287  2026-06-04T16:13:40.261074  anonymous   anonymous  access_denied     api_audit_events   denied   127.0.0.1  authentication required                 
+286  286  2026-06-04T16:13:28.953803  anonymous   anonymous  access_denied     api_audit_events   denied   127.0.0.1  authentication required                 
+285  285  2026-06-04T16:13:19.494928  anonymous   anonymous  access_denied     api_audit_events   denied   127.0.0.1  authentication required                 
+284  284  2026-06-04T16:13:10.025384  anonymous   anonymous  access_denied     api_audit_events   denied   127.0.0.1  authentication required                 
+283  283  2026-06-04T16:13:09.216109  anonymous   anonymous  access_denied     api_notifications  denied   127.0.0.1  authentication required                 
+282  282  2026-06-04T16:05:03.968966  testadmin   admin      login             user:testadmin     success  127.0.0.1  interactive login        2              
+281  281  2026-06-04T16:03:50.635375  testmember  viewer     logout            user:testmember    success  127.0.0.1  interactive logout       2              
+280  280  2026-06-04T15:42:14.687534  testmember  viewer     playbook_created  playbook:107       success  127.0.0.1  New Playbook             2              
