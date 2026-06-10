@@ -17,6 +17,170 @@ Build:
 - Roles: admin, analyst, viewer
 - Permission checks for every page and API route
 
+Playbooks:
+
+#### First-Run Admin Setup
+
+Trigger: no local admin user exists.
+
+Action: create the initial admin account, hash the password, start an authenticated session, and audit the setup event.
+
+Required approval level: local console access.
+
+```yaml
+name: First-Run Admin Setup
+category: authentication
+trigger:
+  event: application_start
+  condition: no_admin_user_exists
+approval: local_console
+steps:
+  - action: verify_setup_mode
+    require:
+      admin_count: 0
+      bind_address: 127.0.0.1
+  - action: collect_admin_credentials
+    fields:
+      - username
+      - password
+  - action: hash_password
+    algorithm: werkzeug_password_hash
+  - action: create_user
+    role: admin
+    enabled: true
+  - action: create_session
+  - action: audit_event
+    event_type: first_run_admin_created
+    result: success
+```
+
+#### Failed Login Review
+
+Trigger: repeated failed login attempts for the same user or source address.
+
+Action: create an audit finding, show recent failed attempts, and recommend disabling the account or waiting for timeout.
+
+Required approval level: admin.
+
+```yaml
+name: Failed Login Review
+category: authentication
+trigger:
+  event: login_failed
+  window_minutes: 10
+  threshold: 5
+  group_by:
+    - username
+    - source_ip
+approval: admin
+steps:
+  - action: collect_audit_events
+    event_type: login_failed
+    window_minutes: 10
+  - action: correlate_attempts
+    fields:
+      - username
+      - source_ip
+  - action: create_incident
+    severity: medium
+    title: Repeated failed login attempts
+  - action: recommend_response
+    options:
+      - disable_user
+      - keep_account_enabled
+      - require_password_reset
+  - action: notify_admin
+```
+
+#### Session Timeout Enforcement
+
+Trigger: authenticated session exceeds idle or absolute timeout.
+
+Action: revoke the session, redirect to login, and audit the timeout.
+
+Required approval level: automatic policy enforcement.
+
+```yaml
+name: Session Timeout Enforcement
+category: authentication
+trigger:
+  event: request_received
+  condition: session_expired
+approval: automatic
+steps:
+  - action: evaluate_session_timeout
+    idle_minutes: 30
+    absolute_hours: 8
+  - action: revoke_session
+  - action: audit_event
+    event_type: session_timeout
+    result: success
+  - action: require_login
+```
+
+#### Unauthorized Route Access Review
+
+Trigger: logged-out user or low-permission user attempts a protected page or API route.
+
+Action: deny access, record the target route, and surface the event in audit history.
+
+Required approval level: automatic policy enforcement.
+
+```yaml
+name: Unauthorized Route Access Review
+category: access_control
+trigger:
+  event: access_denied
+  targets:
+    - protected_page
+    - protected_api
+approval: automatic
+steps:
+  - action: check_authentication
+  - action: check_permission
+    source: route_policy
+  - action: deny_request
+    status:
+      page: 302
+      api: 401_or_403
+  - action: audit_event
+    event_type: access_denied
+    include:
+      - actor
+      - role
+      - route
+      - required_permission
+```
+
+#### User Disablement
+
+Trigger: admin disables a local user.
+
+Action: mark user disabled, revoke active sessions, and audit the user-management event.
+
+Required approval level: admin.
+
+```yaml
+name: User Disablement
+category: access_control
+trigger:
+  event: user_disable_requested
+approval: admin
+steps:
+  - action: verify_actor_role
+    role: admin
+  - action: prevent_last_admin_disable
+  - action: disable_user
+    enabled: false
+  - action: revoke_user_sessions
+  - action: audit_event
+    event_type: user_disabled
+    result: success
+    include:
+      - actor
+      - target_user
+```
+
 Minimum permissions:
 
 - Admin: full access, including terminal, response actions, user management, configuration, and report exports.

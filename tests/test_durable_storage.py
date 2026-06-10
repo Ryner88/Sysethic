@@ -148,6 +148,24 @@ class DurableStorageTests(unittest.TestCase):
         audits = client.get('/api/audit_events').json['logs']
         self.assertIn('configuration_updated', {event['action'] for event in audits})
 
+    def test_authentication_access_control_playbooks_are_seeded(self):
+        response = self.client.get('/api/playbooks')
+        self.assertEqual(response.status_code, 200)
+        playbooks = {playbook['name']: playbook for playbook in response.json['playbooks']}
+
+        expected_names = {
+            'First-Run Admin Setup',
+            'Failed Login Review',
+            'Session Timeout Enforcement',
+            'Unauthorized Route Access Review',
+            'User Disablement',
+        }
+        self.assertTrue(expected_names.issubset(playbooks))
+        self.assertEqual(playbooks['First-Run Admin Setup']['category'], 'authentication')
+        self.assertEqual(playbooks['Unauthorized Route Access Review']['category'], 'access_control')
+        self.assertIn('approval: local_console', playbooks['First-Run Admin Setup']['yaml'])
+        self.assertIn('event_type: access_denied', playbooks['Unauthorized Route Access Review']['yaml'])
+
     def test_api_storage_write_errors_are_json(self):
         self.appmod.DB_PATH = os.path.join('/tmp', 'missing-saaoe-dir', 'saaoe.sqlite3')
         response = self.client.post('/api/configuration', json={'key': 'x', 'value': 'y'})
