@@ -29,48 +29,29 @@ import pandas as pd
 from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
+    from .config import BASE_DIR as PROJECT_ROOT, ConfigError, load_config, startup_summary
+except ImportError:
+    from config import BASE_DIR as PROJECT_ROOT, ConfigError, load_config, startup_summary
+
+try:
     import GPUtil  # optional
 except Exception:
     GPUtil = None
 
-# Paths
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
-def _load_dotenv(path):
-    if not os.path.exists(path):
-        return
-    with open(path, 'r', encoding='utf-8') as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith('#') or '=' not in line:
-                continue
-            key, value = line.split('=', 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            os.environ.setdefault(key, value)
-
-
-_load_dotenv(os.path.join(BASE_DIR, '.env'))
-
-SAAOE_ENV = os.environ.get('SAAOE_ENV', 'development').lower()
-SAAOE_DEBUG = os.environ.get('SAAOE_DEBUG', '0').lower() in {'1', 'true', 'yes', 'on'}
-SECRET_KEY = os.environ.get('SAAOE_SECRET_KEY')
-if not SECRET_KEY:
-    if SAAOE_ENV in {'development', 'dev', 'local'}:
-        SECRET_KEY = secrets.token_hex(32)
-    else:
-        raise RuntimeError('SAAOE_SECRET_KEY is required outside development mode.')
-
-def _resolve_path(value, default):
-    path = os.environ.get(value, default)
-    return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
-
-
-LOG_PATH = _resolve_path('SAAOE_LOG_PATH', os.path.join(BASE_DIR, "logs", "system_log.csv"))
-DB_PATH = _resolve_path('SAAOE_DB_PATH', os.path.join(BASE_DIR, 'data', 'saaoe.sqlite3'))
-APP_HOST = os.environ.get('SAAOE_HOST', '127.0.0.1')
-APP_PORT = int(os.environ.get('SAAOE_PORT', '5000'))
+# Paths and operational configuration
+CONFIG = load_config()
+BASE_DIR = str(PROJECT_ROOT)
+SAAOE_ENV = CONFIG.mode
+SAAOE_DEBUG = CONFIG.debug
+SECRET_KEY = CONFIG.secret_key
+LOG_PATH = str(CONFIG.log_path)
+DB_PATH = str(CONFIG.database_path)
+APP_HOST = CONFIG.host
+APP_PORT = CONFIG.port
+CPU_THRESHOLD = CONFIG.cpu_threshold
+MEMORY_THRESHOLD = CONFIG.memory_threshold
+DISK_THRESHOLD = CONFIG.disk_threshold
+NETWORK_THRESHOLD = CONFIG.network_threshold
 
 # --- Flask app ---
 app = Flask(__name__, static_folder='static', template_folder='templates')
@@ -78,9 +59,9 @@ app.config.update(
     SECRET_KEY=SECRET_KEY,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
-    PERMANENT_SESSION_LIFETIME=int(os.environ.get('SAAOE_SESSION_SECONDS', '28800')),
+    PERMANENT_SESSION_LIFETIME=CONFIG.session_seconds,
 )
-SESSION_TIMEOUT_SECONDS = int(os.environ.get('SAAOE_SESSION_SECONDS', '28800'))
+SESSION_TIMEOUT_SECONDS = CONFIG.session_seconds
 
 # --- Ring buffers ---
 MAX_SAMPLES = 240          # ~4 minutes @ 1s
@@ -118,14 +99,16 @@ for _ in range(2):
 
 # in-memory rule store (persist optional)
 anomaly_rules = [
-    {'id': 1, 'metric': 'cpu_percent', 'operator': '>', 'threshold': 90, 'severity': 'critical', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
-    {'id': 2, 'metric': 'memory_percent', 'operator': '>', 'threshold': 85, 'severity': 'high', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
+    {'id': 1, 'metric': 'cpu_percent', 'operator': '>', 'threshold': CPU_THRESHOLD, 'severity': 'critical', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
+    {'id': 2, 'metric': 'memory_percent', 'operator': '>', 'threshold': MEMORY_THRESHOLD, 'severity': 'high', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
+    {'id': 3, 'metric': 'disk_percent', 'operator': '>', 'threshold': DISK_THRESHOLD, 'severity': 'high', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
+    {'id': 4, 'metric': 'network_bytes_per_second', 'operator': '>', 'threshold': NETWORK_THRESHOLD, 'severity': 'medium', 'enabled': True, 'alert_in_app': True, 'alert_email': False},
 ]
-next_rule_id = 3
+next_rule_id = 5
 
 playbooks = [
-    {'id': 1, 'name': 'Kill runaway CPU', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': 95, 'action': 'kill_process', 'target': 'cmdline', 'enabled': True, 'auto': True, 'yaml': 'name: Kill runaway CPU\ncategory: system\nsteps:\n  - action: snapshot_process\n    target: top_cpu\n  - action: isolate_process\n    target: "{{ process.pid }}"\n  - action: notify\n    target: security-ops\n'},
-    {'id': 2, 'name': 'Isolate suspicious IP', 'category': 'network', 'metric': 'memory_percent', 'operator': '>', 'threshold': 90, 'action': 'block_ip', 'target': 'external', 'enabled': True, 'auto': False, 'yaml': 'name: Isolate suspicious IP\ncategory: network\nsteps:\n  - action: block_ip\n    target: "{{ anomaly.ip }}"\n  - action: collect_connections\n    target: host\n'},
+    {'id': 1, 'name': 'Kill runaway CPU', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': max(CPU_THRESHOLD, 95), 'action': 'kill_process', 'target': 'cmdline', 'enabled': True, 'auto': True, 'yaml': 'name: Kill runaway CPU\ncategory: system\nsteps:\n  - action: snapshot_process\n    target: top_cpu\n  - action: isolate_process\n    target: "{{ process.pid }}"\n  - action: notify\n    target: security-ops\n'},
+    {'id': 2, 'name': 'Isolate suspicious IP', 'category': 'network', 'metric': 'memory_percent', 'operator': '>', 'threshold': max(MEMORY_THRESHOLD, 90), 'action': 'block_ip', 'target': 'external', 'enabled': True, 'auto': False, 'yaml': 'name: Isolate suspicious IP\ncategory: network\nsteps:\n  - action: block_ip\n    target: "{{ anomaly.ip }}"\n  - action: collect_connections\n    target: host\n'},
 ]
 next_playbook_id = 3
 playbook_runs = []
@@ -137,25 +120,25 @@ automation_rules = [
 next_automation_rule_id = 3
 automation_history = []
 
-THREAT_INTEL_PATH = os.environ.get('THREAT_INTEL_PATH', os.path.join(BASE_DIR, 'config', 'threat_intel.json'))
+THREAT_INTEL_PATH = str(CONFIG.threat_intel_path)
 
 DIAGNOSTIC_COMMANDS = {'netstat', 'ss', 'grep', 'rg', 'ps', 'uptime', 'whoami', 'hostname'}
-TERMINAL_WS_HOST = os.environ.get('TERMINAL_WS_HOST', '127.0.0.1')
-TERMINAL_WS_PORT = int(os.environ.get('TERMINAL_WS_PORT', '8765'))
-TERMINAL_WS_SCHEME = os.environ.get('TERMINAL_WS_SCHEME', 'ws')
+TERMINAL_WS_HOST = CONFIG.terminal_ws_host
+TERMINAL_WS_PORT = CONFIG.terminal_ws_port
+TERMINAL_WS_SCHEME = CONFIG.terminal_ws_scheme
 TERMINAL_WS_STARTED = False
 TERMINAL_WS_SERVER = None
 
-FILES_ACCESS_CACHE_TTL_SECONDS = int(os.environ.get('FILES_ACCESS_CACHE_TTL_SECONDS', '15'))
+FILES_ACCESS_CACHE_TTL_SECONDS = CONFIG.files_access_cache_ttl_seconds
 _files_access_cache = {'timestamp': 0.0, 'payload': None}
 _threat_intel_cache = {'mtime': None, 'data': None}
 
 SEVERITIES = {'info', 'low', 'medium', 'high', 'critical'}
 STATUSES = {'open', 'investigating', 'waiting_for_approval', 'resolved', 'dismissed', 'failed'}
 RESPONSE_ACTIONS = {'kill_process', 'quarantine_file', 'block_ip', 'create_incident_report'}
-QUARANTINE_DIR = _resolve_path('SAAOE_QUARANTINE_DIR', os.path.join(BASE_DIR, 'quarantine'))
-TERMINAL_OUTPUT_LIMIT = int(os.environ.get('SAAOE_TERMINAL_OUTPUT_LIMIT', '12000'))
-APPROVAL_TTL_SECONDS = int(os.environ.get('SAAOE_APPROVAL_TTL_SECONDS', '86400'))
+QUARANTINE_DIR = str(CONFIG.quarantine_dir)
+TERMINAL_OUTPUT_LIMIT = CONFIG.terminal_output_limit
+APPROVAL_TTL_SECONDS = CONFIG.approval_ttl_seconds
 
 
 def _db():
@@ -484,10 +467,15 @@ def _table_count(name):
 
 def _seed_db():
     seeded_playbooks = [
-        {'id': 101, 'name': 'Runaway CPU Process Review', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': 90, 'action': 'kill_process', 'target': 'top_cpu', 'enabled': True, 'auto': False, 'yaml': 'name: Runaway CPU Process Review\napproval: admin\nsteps:\n  - action: snapshot_process\n  - action: request_approval\n  - action: kill_process\n'},
-        {'id': 102, 'name': 'Memory Pressure Response', 'category': 'host', 'metric': 'memory_percent', 'operator': '>', 'threshold': 85, 'action': 'create_incident_report', 'target': 'host', 'enabled': True, 'auto': False, 'yaml': 'name: Memory Pressure Response\napproval: analyst\nsteps:\n  - action: collect_process_snapshot\n  - action: create_incident_report\n'},
+        {'id': 101, 'name': 'Runaway CPU Process Review', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': CPU_THRESHOLD, 'action': 'kill_process', 'target': 'top_cpu', 'enabled': True, 'auto': False, 'yaml': 'name: Runaway CPU Process Review\napproval: admin\nsteps:\n  - action: snapshot_process\n  - action: request_approval\n  - action: kill_process\n'},
+        {'id': 102, 'name': 'Memory Pressure Response', 'category': 'host', 'metric': 'memory_percent', 'operator': '>', 'threshold': MEMORY_THRESHOLD, 'action': 'create_incident_report', 'target': 'host', 'enabled': True, 'auto': False, 'yaml': 'name: Memory Pressure Response\napproval: analyst\nsteps:\n  - action: collect_process_snapshot\n  - action: create_incident_report\n'},
         {'id': 103, 'name': 'Suspicious Network Connection Review', 'category': 'network', 'metric': 'network_public_connection', 'operator': '>', 'threshold': 0, 'action': 'block_ip', 'target': 'remote_ip', 'enabled': True, 'auto': False, 'yaml': 'name: Suspicious Network Connection Review\napproval: admin\nsteps:\n  - action: collect_connections\n  - action: request_approval\n  - action: block_ip\n'},
         {'id': 104, 'name': 'Sensitive File Access Review', 'category': 'file', 'metric': 'sensitive_file_access', 'operator': '>', 'threshold': 0, 'action': 'quarantine_file', 'target': 'path', 'enabled': True, 'auto': False, 'yaml': 'name: Sensitive File Access Review\napproval: admin\nsteps:\n  - action: classify_file\n  - action: request_approval\n  - action: quarantine_file\n'},
+        {'id': 201, 'name': 'First-Run Admin Setup', 'category': 'authentication', 'metric': 'admin_user_count', 'operator': '<=', 'threshold': 0, 'action': 'create_admin_user', 'target': 'local_console', 'enabled': True, 'auto': False, 'yaml': 'name: First-Run Admin Setup\ncategory: authentication\ntrigger:\n  event: application_start\n  condition: no_admin_user_exists\napproval: local_console\nsteps:\n  - action: verify_setup_mode\n    require:\n      admin_count: 0\n      bind_address: 127.0.0.1\n  - action: collect_admin_credentials\n    fields:\n      - username\n      - password\n  - action: hash_password\n    algorithm: werkzeug_password_hash\n  - action: create_user\n    role: admin\n    enabled: true\n  - action: create_session\n  - action: audit_event\n    event_type: first_run_admin_created\n    result: success\n'},
+        {'id': 202, 'name': 'Failed Login Review', 'category': 'authentication', 'metric': 'failed_login_count', 'operator': '>=', 'threshold': 5, 'action': 'create_incident_report', 'target': 'username_or_source_ip', 'enabled': True, 'auto': False, 'yaml': 'name: Failed Login Review\ncategory: authentication\ntrigger:\n  event: login_failed\n  window_minutes: 10\n  threshold: 5\n  group_by:\n    - username\n    - source_ip\napproval: admin\nsteps:\n  - action: collect_audit_events\n    event_type: login_failed\n    window_minutes: 10\n  - action: correlate_attempts\n    fields:\n      - username\n      - source_ip\n  - action: create_incident\n    severity: medium\n    title: Repeated failed login attempts\n  - action: recommend_response\n    options:\n      - disable_user\n      - keep_account_enabled\n      - require_password_reset\n  - action: notify_admin\n'},
+        {'id': 203, 'name': 'Session Timeout Enforcement', 'category': 'authentication', 'metric': 'session_expired', 'operator': '>', 'threshold': 0, 'action': 'revoke_session', 'target': 'session', 'enabled': True, 'auto': False, 'yaml': 'name: Session Timeout Enforcement\ncategory: authentication\ntrigger:\n  event: request_received\n  condition: session_expired\napproval: automatic\nsteps:\n  - action: evaluate_session_timeout\n    idle_minutes: 30\n    absolute_hours: 8\n  - action: revoke_session\n  - action: audit_event\n    event_type: session_timeout\n    result: success\n  - action: require_login\n'},
+        {'id': 204, 'name': 'Unauthorized Route Access Review', 'category': 'access_control', 'metric': 'access_denied_count', 'operator': '>', 'threshold': 0, 'action': 'deny_request', 'target': 'protected_route', 'enabled': True, 'auto': False, 'yaml': 'name: Unauthorized Route Access Review\ncategory: access_control\ntrigger:\n  event: access_denied\n  targets:\n    - protected_page\n    - protected_api\napproval: automatic\nsteps:\n  - action: check_authentication\n  - action: check_permission\n    source: route_policy\n  - action: deny_request\n    status:\n      page: 302\n      api: 401_or_403\n  - action: audit_event\n    event_type: access_denied\n    include:\n      - actor\n      - role\n      - route\n      - required_permission\n'},
+        {'id': 205, 'name': 'User Disablement', 'category': 'access_control', 'metric': 'user_disable_requested', 'operator': '>', 'threshold': 0, 'action': 'disable_user', 'target': 'local_user', 'enabled': True, 'auto': False, 'yaml': 'name: User Disablement\ncategory: access_control\ntrigger:\n  event: user_disable_requested\napproval: admin\nsteps:\n  - action: verify_actor_role\n    role: admin\n  - action: prevent_last_admin_disable\n  - action: disable_user\n    enabled: false\n  - action: revoke_user_sessions\n  - action: audit_event\n    event_type: user_disabled\n    result: success\n    include:\n      - actor\n      - target_user\n'},
     ]
     if _table_count('anomaly_rules') == 0:
         for rule in anomaly_rules:
@@ -2429,11 +2417,11 @@ def api_visualization_lab():
             relative_score = max(relative_score, min(100.0, ((memory - mem_mean) / mem_std) * 35.0))
 
         threshold_score = 0.0
-        if cpu >= 90 or memory >= 90:
+        if cpu >= CPU_THRESHOLD or memory >= MEMORY_THRESHOLD:
             threshold_score = 90.0
-        elif cpu >= 75 or memory >= 85:
+        elif cpu >= (CPU_THRESHOLD * 0.85) or memory >= (MEMORY_THRESHOLD * 0.85):
             threshold_score = 70.0
-        elif cpu >= 55 or memory >= 70:
+        elif cpu >= (CPU_THRESHOLD * 0.65) or memory >= (MEMORY_THRESHOLD * 0.65):
             threshold_score = 45.0
 
         score = max(composite, relative_score, threshold_score)
@@ -3267,7 +3255,7 @@ def playbooks_page():
 def api_assets():
     cpu = psutil.cpu_percent(interval=0.05)
     mem = psutil.virtual_memory().percent
-    health = 'critical' if cpu > 90 or mem > 90 else ('warning' if cpu > 70 or mem > 80 else 'good')
+    health = 'critical' if cpu > CPU_THRESHOLD or mem > MEMORY_THRESHOLD else ('warning' if cpu > (CPU_THRESHOLD * 0.8) or mem > (MEMORY_THRESHOLD * 0.8) else 'good')
     addrs = []
     for entries in psutil.net_if_addrs().values():
         for entry in entries:
@@ -3326,9 +3314,10 @@ def api_net_graph():
     return jsonify(graph={'nodes':nodes,'links':links})
 
 if __name__ == '__main__':
-    if os.environ.get('SAAOE_ENABLE_TERMINAL_WS', '0').lower() in {'1', 'true', 'yes', 'on'}:
+    if CONFIG.terminal_ws_enabled:
         start_terminal_ws()
-    print(f"SAAOE mode={SAAOE_ENV} host={APP_HOST} port={APP_PORT} db={DB_PATH}")
-    if APP_HOST not in {'127.0.0.1', 'localhost'}:
+    for line in startup_summary(CONFIG):
+        print(line)
+    if not CONFIG.protected_bind:
         print('WARNING: SAAOE is not bound to a loopback address. Use authentication, TLS, and network controls before exposing it.')
     app.run(host=APP_HOST, port=APP_PORT, debug=SAAOE_DEBUG)

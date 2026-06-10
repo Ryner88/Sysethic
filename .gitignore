@@ -129,6 +129,8 @@ node_modules/
 *.log
 
 # Local operational storage
+data/*.db
+data/*.db-*
 data/*.sqlite3
 data/*.sqlite3-*
 

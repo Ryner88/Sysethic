@@ -58,14 +58,14 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
    cp .env.example .env
    ```
 
-   Then edit `.env` and set `SAAOE_SECRET_KEY` to a long random value.
+   For local development, the app can start without `SAAOE_SECRET_KEY` and will generate an ephemeral development key. For operational or production use, edit `.env`, set `SAAOE_MODE=production`, and set `SAAOE_SECRET_KEY` to a long random value.
 
 4. Run the web dashboard:
    ```bash
    python web/saaoe_api.py
    ```
 
-5. Open http://localhost:5000 in your browser.
+5. Open http://127.0.0.1:5001 in your browser.
 
 6. Complete first-run setup by creating the first workspace owner.
 
@@ -73,7 +73,18 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
 
 Log in with a SysEthic workspace account, then navigate through the sidebar to access monitoring sections. Workspace Admins manage members, workspace settings, playbooks, audits, and reports for their own workspace. Regular Users can view assigned dashboards, run allowed playbooks, and submit incident findings. Platform-owner diagnostics are separate from workspace administration.
 
-By default, the app binds to `127.0.0.1`, stores operational data in `data/saaoe.sqlite3`, and disables Flask debug mode. Configuration can be changed with environment variables or `.env`.
+By default, the app binds to `127.0.0.1`, listens on port `5001`, stores operational data in `data/saaoe.db`, reads local telemetry logs from `logs/system_log.csv`, and disables Flask debug mode. Configuration can be changed with environment variables or `.env`.
+
+Common configuration variables:
+
+- `SAAOE_MODE`: operational mode, default `development`.
+- `SAAOE_SECRET_KEY`: required outside development mode.
+- `SAAOE_HOST`: bind host, default `127.0.0.1`.
+- `SAAOE_PORT`: bind port, default `5001`.
+- `SAAOE_DEBUG`: Flask debug mode, default `false`.
+- `SAAOE_DATABASE_PATH`: SQLite database path, default `data/saaoe.db`.
+- `SAAOE_LOG_PATH`: telemetry CSV path, default `logs/system_log.csv`.
+- `SAAOE_CPU_THRESHOLD`, `SAAOE_MEMORY_THRESHOLD`, `SAAOE_DISK_THRESHOLD`, `SAAOE_NETWORK_THRESHOLD`: telemetry thresholds used by seeded rules and live scoring.
 
 See [Operational Startup](docs/operational-startup.md) for the local startup checklist, health check, and operational defaults.
 

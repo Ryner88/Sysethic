@@ -199,7 +199,7 @@ flowchart TB
         Browser["Browser"]
     end
 
-    Browser -->|HTTP 5000| FlaskProcess
+    Browser -->|HTTP 5001 default| FlaskProcess
     Browser -->|SSE notifications| FlaskProcess
     Browser -->|WS 8765 localhost| TerminalServer
     FlaskProcess --> StaticAssets
