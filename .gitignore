@@ -137,3 +137,4 @@ data/*.sqlite3-*
 # Virtual environments
 venv/
 .venv/
+.codex/
