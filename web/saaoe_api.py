@@ -135,6 +135,7 @@ _threat_intel_cache = {'mtime': None, 'data': None}
 
 SEVERITIES = {'info', 'low', 'medium', 'high', 'critical'}
 STATUSES = {'open', 'investigating', 'waiting_for_approval', 'resolved', 'dismissed', 'failed'}
+INCIDENT_STATUSES = {'open', 'investigating', 'waiting_for_approval', 'resolved', 'dismissed'}
 RESPONSE_ACTIONS = {'kill_process', 'quarantine_file', 'block_ip', 'create_incident_report'}
 QUARANTINE_DIR = str(CONFIG.quarantine_dir)
 TERMINAL_OUTPUT_LIMIT = CONFIG.terminal_output_limit
@@ -319,9 +320,11 @@ def init_db():
                 status TEXT NOT NULL,
                 owner TEXT,
                 anomaly_id TEXT,
+                linked_anomalies TEXT NOT NULL DEFAULT '[]',
                 recommended_playbook_id INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                closed_at TEXT,
                 resolution TEXT
             );
 
@@ -426,6 +429,8 @@ def init_db():
         _ensure_column(conn, 'playbooks', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'playbook_runs', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'incidents', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'incidents', 'linked_anomalies', "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, 'incidents', 'closed_at', 'TEXT')
         _ensure_column(conn, 'incident_events', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'response_approvals', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'validation_events', 'organization_id', 'INTEGER')
@@ -447,6 +452,7 @@ def init_db():
         conn.execute("UPDATE users SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE audit_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE incidents SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        conn.execute("UPDATE incidents SET linked_anomalies = '[\"' || replace(anomaly_id, '\"', '\\\"') || '\"]' WHERE (linked_anomalies IS NULL OR linked_anomalies = '[]') AND anomaly_id IS NOT NULL")
         conn.execute("UPDATE incident_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE response_approvals SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE validation_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
@@ -895,7 +901,183 @@ def normalize_severity(value, default='medium'):
 
 def normalize_status(value, default='open'):
     value = str(value or default).lower().replace('-', '_').replace(' ', '_')
-    return value if value in STATUSES else default
+    return value if value in INCIDENT_STATUSES else default
+
+
+def _incident_status_label(status):
+    return str(status or '').replace('_', ' ').title()
+
+
+def _incident_linked_anomalies(row):
+    linked = _json_loads(row.get('linked_anomalies'), [])
+    if row.get('anomaly_id') and row.get('anomaly_id') not in linked:
+        linked.insert(0, row['anomaly_id'])
+    return linked
+
+
+def _incident_from_row(row):
+    linked = _incident_linked_anomalies(row)
+    incident = dict(row)
+    incident['incident_id'] = row['id']
+    incident['assignee'] = row.get('owner')
+    incident['linked_anomalies'] = linked
+    incident['status_label'] = _incident_status_label(row.get('status'))
+    return incident
+
+
+def _incident_row(incident_id, organization_id):
+    rows = _db_query("SELECT * FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, organization_id))
+    return rows[0] if rows else None
+
+
+def _incident_anomalies(incident):
+    linked_ids = _incident_linked_anomalies(incident)
+    if not linked_ids:
+        return []
+    placeholders = ','.join(['?'] * len(linked_ids))
+    rows = _db_query(
+        f"SELECT * FROM anomalies WHERE id IN ({placeholders}) AND organization_id = ? ORDER BY timestamp DESC",
+        tuple(linked_ids + [incident.get('organization_id')])
+    )
+    by_id = {row['id']: _anomaly_from_row(row) for row in rows}
+    return [by_id[anomaly_id] for anomaly_id in linked_ids if anomaly_id in by_id]
+
+
+def _incident_recommended_playbook(incident):
+    playbook_id = incident.get('recommended_playbook_id')
+    if not playbook_id:
+        return None
+    return next((pb for pb in _playbooks_from_db(incident.get('organization_id')) if pb['id'] == playbook_id), None)
+
+
+def _timeline_entry(timestamp, actor, event_type, detail, source, **extra):
+    entry = {
+        'timestamp': timestamp,
+        'actor': actor,
+        'event_type': event_type,
+        'detail': detail,
+        'source': source,
+    }
+    entry.update(extra)
+    return entry
+
+
+def _incident_timeline(incident):
+    incident_id = incident['id']
+    org_id = incident.get('organization_id')
+    linked_ids = _incident_linked_anomalies(incident)
+    entries = []
+
+    for event in _db_query(
+        "SELECT * FROM incident_events WHERE incident_id = ? AND organization_id = ? ORDER BY timestamp",
+        (incident_id, org_id)
+    ):
+        entries.append(_timeline_entry(
+            event['timestamp'], event['actor'], event['event_type'], event['detail'], 'incident_events',
+            incident_event_id=event['id']
+        ))
+
+    for anomaly in _incident_anomalies(incident):
+        entries.append(_timeline_entry(
+            anomaly['timestamp'], 'system', 'linked_anomaly',
+            f"{anomaly['severity']} {anomaly['metric']} anomaly", 'anomalies',
+            anomaly_id=anomaly['id']
+        ))
+
+    if linked_ids:
+        placeholders = ','.join(['?'] * len(linked_ids))
+        for run in _db_query(
+            f"SELECT * FROM playbook_runs WHERE anomaly_id IN ({placeholders}) AND (organization_id IS NULL OR organization_id = ?) ORDER BY timestamp",
+            tuple(linked_ids + [org_id])
+        ):
+            entries.append(_timeline_entry(
+                run['timestamp'], 'system', 'playbook_run',
+                f"{run['name']} {run['status']}", 'playbook_runs',
+                playbook_id=run['playbook_id'], run_id=run['id'], anomaly_id=run['anomaly_id']
+            ))
+
+    approvals = _db_query(
+        "SELECT * FROM response_approvals WHERE incident_id = ? AND organization_id = ? ORDER BY created_at",
+        (incident_id, org_id)
+    )
+    approval_ids = [approval['id'] for approval in approvals]
+    for approval in approvals:
+        entries.append(_timeline_entry(
+            approval['created_at'], approval['requested_by'], 'approval_requested',
+            f"{approval['action']} target={approval['target']}", 'response_approvals',
+            approval_id=approval['id'], status=approval['status']
+        ))
+        if approval.get('updated_at') and approval.get('status') not in {'pending'}:
+            entries.append(_timeline_entry(
+                approval['updated_at'], approval.get('approved_by') or approval['requested_by'],
+                f"approval_{approval['status']}", approval.get('result') or approval['action'],
+                'response_approvals', approval_id=approval['id'], status=approval['status']
+            ))
+
+    audit_where = ["organization_id = ?"]
+    audit_params = [org_id]
+    target_clauses = ["target = ?"]
+    audit_params.append(f"incident:{incident_id}")
+    for anomaly_id in linked_ids:
+        target_clauses.append("target = ?")
+        audit_params.append(f"anomaly:{anomaly_id}")
+    for approval_id in approval_ids:
+        target_clauses.append("target = ?")
+        audit_params.append(f"approval:{approval_id}")
+    audit_where.append(f"({' OR '.join(target_clauses)})")
+    for audit in _db_query(
+        f"SELECT * FROM audit_events WHERE {' AND '.join(audit_where)} ORDER BY timestamp",
+        tuple(audit_params)
+    ):
+        entries.append(_timeline_entry(
+            audit['timestamp'], audit['actor'], audit['event_type'],
+            audit.get('detail') or audit['event_type'], 'audit_events',
+            result=audit['result'], target=audit['target'], audit_target_type=audit.get('target_type')
+        ))
+
+    terminal_rows = _db_query(
+        "SELECT * FROM audit_events WHERE organization_id = ? AND event_type = ? ORDER BY timestamp",
+        (org_id, 'terminal_command_attempted')
+    )
+    for audit in terminal_rows:
+        details = _json_loads(audit.get('details_json'), {})
+        if details.get('incident_id') == incident_id:
+            entries.append(_timeline_entry(
+                audit['timestamp'], audit['actor'], 'terminal_command_attempted',
+                audit.get('detail') or 'terminal command attempted', 'audit_events',
+                result=audit['result'], command=details.get('command')
+            ))
+
+    seen = set()
+    unique = []
+    for entry in entries:
+        key = (entry.get('timestamp'), entry.get('event_type'), entry.get('detail'), entry.get('source'), entry.get('approval_id'), entry.get('run_id'))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(entry)
+    return sorted(unique, key=lambda item: item.get('timestamp') or '')
+
+
+def _incident_detail_payload(incident):
+    notes = [
+        event for event in _db_query(
+            "SELECT * FROM incident_events WHERE incident_id = ? AND organization_id = ? AND event_type = ? ORDER BY timestamp",
+            (incident['id'], incident.get('organization_id'), 'note_added')
+        )
+    ]
+    approvals = _db_query(
+        "SELECT * FROM response_approvals WHERE incident_id = ? AND organization_id = ? ORDER BY created_at DESC",
+        (incident['id'], incident.get('organization_id'))
+    )
+    return {
+        'incident': _incident_from_row(incident),
+        'anomalies': _incident_anomalies(incident),
+        'recommended_playbook': _incident_recommended_playbook(incident),
+        'notes': notes,
+        'timeline': _incident_timeline(incident),
+        'approvals': approvals,
+    }
 
 
 def _incident_event(incident_id, event_type, detail, actor=None, organization_id=None):
@@ -940,8 +1122,8 @@ def create_incident_from_anomaly(anomaly, actor='system', organization_id=None):
     pb = _recommended_playbook(anomaly)
     title = f"{normalize_severity(anomaly.get('severity')).title()} {anomaly.get('metric')} anomaly"
     _db_exec(
-        "INSERT INTO incidents (id, organization_id, title, severity, status, owner, anomaly_id, recommended_playbook_id, created_at, updated_at, resolution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (incident_id, organization_id, title, normalize_severity(anomaly.get('severity')), 'open', None, anomaly['id'], pb['id'] if pb else None, now, now, None)
+        "INSERT INTO incidents (id, organization_id, title, severity, status, owner, anomaly_id, linked_anomalies, recommended_playbook_id, created_at, updated_at, closed_at, resolution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (incident_id, organization_id, title, normalize_severity(anomaly.get('severity')), 'open', None, anomaly['id'], _json_dumps([anomaly['id']]), pb['id'] if pb else None, now, now, None, None)
     )
     _incident_event(incident_id, 'incident_created', f"Linked anomaly {anomaly['id']}", actor=actor, organization_id=organization_id)
     if pb:
@@ -1611,10 +1793,13 @@ def _validate_terminal_command(command):
     return [executable, *parts[1:]], None
 
 
-def _run_terminal_command(command):
+def _run_terminal_command(command, incident_id=None):
     args, error = _validate_terminal_command(command)
+    audit_details = {'command': command}
+    if incident_id:
+        audit_details['incident_id'] = incident_id
     if error:
-        audit_event('terminal_command_attempted', f"command:{command}", 'denied', error, details={'command': command})
+        audit_event('terminal_command_attempted', f"command:{command}", 'denied', error, details=audit_details)
         return {'success': False, 'error': error, 'output': ''}, 400
     try:
         proc = subprocess.run(
@@ -1631,10 +1816,11 @@ def _run_terminal_command(command):
         if truncated:
             output = output[:TERMINAL_OUTPUT_LIMIT] + '\n[output truncated]\n'
         result = 'success' if proc.returncode == 0 else 'failed'
-        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", result, f"exit={proc.returncode}", details={'command': command, 'returncode': proc.returncode, 'truncated': truncated})
+        audit_details.update({'returncode': proc.returncode, 'truncated': truncated})
+        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", result, f"exit={proc.returncode}", details=audit_details)
         return {'success': proc.returncode == 0, 'returncode': proc.returncode, 'output': output, 'truncated': truncated}, 200
     except subprocess.TimeoutExpired:
-        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details={'command': command})
+        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details=audit_details)
         return {'success': False, 'error': 'command timed out', 'output': ''}, 408
 
 
@@ -2597,7 +2783,13 @@ def api_terminal_status():
 def api_terminal_run():
     payload = request.json or {}
     command = payload.get('command', '')
-    result, status = _run_terminal_command(command)
+    incident_id = payload.get('incident_id')
+    if incident_id:
+        user = current_user()
+        if not _incident_row(incident_id, user.get('organization_id')):
+            audit_event('terminal_command_attempted', f"incident:{incident_id}", 'failed', 'incident not found', details={'command': command, 'incident_id': incident_id})
+            return jsonify(error='incident not found'), 404
+    result, status = _run_terminal_command(command, incident_id=incident_id)
     return jsonify(result), status
 
 @app.route('/api/local_machine')
@@ -2727,26 +2919,58 @@ def api_incidents():
             "SELECT * FROM incidents WHERE organization_id = ? ORDER BY created_at DESC LIMIT ?",
             (org_id, int(request.args.get('limit', 100)))
         )
-        return jsonify(incidents=rows)
+        return jsonify(incidents=[_incident_from_row(row) for row in rows])
     payload = request.json or {}
+    if payload.get('action') == 'create_from_anomaly' or payload.get('anomaly_id'):
+        return _api_create_incident_from_anomaly(payload)
     if user['role'] != 'admin':
         allowed = {'id', 'note'}
         if set(payload.keys()) - allowed or not str(payload.get('note', '')).strip():
             audit_event('access_denied', 'api_incidents', 'denied', 'workspace admin required for incident management')
             return jsonify(error='workspace admin role required'), 403
-    incident_id = payload.get('id')
+    return _update_incident(payload.get('id'), payload)
+
+
+def _api_create_incident_from_anomaly(payload):
+    user = current_user()
+    org_id = user.get('organization_id')
+    if user['role'] == 'viewer':
+        audit_event('access_denied', 'api_incidents.from_anomaly', 'denied', 'regular user cannot create incidents')
+        return jsonify(error='workspace admin role required'), 403
+    anomaly_id = str(payload.get('anomaly_id') or '').strip()
+    rows = _db_query("SELECT * FROM anomalies WHERE id = ? AND organization_id = ?", (anomaly_id, org_id))
+    if not rows:
+        audit_event('incident_create_failed', f"anomaly:{anomaly_id or 'unknown'}", 'failed', 'anomaly not found')
+        return jsonify(error='anomaly not found'), 404
+    anomaly = _anomaly_from_row(rows[0])
+    incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
+    return jsonify(success=True, incident=_incident_from_row(incident))
+
+
+def _update_incident(incident_id, payload):
+    user = current_user()
+    org_id = user.get('organization_id')
     rows = _db_query("SELECT * FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, org_id))
     if not rows:
         audit_event('incident_update_failed', f"incident:{incident_id or 'unknown'}", 'failed', 'incident not found')
         return jsonify(error='incident not found'), 404
+    before = rows[0]
     updates = []
     params = []
     if 'status' in payload:
+        status = normalize_status(payload.get('status'))
         updates.append('status = ?')
-        params.append(normalize_status(payload.get('status')))
-    if 'owner' in payload:
+        params.append(status)
+        if status in {'resolved', 'dismissed'}:
+            updates.append('closed_at = ?')
+            params.append(datetime.now().isoformat())
+        elif before.get('status') in {'resolved', 'dismissed'} and status in {'open', 'investigating', 'waiting_for_approval'}:
+            updates.append('closed_at = ?')
+            params.append(None)
+    assignee_value = payload.get('assignee', payload.get('owner'))
+    if 'owner' in payload or 'assignee' in payload:
         updates.append('owner = ?')
-        params.append(payload.get('owner') or None)
+        params.append(assignee_value or None)
     if 'resolution' in payload:
         updates.append('resolution = ?')
         params.append(payload.get('resolution') or None)
@@ -2762,9 +2986,23 @@ def api_incidents():
         _db_exec(f"UPDATE incidents SET {', '.join(updates)} WHERE id = ?", tuple(params))
     else:
         _db_exec("UPDATE incidents SET updated_at = ? WHERE id = ?", (now, incident_id))
-    detail = {k: payload[k] for k in payload if k not in {'id', 'note'}}
+    detail = {k: payload[k] for k in payload if k not in {'id', 'note', 'action'}}
     if detail:
-        _incident_event(incident_id, 'incident_updated', json.dumps(detail))
+        if 'owner' in detail or 'assignee' in detail:
+            _incident_event(incident_id, 'assignment_updated', json.dumps({'assignee': assignee_value}))
+            audit_event('incident_assigned', f"incident:{incident_id}", 'success', f"assignee={assignee_value or 'unassigned'}", details={'assignee': assignee_value})
+        if 'status' in detail:
+            status = normalize_status(detail.get('status'))
+            _incident_event(incident_id, 'status_updated', json.dumps({'status': status}))
+            audit_event('incident_status_updated', f"incident:{incident_id}", 'success', f"status={status}", details={'status': status})
+            if status in {'resolved', 'dismissed'}:
+                _incident_event(incident_id, 'incident_closed', payload.get('resolution') or status)
+                audit_event('incident_closed', f"incident:{incident_id}", 'success', payload.get('resolution') or status, details={'status': status, 'resolution': payload.get('resolution')})
+            elif before.get('status') in {'resolved', 'dismissed'}:
+                _incident_event(incident_id, 'incident_reopened', f"status={status}")
+                audit_event('incident_reopened', f"incident:{incident_id}", 'success', f"status={status}", details={'status': status})
+        if set(detail) - {'owner', 'assignee', 'status', 'resolution'} or 'resolution' in detail:
+            _incident_event(incident_id, 'incident_updated', json.dumps(detail))
     if note:
         _incident_event(incident_id, 'note_added', note)
     audit_detail = 'incident fields updated'
@@ -2773,7 +3011,7 @@ def api_incidents():
     elif note:
         audit_detail = 'incident fields updated; note added'
     audit_event('incident_updated', f"incident:{incident_id}", 'success', audit_detail, details={'updates': detail, 'note_added': bool(note)})
-    return jsonify(success=True, incident=_db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0])
+    return jsonify(success=True, incident=_incident_from_row(_db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0]))
 
 
 @app.route('/api/incidents/<incident_id>')
@@ -2782,9 +3020,60 @@ def api_incident_detail(incident_id):
     rows = _db_query("SELECT * FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, org_id))
     if not rows:
         return jsonify(error='incident not found'), 404
-    events = _db_query("SELECT * FROM incident_events WHERE incident_id = ? AND organization_id = ? ORDER BY timestamp", (incident_id, org_id))
-    approvals = _db_query("SELECT * FROM response_approvals WHERE incident_id = ? AND organization_id = ? ORDER BY created_at DESC", (incident_id, org_id))
-    return jsonify(incident=rows[0], timeline=events, approvals=approvals)
+    return jsonify(**_incident_detail_payload(rows[0]))
+
+
+@app.route('/api/incidents/from_anomaly', methods=['POST'])
+def api_incident_from_anomaly():
+    return _api_create_incident_from_anomaly(request.json or {})
+
+
+@app.route('/api/incidents/<incident_id>/assign', methods=['POST'])
+def api_incident_assign(incident_id):
+    user = current_user()
+    if user['role'] != 'admin':
+        audit_event('access_denied', f"incident:{incident_id}", 'denied', 'workspace admin required for incident assignment')
+        return jsonify(error='workspace admin role required'), 403
+    payload = request.json or {}
+    return _update_incident(incident_id, {'assignee': payload.get('assignee', payload.get('owner'))})
+
+
+@app.route('/api/incidents/<incident_id>/status', methods=['POST'])
+def api_incident_status(incident_id):
+    user = current_user()
+    if user['role'] != 'admin':
+        audit_event('access_denied', f"incident:{incident_id}", 'denied', 'workspace admin required for incident status update')
+        return jsonify(error='workspace admin role required'), 403
+    payload = request.json or {}
+    return _update_incident(incident_id, {'status': payload.get('status'), 'resolution': payload.get('resolution')})
+
+
+@app.route('/api/incidents/<incident_id>/notes', methods=['POST'])
+def api_incident_notes(incident_id):
+    payload = request.json or {}
+    return _update_incident(incident_id, {'note': payload.get('note')})
+
+
+@app.route('/api/incidents/<incident_id>/close', methods=['POST'])
+def api_incident_close(incident_id):
+    user = current_user()
+    if user['role'] != 'admin':
+        audit_event('access_denied', f"incident:{incident_id}", 'denied', 'workspace admin required for incident close')
+        return jsonify(error='workspace admin role required'), 403
+    payload = request.json or {}
+    status = normalize_status(payload.get('status') or 'resolved', default='resolved')
+    if status not in {'resolved', 'dismissed'}:
+        status = 'resolved'
+    return _update_incident(incident_id, {'status': status, 'resolution': payload.get('resolution')})
+
+
+@app.route('/api/incidents/<incident_id>/reopen', methods=['POST'])
+def api_incident_reopen(incident_id):
+    user = current_user()
+    if user['role'] != 'admin':
+        audit_event('access_denied', f"incident:{incident_id}", 'denied', 'workspace admin required for incident reopen')
+        return jsonify(error='workspace admin role required'), 403
+    return _update_incident(incident_id, {'status': 'open'})
 
 
 @app.route('/api/validation_events', methods=['GET', 'POST'])
@@ -2861,6 +3150,7 @@ def api_response_approvals():
     )
     if payload.get('incident_id'):
         _incident_event(payload.get('incident_id'), 'approval_requested', f"{action} target={target}", organization_id=org_id)
+        _incident_event(payload.get('incident_id'), 'status_updated', json.dumps({'status': 'waiting_for_approval'}), organization_id=org_id)
         _db_exec("UPDATE incidents SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?", ('waiting_for_approval', now, payload.get('incident_id'), org_id))
     audit_detail = f"{action} target={target}"
     audit_payload = {'action': action, 'target': target, 'incident_id': payload.get('incident_id'), 'dry_run': bool(payload.get('dry_run', True))}

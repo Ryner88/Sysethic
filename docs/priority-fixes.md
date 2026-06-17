@@ -262,35 +262,26 @@ Result: Ran 12 tests in 48.643s - OK
 
 Why priority: audit history is required for trust, debugging, accountability, and incident review.
 
-### 5. Create a Real Incident Workflow
+### 5. Create a Real Incident Workflow — Complete
 
-Goal: turn alerts into tracked incidents that a user can investigate, assign, update, and close.
+Implemented durable incident workflow with incident IDs, severity, status, assignee, linked anomalies, recommended playbooks, notes, resolution summaries, close/reopen actions, timeline events, and audit logging for all incident mutations.
 
-Build:
+Acceptance verified:
 
-- Incident IDs
-- Severity and status
-- Owner or assignee
-- Linked anomalies
-- Recommended playbook
-- Timeline of actions
-- Notes and resolution summary
-- Close and reopen actions
-
-Statuses:
-
-- Open
-- Investigating
-- Waiting for Approval
-- Resolved
-- Dismissed
-
-Acceptance criteria:
-
-- A high or critical anomaly can create an incident.
-- Users can assign, update status, add notes, and close an incident.
-- The incident timeline shows linked anomaly, playbook, approval, terminal, and response events.
+- High/critical anomalies can create incidents.
+- Users can assign, update status, add notes, close, and reopen incidents.
+- Incident detail includes linked anomalies, playbook, notes, and timeline.
 - Incident changes create audit records.
+- Incident records survive app restarts.
+- Full test suite passes.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```
+
+Result: Ran 14 tests in 60.559s - OK
 
 Why priority: users need an investigation workflow, not just charts and alerts.
 

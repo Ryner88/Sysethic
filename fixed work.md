@@ -45,3 +45,24 @@ venv/bin/python -m unittest discover -s tests
 ```
 
 Result: Ran 12 tests in 48.643s - OK
+
+### 5. Create a Real Incident Workflow — Complete
+
+Implemented durable incident workflow with incident IDs, severity, status, assignee, linked anomalies, recommended playbooks, notes, resolution summaries, close/reopen actions, timeline events, and audit logging for all incident mutations.
+
+Acceptance verified:
+
+- High/critical anomalies can create incidents.
+- Users can assign, update status, add notes, close, and reopen incidents.
+- Incident detail includes linked anomalies, playbook, notes, and timeline.
+- Incident changes create audit records.
+- Incident records survive app restarts.
+- Full test suite passes.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```
+
+Result: Ran 14 tests in 60.559s - OK
