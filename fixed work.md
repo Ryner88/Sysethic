@@ -34,18 +34,9 @@ Result: all tests passed.
 
 ## Phase 2: Evidence and Workflow
 
-### 4. Normalize Audit Logging
+### 4. Normalize Audit Logging — Complete
 
-Status: Complete
-
-Completed work:
-
-- Normalized `/api/audit_events` output to include canonical audit fields: `timestamp`, `actor`, `role`, `event_type`, `target`, `result`, `source`, and `detail`.
-- Preserved existing UI/API aliases: `action`, `outcome`, `resource`, and `details`.
-- Added audit records for failed and denied protected operations that previously returned without audit coverage.
-- Added `alert_generated` audit records for controlled validation alerts.
-- Verified audit filtering by actor, event type, result, and time range.
-- Verified audit records survive app reload/restart behavior.
+Implemented durable normalized audit records for user, system, workflow, security, and response events. Added centralized `audit_event` helper, protected mutation fallback auditing, `/api/audit` filtering, failure/denial coverage, structured details JSON, and persistence tests.
 
 Verification:
 
@@ -53,4 +44,4 @@ Verification:
 venv/bin/python -m unittest discover -s tests
 ```
 
-Result: all tests passed.
+Result: Ran 12 tests in 48.643s - OK

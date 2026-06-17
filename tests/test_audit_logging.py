@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import tempfile
 import unittest
@@ -51,6 +52,9 @@ class AuditLoggingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         incident_id = response.json['incident']['id']
 
+        response = self.client.post('/api/playbooks', json={'name': 'bad threshold', 'threshold': 'not-a-number'})
+        self.assertEqual(response.status_code, 400)
+
         response = self.client.post('/api/response_approvals', json={
             'incident_id': incident_id,
             'action': 'create_incident_report',
@@ -68,7 +72,7 @@ class AuditLoggingTests(unittest.TestCase):
         logs = response.json['logs']
         self.assertTrue(logs)
         row = logs[0]
-        for key in {'timestamp', 'actor', 'role', 'event_type', 'target', 'result', 'source', 'detail'}:
+        for key in {'timestamp', 'actor', 'role', 'event_type', 'target', 'target_type', 'target_id', 'result', 'source', 'detail', 'details_json', 'structured_details'}:
             self.assertIn(key, row)
         self.assertEqual(row['event_type'], 'response_action_started')
         self.assertEqual(row['result'], 'denied')
@@ -76,15 +80,25 @@ class AuditLoggingTests(unittest.TestCase):
         self.assertEqual(row['outcome'], row['result'])
         self.assertEqual(row['resource'], row['target'])
         self.assertEqual(row['details'], row['detail'])
+        self.assertEqual(row['target_type'], 'approval')
         self.assertIn(row['source'], {'127.0.0.1', 'localhost'})
+
+        normalized = self.client.get('/api/audit?event_type=alert_generated&limit=1').json['logs']
+        self.assertTrue(normalized)
+        self.assertEqual(normalized[0]['target_type'], 'anomaly')
+        self.assertTrue(normalized[0]['target_id'].startswith('validation-'))
+        self.assertEqual(json.loads(normalized[0]['details_json'])['event_type'], 'cpu_pressure')
 
         failed = self.client.get('/api/audit_events?event_type=response_approval_failed&result=failed').json['logs']
         self.assertTrue(failed)
 
+        failed_mutations = self.client.get('/api/audit?event_type=playbook_create_failed&result=failed').json['logs']
+        self.assertTrue(failed_mutations)
+
         alerts = self.client.get('/api/audit_events?event_type=alert_generated').json['logs']
         self.assertTrue(any(log['target'].startswith('anomaly:') for log in alerts))
 
-        future = self.client.get('/api/audit_events?start=2999-01-01T00:00:00').json['logs']
+        future = self.client.get('/api/audit?start_time=2999-01-01T00:00:00').json['logs']
         self.assertEqual(future, [])
 
         restarted = self.restart_client()

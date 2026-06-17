@@ -248,40 +248,17 @@ Why priority: users need predictable, safe startup behavior on their own compute
 
 ## Phase 2: Evidence and Workflow
 
-### 4. Normalize Audit Logging
+### 4. Normalize Audit Logging — Complete
 
-Goal: every meaningful user, system, and response event should create a consistent audit record.
+Implemented durable normalized audit records for user, system, workflow, security, and response events. Added centralized `audit_event` helper, protected mutation fallback auditing, `/api/audit` filtering, failure/denial coverage, structured details JSON, and persistence tests.
 
-Log:
+Verification:
 
-- Login and logout
-- Denied access
-- Alert generated
-- Incident created or updated
-- Rule created, changed, or deleted
-- Playbook created, changed, or deleted
-- Terminal command attempted
-- Response action requested, approved, rejected, started, succeeded, or failed
-- Report downloaded
-- Configuration changed
+```bash
+venv/bin/python -m unittest discover -s tests
+```
 
-Audit fields:
-
-- Timestamp
-- Actor
-- Role
-- Event type
-- Target object
-- Result
-- Source IP or local session identifier
-- Reason or detail message
-
-Acceptance criteria:
-
-- Every protected mutation route writes an audit record.
-- Failed and denied actions are logged, not only successful actions.
-- Audit logs can be filtered by actor, event type, result, and time range.
-- Audit records survive app restarts.
+Result: Ran 12 tests in 48.643s - OK
 
 Why priority: audit history is required for trust, debugging, accountability, and incident review.
 

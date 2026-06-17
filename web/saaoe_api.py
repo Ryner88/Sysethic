@@ -239,9 +239,12 @@ def init_db():
                 role TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 target TEXT NOT NULL,
+                target_type TEXT,
+                target_id TEXT,
                 result TEXT NOT NULL,
                 source TEXT NOT NULL,
-                detail TEXT
+                detail TEXT,
+                details_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS anomaly_rules (
@@ -417,6 +420,9 @@ def init_db():
         _ensure_column(conn, 'organizations', 'join_code', "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, 'join_requests', 'detail', 'TEXT')
         _ensure_column(conn, 'audit_events', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'audit_events', 'target_type', 'TEXT')
+        _ensure_column(conn, 'audit_events', 'target_id', 'TEXT')
+        _ensure_column(conn, 'audit_events', 'details_json', 'TEXT')
         _ensure_column(conn, 'playbooks', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'playbook_runs', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'incidents', 'organization_id', 'INTEGER')
@@ -830,15 +836,55 @@ def create_user(username, password, role='admin', active=True, organization_id=N
     )
 
 
-def audit_event(event_type, target, result='success', detail='', actor=None, role=None, organization_id=None):
+def _audit_target_parts(target, target_type=None, target_id=None):
+    text = str(target or '')
+    if (target_type is None or target_id is None) and ':' in text:
+        prefix, suffix = text.split(':', 1)
+        if target_type is None:
+            target_type = prefix or None
+        if target_id is None:
+            target_id = suffix or None
+    return text, target_type, target_id
+
+
+def _audit_source():
+    if not has_request_context():
+        return 'local'
+    return request.headers.get('X-Forwarded-For', request.remote_addr or 'local').split(',')[0].strip() or 'local'
+
+
+def audit_event(
+    event_type,
+    target,
+    result='success',
+    detail='',
+    actor=None,
+    role=None,
+    organization_id=None,
+    target_type=None,
+    target_id=None,
+    details=None,
+):
     user = current_user()
     actor = actor or (user['username'] if user else 'anonymous')
     role = role or (user['role'] if user else 'anonymous')
     organization_id = organization_id if organization_id is not None else (user.get('organization_id') if user else None)
-    source = request.remote_addr if has_request_context() else 'local'
+    target, target_type, target_id = _audit_target_parts(target, target_type=target_type, target_id=target_id)
+    source = _audit_source()
+    details_json = _json_dumps(details) if details is not None else None
+    if has_request_context():
+        g.audit_event_written = True
     _db_exec(
-        "INSERT INTO audit_events (organization_id, timestamp, actor, role, event_type, target, result, source, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (organization_id, datetime.now().isoformat(), actor, role, event_type, target, result, source, detail)
+        """
+        INSERT INTO audit_events (
+            organization_id, timestamp, actor, role, event_type, target,
+            target_type, target_id, result, source, detail, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            organization_id, datetime.now().isoformat(), actor, role, event_type, target,
+            target_type, target_id, result, source, detail, details_json
+        )
     )
 
 
@@ -900,7 +946,7 @@ def create_incident_from_anomaly(anomaly, actor='system', organization_id=None):
     _incident_event(incident_id, 'incident_created', f"Linked anomaly {anomaly['id']}", actor=actor, organization_id=organization_id)
     if pb:
         _incident_event(incident_id, 'playbook_recommended', f"Recommended {pb['name']}", actor=actor, organization_id=organization_id)
-    audit_event('incident_created', f"incident:{incident_id}", 'success', title, actor=actor, role='system' if actor == 'system' else None)
+    audit_event('incident_created', f"incident:{incident_id}", 'success', title, actor=actor, role='system' if actor == 'system' else None, organization_id=organization_id, details={'anomaly_id': anomaly['id'], 'severity': normalize_severity(anomaly.get('severity')), 'recommended_playbook_id': pb['id'] if pb else None})
     return _db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0]
 
 
@@ -1350,20 +1396,25 @@ def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None,
     params.append(limit)
     logs = []
     for row in _db_query(
-        f"SELECT timestamp, actor, role, event_type, target, result, source, detail FROM audit_events {where_sql} ORDER BY id DESC LIMIT ?",
+        f"SELECT timestamp, actor, role, event_type, target, target_type, target_id, result, source, detail, details_json FROM audit_events {where_sql} ORDER BY id DESC LIMIT ?",
         tuple(params)
     ):
         severity = 'warning' if row['result'] in {'denied', 'failed'} else 'info'
         detail = row.get('detail') or f"actor {row['actor']}"
+        structured_details = _json_loads(row.get('details_json'), None)
         logs.append({
             'timestamp': row['timestamp'],
             'actor': row['actor'],
             'role': row['role'],
             'event_type': row['event_type'],
             'target': row['target'],
+            'target_type': row.get('target_type'),
+            'target_id': row.get('target_id'),
             'result': row['result'],
             'source': row.get('source') or 'local',
             'detail': detail,
+            'details_json': row.get('details_json'),
+            'structured_details': structured_details,
             'action': row['event_type'],
             'severity': severity,
             'outcome': row['result'],
@@ -1392,9 +1443,13 @@ def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None,
                 'role': 'system',
                 'event_type': 'metric_sample',
                 'target': 'host.telemetry',
+                'target_type': 'host',
+                'target_id': 'telemetry',
                 'result': outcome,
                 'source': LOG_PATH,
                 'detail': detail,
+                'details_json': None,
+                'structured_details': None,
                 'action': 'metric_sample',
                 'severity': sev,
                 'outcome': outcome,
@@ -1559,7 +1614,7 @@ def _validate_terminal_command(command):
 def _run_terminal_command(command):
     args, error = _validate_terminal_command(command)
     if error:
-        audit_event('terminal_command', f"command:{command}", 'denied', error)
+        audit_event('terminal_command_attempted', f"command:{command}", 'denied', error, details={'command': command})
         return {'success': False, 'error': error, 'output': ''}, 400
     try:
         proc = subprocess.run(
@@ -1576,10 +1631,10 @@ def _run_terminal_command(command):
         if truncated:
             output = output[:TERMINAL_OUTPUT_LIMIT] + '\n[output truncated]\n'
         result = 'success' if proc.returncode == 0 else 'failed'
-        audit_event('terminal_command', f"command:{args[0]}", result, f"exit={proc.returncode}")
+        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", result, f"exit={proc.returncode}", details={'command': command, 'returncode': proc.returncode, 'truncated': truncated})
         return {'success': proc.returncode == 0, 'returncode': proc.returncode, 'output': output, 'truncated': truncated}, 200
     except subprocess.TimeoutExpired:
-        audit_event('terminal_command', f"command:{args[0]}", 'failed', 'timeout')
+        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details={'command': command})
         return {'success': False, 'error': 'command timed out', 'output': ''}, 408
 
 
@@ -1916,6 +1971,25 @@ def require_authentication():
     return None
 
 
+@app.after_request
+def audit_unlogged_protected_mutation(response):
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} and request.endpoint not in PUBLIC_ENDPOINTS:
+        if not getattr(g, 'audit_event_written', False):
+            result = 'success' if response.status_code < 400 else ('denied' if response.status_code in {401, 403} else 'failed')
+            detail = f"{request.method} {request.path} returned {response.status_code}"
+            try:
+                audit_event(
+                    'protected_mutation',
+                    request.endpoint or request.path,
+                    result,
+                    detail,
+                    details={'method': request.method, 'path': request.path, 'status_code': response.status_code},
+                )
+            except sqlite3.Error:
+                pass
+    return response
+
+
 @app.context_processor
 def inject_auth_context():
     user = current_user()
@@ -2198,12 +2272,15 @@ def api_users():
         uid = int(payload.get('id', 0))
         requested_permissions = payload.get('permissions') or []
         if not isinstance(requested_permissions, list):
+            audit_event('permission_change_failed', 'api_users.permissions', 'failed', 'permissions must be an array')
             return jsonify(error='permissions must be an array'), 400
         invalid_permissions = [p for p in requested_permissions if p not in PERMISSIONS]
         if invalid_permissions:
+            audit_event('permission_change_failed', 'api_users.permissions', 'failed', f"invalid permissions: {', '.join(invalid_permissions)}")
             return jsonify(error=f"invalid permissions: {', '.join(invalid_permissions)}"), 400
         target = get_user_by_id(uid)
         if not target:
+            audit_event('permission_change_failed', f"user:{uid}", 'failed', 'user not found')
             return jsonify(error='user not found'), 404
         if target.get('organization_id') != org_id:
             audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace permission change blocked')
@@ -2228,11 +2305,13 @@ def api_users():
         uid = int(payload.get('id', 0))
         target = get_user_by_id(uid)
         if not target:
+            audit_event('user_disable_failed', f"user:{uid}", 'failed', 'user not found')
             return jsonify(error='user not found'), 404
         if target.get('organization_id') != org_id:
             audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace user disable blocked')
             return jsonify(error='user not found'), 404
         if target['id'] == session.get('user_id'):
+            audit_event('user_disable_failed', f"user:{target['username']}", 'failed', 'cannot disable current user')
             return jsonify(error='cannot disable current user'), 400
         _db_exec("UPDATE users SET active = 0 WHERE id = ?", (uid,))
         audit_event('user_disabled', f"user:{target['username']}", 'success', 'workspace admin disabled member')
@@ -2242,6 +2321,7 @@ def api_users():
         uid = int(payload.get('id', 0))
         target = get_user_by_id(uid)
         if not target:
+            audit_event('user_enable_failed', f"user:{uid}", 'failed', 'user not found')
             return jsonify(error='user not found'), 404
         if target.get('organization_id') != org_id:
             audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace user enable blocked')
@@ -2254,12 +2334,16 @@ def api_users():
     password = str(payload.get('password', ''))
     role = str(payload.get('role', 'viewer')).strip()
     if role not in {'admin', 'analyst', 'viewer'}:
+        audit_event('user_create_failed', f"user:{username or 'unknown'}", 'failed', 'invalid role')
         return jsonify(error='invalid role'), 400
     if not username:
+        audit_event('user_create_failed', 'user:unknown', 'failed', 'username is required')
         return jsonify(error='username is required'), 400
     if len(password) < 10:
+        audit_event('user_create_failed', f"user:{username}", 'failed', 'password must be at least 10 characters')
         return jsonify(error='password must be at least 10 characters'), 400
     if get_user_by_username(username):
+        audit_event('user_create_failed', f"user:{username}", 'failed', 'username already exists')
         return jsonify(error='username already exists'), 409
     create_user(username, password, role, organization_id=org_id)
     audit_event('user_created', f"user:{username}", 'success', f"role={role}")
@@ -2282,14 +2366,17 @@ def api_organization():
     name = str(payload.get('name', '')).strip()
     join_policy = normalize_join_policy(payload.get('join_policy', organization.get('join_policy') or 'join_with_code'))
     if join_policy not in {'join_with_code', 'request_to_join', 'admin_invites_only'}:
+        audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', 'unsupported join policy')
         return jsonify(error='unsupported join policy'), 400
     if not name:
+        audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', 'workspace name is required')
         return jsonify(error='workspace name is required'), 400
     existing = get_organization_by_name(name)
     if existing and existing['id'] != organization['id']:
+        audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', 'workspace name is already in use')
         return jsonify(error='workspace name is already in use'), 409
     _db_exec("UPDATE organizations SET name = ?, join_policy = ? WHERE id = ?", (name, join_policy, organization['id']))
-    audit_event('organization_updated', f"organization:{organization['id']}", 'success', f"name={name}; join_policy={join_policy}")
+    audit_event('organization_updated', f"organization:{organization['id']}", 'success', f"name={name}; join_policy={join_policy}", details={'name': name, 'join_policy': join_policy})
     return jsonify(success=True, organization=organization_for_user(user))
 
 
@@ -2305,6 +2392,7 @@ def api_configuration():
     payload = request.json or {}
     key = str(payload.get('key', '')).strip()
     if not key:
+        audit_event('configuration_update_failed', 'configuration:unknown', 'failed', 'configuration key is required')
         return jsonify(error='configuration key is required'), 400
     value = payload.get('value')
     now = datetime.now().isoformat()
@@ -2321,7 +2409,7 @@ def api_configuration():
         """,
         (storage_key, org_id, _json_dumps(value), now, user['username'])
     )
-    audit_event('configuration_updated', f"configuration:{key}", 'success', f"key={key}")
+    audit_event('configuration_updated', f"configuration:{key}", 'success', f"key={key}", details={'key': key, 'value': value})
     return jsonify(success=True, configuration=_configuration_rows(org_id))
 
 
@@ -2342,9 +2430,11 @@ def api_join_requests():
     action = str(payload.get('action', '')).strip()
     rows = _db_query("SELECT * FROM join_requests WHERE id = ? AND organization_id = ?", (request_id, org_id))
     if not rows:
+        audit_event('join_request_failed', f"join_request:{request_id}", 'failed', 'join request not found')
         return jsonify(error='join request not found'), 404
     join_request = rows[0]
     if join_request['status'] != 'pending':
+        audit_event('join_request_failed', f"join_request:{request_id}", 'failed', 'join request has already been decided')
         return jsonify(error='join request has already been decided'), 409
     now = datetime.now().isoformat()
     if action == 'approve':
@@ -2353,6 +2443,7 @@ def api_join_requests():
                 "UPDATE join_requests SET status = ?, decided_at = ?, decided_by = ?, detail = ? WHERE id = ?",
                 ('denied', now, user['username'], 'username already exists', request_id)
             )
+            audit_event('join_request_failed', f"user:{join_request['username']}", 'failed', 'username already exists')
             return jsonify(error='username already exists'), 409
         _db_exec(
             "INSERT INTO users (username, password_hash, role, active, organization_id, created_at) VALUES (?, ?, ?, 1, ?, ?)",
@@ -2371,6 +2462,7 @@ def api_join_requests():
         )
         audit_event('join_request_denied', f"user:{join_request['username']}", 'success', 'workspace join request denied')
         return jsonify(success=True)
+    audit_event('join_request_failed', f"join_request:{request_id}", 'failed', f"unsupported action={action}")
     return jsonify(error='unsupported action'), 400
 
 
@@ -2645,6 +2737,7 @@ def api_incidents():
     incident_id = payload.get('id')
     rows = _db_query("SELECT * FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, org_id))
     if not rows:
+        audit_event('incident_update_failed', f"incident:{incident_id or 'unknown'}", 'failed', 'incident not found')
         return jsonify(error='incident not found'), 404
     updates = []
     params = []
@@ -2659,6 +2752,7 @@ def api_incidents():
         params.append(payload.get('resolution') or None)
     note = str(payload.get('note', '')).strip()
     if not updates and not note:
+        audit_event('incident_update_failed', f"incident:{incident_id}", 'failed', 'no supported update fields')
         return jsonify(error='no supported update fields'), 400
     now = datetime.now().isoformat()
     if updates:
@@ -2678,7 +2772,7 @@ def api_incidents():
         audit_detail = 'incident note added'
     elif note:
         audit_detail = 'incident fields updated; note added'
-    audit_event('incident_updated', f"incident:{incident_id}", 'success', audit_detail)
+    audit_event('incident_updated', f"incident:{incident_id}", 'success', audit_detail, details={'updates': detail, 'note_added': bool(note)})
     return jsonify(success=True, incident=_db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0])
 
 
@@ -2719,7 +2813,7 @@ def api_validation_events():
     )
     anomaly = next(a for a in _validation_anomalies(org_id) if a['id'] == anomaly_id)
     _persist_anomaly(anomaly, organization_id=org_id)
-    audit_event('alert_generated', f"anomaly:{anomaly_id}", 'success', f"{event_type} severity={anomaly['severity']}")
+    audit_event('alert_generated', f"anomaly:{anomaly_id}", 'success', f"{event_type} severity={anomaly['severity']}", details={'event_type': event_type, 'severity': anomaly['severity'], 'risk_score': anomaly['risk_score']})
     incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
     _db_exec("UPDATE validation_events SET incident_id = ?, status = ? WHERE id = ?", (incident['id'], 'incident_created', event_id))
     audit_event('validation_event_created', f"validation_event:{event_id}", 'success', event_type)
@@ -2768,7 +2862,10 @@ def api_response_approvals():
     if payload.get('incident_id'):
         _incident_event(payload.get('incident_id'), 'approval_requested', f"{action} target={target}", organization_id=org_id)
         _db_exec("UPDATE incidents SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?", ('waiting_for_approval', now, payload.get('incident_id'), org_id))
-    audit_event('response_approval_requested', f"approval:{approval_id}", 'success', f"{action} target={target}")
+    audit_detail = f"{action} target={target}"
+    audit_payload = {'action': action, 'target': target, 'incident_id': payload.get('incident_id'), 'dry_run': bool(payload.get('dry_run', True))}
+    audit_event('response_action_requested', f"approval:{approval_id}", 'success', audit_detail, details=audit_payload)
+    audit_event('response_approval_requested', f"approval:{approval_id}", 'success', audit_detail, details=audit_payload)
     return jsonify(success=True, approval=_approval_row(approval_id), preview=preview)
 
 
@@ -2796,7 +2893,8 @@ def api_response_approval_detail(approval_id):
         )
         if approval.get('incident_id'):
             _incident_event(approval['incident_id'], f"approval_{status}", f"{approval['action']} target={approval['target']}")
-        audit_event(f"response_approval_{status}", f"approval:{approval_id}", 'success', approval['action'])
+        audit_event(f"response_action_{status}", f"approval:{approval_id}", 'success', approval['action'], details={'action': approval['action'], 'target': approval['target']})
+        audit_event(f"response_approval_{status}", f"approval:{approval_id}", 'success', approval['action'], details={'action': approval['action'], 'target': approval['target']})
         return jsonify(success=True, approval=_approval_row(approval_id))
     if command == 'execute':
         if approval['status'] != 'approved':
@@ -2809,7 +2907,7 @@ def api_response_approval_detail(approval_id):
             audit_event('response_action_started', f"approval:{approval_id}", 'denied', 'approval expired')
             return jsonify(error='approval request has expired', approval=_approval_row(approval_id)), 409
         try:
-            audit_event('response_action_started', f"approval:{approval_id}", 'success', approval['action'])
+            audit_event('response_action_started', f"approval:{approval_id}", 'success', approval['action'], details={'action': approval['action'], 'target': approval['target'], 'dry_run': bool(approval['dry_run'])})
             result = _execute_response_action(approval['action'], approval['target'], dry_run=bool(approval['dry_run']))
             status = 'executed_dry_run' if approval['dry_run'] else 'executed'
             _db_exec(
@@ -2818,7 +2916,8 @@ def api_response_approval_detail(approval_id):
             )
             if approval.get('incident_id'):
                 _incident_event(approval['incident_id'], 'response_executed', result['detail'])
-            audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'])
+            audit_event('response_action_succeeded', f"approval:{approval_id}", 'success', result['detail'], details={'action': approval['action'], 'target': approval['target'], 'executed': result['executed']})
+            audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'], details={'action': approval['action'], 'target': approval['target'], 'executed': result['executed']})
             return jsonify(success=True, result=result, approval=_approval_row(approval_id))
         except Exception as exc:
             _db_exec(
@@ -2827,7 +2926,8 @@ def api_response_approval_detail(approval_id):
             )
             if approval.get('incident_id'):
                 _incident_event(approval['incident_id'], 'response_failed', str(exc))
-            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', str(exc))
+            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', str(exc), details={'action': approval['action'], 'target': approval['target']})
+            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', str(exc), details={'action': approval['action'], 'target': approval['target']})
             return jsonify(error=str(exc), approval=_approval_row(approval_id)), 400
     audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', f"unsupported command={command}")
     return jsonify(error='unsupported command'), 400
@@ -2908,6 +3008,11 @@ def api_playbooks():
         load_persistent_state()
         audit_event('playbook_deleted', f"playbook:{pid}", 'success', 'playbook deleted')
         return jsonify(success=True, playbooks=_workspace_playbooks(org_id))
+    try:
+        threshold = float(payload.get('threshold', 90))
+    except (TypeError, ValueError):
+        audit_event('playbook_create_failed', 'playbook:new', 'failed', 'threshold must be numeric')
+        return jsonify(error='threshold must be numeric'), 400
     new_pb = {
         'id': next_playbook_id,
         'organization_id': org_id,
@@ -2915,7 +3020,7 @@ def api_playbooks():
         'category': payload.get('category', 'system'),
         'metric': payload.get('metric', 'cpu_percent'),
         'operator': payload.get('operator', '>'),
-        'threshold': float(payload.get('threshold', 90)),
+        'threshold': threshold,
         'action': payload.get('action_type', 'block_ip'),
         'target': payload.get('target', 'external'),
         'enabled': bool(payload.get('enabled', True)),
@@ -2928,7 +3033,7 @@ def api_playbooks():
     )
     playbooks.append(new_pb)
     next_playbook_id += 1
-    audit_event('playbook_created', f"playbook:{new_pb['id']}", 'success', new_pb['name'])
+    audit_event('playbook_created', f"playbook:{new_pb['id']}", 'success', new_pb['name'], details=new_pb)
     return jsonify(success=True, playbook=new_pb, playbooks=_workspace_playbooks(org_id))
 
 @app.route('/api/playbook_trigger', methods=['POST'])
@@ -2970,7 +3075,7 @@ def api_playbook_trigger():
     )
     run_entry['id'] = cur.lastrowid
     playbook_runs.append(run_entry)
-    audit_event('playbook_triggered', f"playbook:{pb['id']}", 'success', f"anomaly={payload.get('anomaly_id') or 'manual'}")
+    audit_event('playbook_triggered', f"playbook:{pb['id']}", 'success', f"anomaly={payload.get('anomaly_id') or 'manual'}", details={'run_id': run_entry['id'], 'anomaly_id': payload.get('anomaly_id')})
     notification_queue.put({'type':'playbook_manual_trigger','playbook':pb['name'],'details':run_entry})
     return jsonify(success=True, run=run_entry)
 
@@ -3049,7 +3154,7 @@ def api_automation_rules():
     )
     automation_rules.append(rule)
     next_automation_rule_id += 1
-    audit_event('automation_rule_created', f"automation_rule:{rule['id']}", 'success', rule['name'])
+    audit_event('automation_rule_created', f"automation_rule:{rule['id']}", 'success', rule['name'], details=rule)
     return jsonify(success=True, rule=rule, rules=_automation_rules_from_db())
 
 @app.route('/api/notifications')
@@ -3080,11 +3185,16 @@ def api_anomaly_rules():
         audit_event('anomaly_rule_deleted', f"anomaly_rule:{rid}", 'success', 'anomaly rule deleted')
         return jsonify(success=True, rules=_anomaly_rules_from_db())
 
+    try:
+        threshold = float(payload.get('threshold', 90))
+    except (TypeError, ValueError):
+        audit_event('anomaly_rule_create_failed', 'anomaly_rule:new', 'failed', 'threshold must be numeric')
+        return jsonify(error='threshold must be numeric'), 400
     rule = {
         'id': next_rule_id,
         'metric': payload.get('metric', 'cpu_percent'),
         'operator': payload.get('operator', '>'),
-        'threshold': float(payload.get('threshold', 90)),
+        'threshold': threshold,
         'severity': payload.get('severity', 'high'),
         'enabled': bool(payload.get('enabled', True)),
         'alert_in_app': bool(payload.get('alert_in_app', True)),
@@ -3096,7 +3206,7 @@ def api_anomaly_rules():
     )
     anomaly_rules.append(rule)
     next_rule_id += 1
-    audit_event('anomaly_rule_created', f"anomaly_rule:{rule['id']}", 'success', f"{rule['metric']} {rule['operator']} {rule['threshold']}")
+    audit_event('anomaly_rule_created', f"anomaly_rule:{rule['id']}", 'success', f"{rule['metric']} {rule['operator']} {rule['threshold']}", details=rule)
     return jsonify(success=True, rule=rule, rules=_anomaly_rules_from_db())
 
 @app.route('/api/system_health')
@@ -3131,10 +3241,14 @@ def api_audit_events():
         actor=request.args.get('actor') or None,
         event_type=request.args.get('event_type') or None,
         result=request.args.get('result') or None,
-        start=request.args.get('start') or None,
-        end=request.args.get('end') or None,
+        start=request.args.get('start') or request.args.get('start_time') or None,
+        end=request.args.get('end') or request.args.get('end_time') or None,
         organization_id=user.get('organization_id') if user else None,
     ))
+
+@app.route('/api/audit')
+def api_audit():
+    return api_audit_events()
 
 @app.route('/api/audit_summary')
 def api_audit_summary():
