@@ -38,6 +38,26 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, 'SAAOE_SECRET_KEY is required'):
             self.load_with_env({'SAAOE_MODE': 'production'})
 
+    def test_production_requires_strong_secret_key(self):
+        with self.assertRaisesRegex(ConfigError, 'SAAOE_SECRET_KEY must be at least 32 characters'):
+            self.load_with_env({'SAAOE_MODE': 'production', 'SAAOE_SECRET_KEY': 'short-secret'})
+
+    def test_session_cookie_secure_defaults_to_production_only(self):
+        development = self.load_with_env({})
+        production = self.load_with_env({
+            'SAAOE_MODE': 'production',
+            'SAAOE_SECRET_KEY': 'x' * 32,
+        })
+        local_override = self.load_with_env({
+            'SAAOE_MODE': 'production',
+            'SAAOE_SECRET_KEY': 'x' * 32,
+            'SAAOE_SESSION_COOKIE_SECURE': 'false',
+        })
+
+        self.assertFalse(development.session_cookie_secure)
+        self.assertTrue(production.session_cookie_secure)
+        self.assertFalse(local_override.session_cookie_secure)
+
     def test_env_can_override_paths_thresholds_and_port(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -69,6 +89,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('SAAOE mode=development', summary)
         self.assertIn('127.0.0.1:5001', summary)
         self.assertIn('protected/local-only', summary)
+        self.assertIn('SAAOE session_cookie_secure=false', summary)
         self.assertIn('SAAOE log_path=', summary)
         self.assertIn('SAAOE database_path=', summary)
         self.assertIn('SAAOE telemetry_thresholds=', summary)

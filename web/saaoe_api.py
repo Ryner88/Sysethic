@@ -15,6 +15,7 @@ import ipaddress
 import io
 import os
 import platform
+import re
 import shlex
 import shutil
 import socketserver
@@ -59,6 +60,7 @@ app.config.update(
     SECRET_KEY=SECRET_KEY,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=CONFIG.session_cookie_secure,
     PERMANENT_SESSION_LIFETIME=CONFIG.session_seconds,
 )
 SESSION_TIMEOUT_SECONDS = CONFIG.session_seconds
@@ -198,6 +200,7 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('admin', 'analyst', 'viewer')),
                 active INTEGER NOT NULL DEFAULT 1,
+                session_version INTEGER NOT NULL DEFAULT 1,
                 organization_id INTEGER,
                 created_at TEXT NOT NULL,
                 last_login_at TEXT
@@ -419,6 +422,7 @@ def init_db():
             """
         )
         _ensure_column(conn, 'users', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'users', 'session_version', 'INTEGER NOT NULL DEFAULT 1')
         _ensure_column(conn, 'organizations', 'join_policy', "TEXT NOT NULL DEFAULT 'join_with_code'")
         _ensure_column(conn, 'organizations', 'join_code', "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, 'join_requests', 'detail', 'TEXT')
@@ -775,6 +779,40 @@ def users_exist():
 def active_admin_exists():
     rows = _db_query("SELECT COUNT(*) AS count FROM users WHERE role = ? AND active = 1", ('admin',))
     return int(rows[0]['count']) > 0 if rows else False
+
+
+USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_.-]{3,64}$')
+WORKSPACE_NAME_MAX_LENGTH = 120
+
+
+def validate_username(username):
+    username = str(username or '').strip()
+    if not username:
+        return 'Username is required.'
+    if not USERNAME_PATTERN.fullmatch(username):
+        return 'Username must be 3-64 characters using letters, numbers, dots, underscores, or hyphens.'
+    return None
+
+
+def validate_workspace_name(name):
+    name = str(name or '').strip()
+    if not name:
+        return 'Workspace name is required.'
+    if len(name) > WORKSPACE_NAME_MAX_LENGTH:
+        return f'Workspace name must be {WORKSPACE_NAME_MAX_LENGTH} characters or fewer.'
+    return None
+
+
+def start_user_session(user):
+    session.clear()
+    session.permanent = True
+    session['user_id'] = user['id']
+    session['session_version'] = int(user.get('session_version') or 1)
+    session['last_seen_at'] = time.time()
+
+
+def revoke_user_sessions(user_id):
+    _db_exec("UPDATE users SET session_version = COALESCE(session_version, 1) + 1 WHERE id = ?", (user_id,))
 
 
 def normalize_join_policy(policy):
@@ -1987,6 +2025,10 @@ def current_user():
         session.clear()
         g.current_user = None
         return None
+    if int(session.get('session_version') or 0) != int(user.get('session_version') or 1):
+        session.clear()
+        g.current_user = None
+        return None
     g.current_user = user
     return user
 
@@ -2220,8 +2262,12 @@ def setup():
         organization = request.form.get('organization', '').strip() or 'Local Workspace'
         password = request.form.get('password', '')
         confirm = request.form.get('confirm', '')
-        if not username:
-            error = 'Username is required.'
+        username_error = validate_username(username)
+        organization_error = validate_workspace_name(organization)
+        if username_error:
+            error = username_error
+        elif organization_error:
+            error = organization_error
         elif len(password) < 10:
             error = 'Password must be at least 10 characters.'
         elif password != confirm:
@@ -2230,10 +2276,7 @@ def setup():
             org_id = create_organization(organization, created_by=username)
             create_user(username, password, 'admin', organization_id=org_id)
             user = get_user_by_username(username)
-            session.clear()
-            session.permanent = True
-            session['user_id'] = user['id']
-            session['last_seen_at'] = time.time()
+            start_user_session(user)
             audit_event('user_created', f"user:{username}", 'success', 'first workspace owner created', actor=username, role='admin')
             audit_event('login', f"user:{username}", 'success', 'first workspace session started', actor=username, role='admin')
             return redirect(url_for('dashboard'))
@@ -2251,10 +2294,7 @@ def login():
         password = request.form.get('password', '')
         user = get_user_by_username(username)
         if user and user.get('active') and check_password_hash(user['password_hash'], password):
-            session.clear()
-            session.permanent = True
-            session['user_id'] = user['id']
-            session['last_seen_at'] = time.time()
+            start_user_session(user)
             _db_exec("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user['id']))
             audit_event('login', f"user:{username}", 'success', 'interactive login', actor=username, role=user['role'])
             next_url = request.args.get('next') or url_for('dashboard')
@@ -2277,10 +2317,12 @@ def signup():
         organization = request.form.get('organization', '').strip()
         password = request.form.get('password', '')
         confirm = request.form.get('confirm', '')
-        if not username:
-            error = 'Username is required.'
-        elif not organization:
-            error = 'Workspace name is required.'
+        username_error = validate_username(username)
+        organization_error = validate_workspace_name(organization)
+        if username_error:
+            error = username_error
+        elif organization_error:
+            error = organization_error
         elif get_organization_by_name(organization):
             error = 'Workspace name is already in use.'
         elif len(password) < 10:
@@ -2293,10 +2335,7 @@ def signup():
             org_id = create_organization(organization, created_by=username)
             create_user(username, password, 'admin', active=True, organization_id=org_id)
             user = get_user_by_username(username)
-            session.clear()
-            session.permanent = True
-            session['user_id'] = user['id']
-            session['last_seen_at'] = time.time()
+            start_user_session(user)
             audit_event('organization_created', f"organization:{organization}", 'success', 'workspace created', actor=username, role='admin')
             audit_event('user_created', f"user:{username}", 'success', 'workspace admin created', actor=username, role='admin')
             audit_event('login', f"user:{username}", 'success', 'signup session started', actor=username, role='admin')
@@ -2320,15 +2359,15 @@ def join():
             error = 'Workspace code is required.'
         elif not organization:
             error = 'Workspace code was not found.'
-        elif not username:
-            error = 'Username is required.'
-        elif get_user_by_username(username):
+        else:
+            error = validate_username(username)
+        if not error and get_user_by_username(username):
             error = 'That username is already registered.'
-        elif _db_query("SELECT id FROM join_requests WHERE username = ? AND status = ?", (username, 'pending')):
+        elif not error and _db_query("SELECT id FROM join_requests WHERE username = ? AND status = ?", (username, 'pending')):
             error = 'There is already a pending join request for that username.'
-        elif len(password) < 10:
+        elif not error and len(password) < 10:
             error = 'Password must be at least 10 characters.'
-        elif password != confirm:
+        elif not error and password != confirm:
             error = 'Passwords do not match.'
         if not error:
             policy = normalize_join_policy(organization.get('join_policy'))
@@ -2346,10 +2385,7 @@ def join():
             else:
                 create_user(username, password, 'viewer', active=True, organization_id=organization['id'])
                 user = get_user_by_username(username)
-                session.clear()
-                session.permanent = True
-                session['user_id'] = user['id']
-                session['last_seen_at'] = time.time()
+                start_user_session(user)
                 audit_event('user_created', f"user:{username}", 'success', 'joined workspace with code', actor=username, role='viewer', organization_id=organization['id'])
                 audit_event('login', f"user:{username}", 'success', 'join session started', actor=username, role='viewer', organization_id=organization['id'])
                 return redirect(url_for('dashboard'))
@@ -2499,7 +2535,7 @@ def api_users():
         if target['id'] == session.get('user_id'):
             audit_event('user_disable_failed', f"user:{target['username']}", 'failed', 'cannot disable current user')
             return jsonify(error='cannot disable current user'), 400
-        _db_exec("UPDATE users SET active = 0 WHERE id = ?", (uid,))
+        _db_exec("UPDATE users SET active = 0, session_version = COALESCE(session_version, 1) + 1 WHERE id = ?", (uid,))
         audit_event('user_disabled', f"user:{target['username']}", 'success', 'workspace admin disabled member')
         return jsonify(success=True)
 
@@ -2519,12 +2555,13 @@ def api_users():
     username = str(payload.get('username', '')).strip()
     password = str(payload.get('password', ''))
     role = str(payload.get('role', 'viewer')).strip()
+    username_error = validate_username(username)
     if role not in {'admin', 'analyst', 'viewer'}:
         audit_event('user_create_failed', f"user:{username or 'unknown'}", 'failed', 'invalid role')
         return jsonify(error='invalid role'), 400
-    if not username:
-        audit_event('user_create_failed', 'user:unknown', 'failed', 'username is required')
-        return jsonify(error='username is required'), 400
+    if username_error:
+        audit_event('user_create_failed', f"user:{username or 'unknown'}", 'failed', username_error)
+        return jsonify(error=username_error), 400
     if len(password) < 10:
         audit_event('user_create_failed', f"user:{username}", 'failed', 'password must be at least 10 characters')
         return jsonify(error='password must be at least 10 characters'), 400
@@ -2551,12 +2588,13 @@ def api_organization():
     payload = request.json or {}
     name = str(payload.get('name', '')).strip()
     join_policy = normalize_join_policy(payload.get('join_policy', organization.get('join_policy') or 'join_with_code'))
+    name_error = validate_workspace_name(name)
     if join_policy not in {'join_with_code', 'request_to_join', 'admin_invites_only'}:
         audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', 'unsupported join policy')
         return jsonify(error='unsupported join policy'), 400
-    if not name:
-        audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', 'workspace name is required')
-        return jsonify(error='workspace name is required'), 400
+    if name_error:
+        audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', name_error)
+        return jsonify(error=name_error), 400
     existing = get_organization_by_name(name)
     if existing and existing['id'] != organization['id']:
         audit_event('organization_update_failed', f"organization:{organization['id']}", 'failed', 'workspace name is already in use')

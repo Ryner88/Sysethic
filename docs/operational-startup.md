@@ -16,7 +16,7 @@ Use this checklist to run SAAOE on a local computer.
    cp .env.example .env
    ```
 
-3. For development, the app may run with a generated ephemeral secret key. For operational use, edit `.env`, set `SAAOE_MODE=production`, and set `SAAOE_SECRET_KEY` to a long random value.
+3. For development, the app may run with a generated ephemeral secret key. For operational use, edit `.env`, set `SAAOE_MODE=production`, and set `SAAOE_SECRET_KEY` to a long random value of at least 32 characters.
 
 4. Start SAAOE:
 
@@ -46,7 +46,9 @@ The health check confirms that the Flask app is reachable and that protected tel
 - Operational data is stored in `data/saaoe.db`.
 - Local telemetry logs are read from `logs/system_log.csv`.
 - Startup prints the active mode, bind address, bind protection status, port, debug mode, log path, database path, and telemetry thresholds.
-- `SAAOE_SECRET_KEY` is required when `SAAOE_MODE` is not `development`, `dev`, or `local`.
+- `SAAOE_SECRET_KEY` is required when `SAAOE_MODE` is not `development`, `dev`, or `local`, and production-like modes require at least 32 characters.
+- Session cookies are `HttpOnly`, `SameSite=Lax`, and default to `Secure` outside development. For local HTTP-only production rehearsal, set `SAAOE_SESSION_COOKIE_SECURE=false`.
+- Disabled users have their durable session version incremented so any existing browser session is invalidated on the next request.
 - `SAAOE_DATABASE_PATH`, `SAAOE_LOG_PATH`, `SAAOE_CPU_THRESHOLD`, `SAAOE_MEMORY_THRESHOLD`, `SAAOE_DISK_THRESHOLD`, and `SAAOE_NETWORK_THRESHOLD` can be changed through environment variables or `.env`.
 - SQLite initialization runs automatically during app startup via `init_db()`, creates missing tables, and applies additive column migrations for older local databases.
 - Approval requests expire after `SAAOE_APPROVAL_TTL_SECONDS` seconds, defaulting to 24 hours.
@@ -76,6 +78,7 @@ venv/bin/python -c "import web.saaoe_api; print(web.saaoe_api.DB_PATH)"
 ## Phase 1 Access Checklist
 
 - Logged-out browser users are redirected from protected pages, and logged-out API requests return `401`.
+- Existing sessions are rejected after a user is disabled.
 - Signup creates a new workspace with the creator as Workspace Admin; joining with a workspace code creates or requests a Regular User account based on the workspace policy.
 - Workspace Admins can invite members, disable members, and assign workspace permissions.
 - Regular Users can use normal workspace features, and extra permissions are independent: `manage_members`, `mutate_playbooks`, and `access_terminal`.

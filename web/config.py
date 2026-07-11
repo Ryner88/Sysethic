@@ -27,6 +27,7 @@ class AppConfig:
     disk_threshold: float
     network_threshold: float
     session_seconds: int
+    session_cookie_secure: bool
     approval_ttl_seconds: int
     terminal_ws_host: str
     terminal_ws_port: int
@@ -147,6 +148,8 @@ def load_config():
             secret_key = secrets.token_hex(32)
         else:
             raise ConfigError('SAAOE_SECRET_KEY is required outside development mode.')
+    elif mode not in DEVELOPMENT_MODES and len(secret_key) < 32:
+        raise ConfigError('SAAOE_SECRET_KEY must be at least 32 characters outside development mode.')
 
     host = _env('SAAOE_HOST', '127.0.0.1').strip()
     if not host:
@@ -165,6 +168,7 @@ def load_config():
         disk_threshold=_float_env('SAAOE_DISK_THRESHOLD', 90, minimum=0),
         network_threshold=_float_env('SAAOE_NETWORK_THRESHOLD', 100000000, minimum=0),
         session_seconds=_int_env('SAAOE_SESSION_SECONDS', 28800, minimum=60),
+        session_cookie_secure=_bool_env('SAAOE_SESSION_COOKIE_SECURE', default=mode not in DEVELOPMENT_MODES),
         approval_ttl_seconds=_int_env('SAAOE_APPROVAL_TTL_SECONDS', 86400, minimum=60),
         terminal_ws_host=_env('TERMINAL_WS_HOST', '127.0.0.1'),
         terminal_ws_port=_int_env('TERMINAL_WS_PORT', 8765, minimum=1, maximum=65535),
@@ -189,6 +193,7 @@ def startup_summary(config):
         f'SAAOE mode={config.mode}',
         f'SAAOE bind={config.host}:{config.port} ({bind_status})',
         f'SAAOE debug={str(config.debug).lower()}',
+        f'SAAOE session_cookie_secure={str(config.session_cookie_secure).lower()}',
         f'SAAOE log_path={config.log_path}',
         f'SAAOE database_path={config.database_path}',
         f'SAAOE telemetry_thresholds={thresholds}',

@@ -58,7 +58,7 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
    cp .env.example .env
    ```
 
-   For local development, the app can start without `SAAOE_SECRET_KEY` and will generate an ephemeral development key. For operational or production use, edit `.env`, set `SAAOE_MODE=production`, and set `SAAOE_SECRET_KEY` to a long random value.
+   For local development, the app can start without `SAAOE_SECRET_KEY` and will generate an ephemeral development key. For operational or production use, edit `.env`, set `SAAOE_MODE=production`, and set `SAAOE_SECRET_KEY` to a long random value of at least 32 characters.
 
 4. Run the web dashboard:
    ```bash
@@ -84,6 +84,8 @@ Common configuration variables:
 - `SAAOE_DEBUG`: Flask debug mode, default `false`.
 - `SAAOE_DATABASE_PATH`: SQLite database path, default `data/saaoe.db`.
 - `SAAOE_LOG_PATH`: telemetry CSV path, default `logs/system_log.csv`.
+- `SAAOE_SESSION_SECONDS`: authenticated idle timeout in seconds, default `28800`.
+- `SAAOE_SESSION_COOKIE_SECURE`: marks session cookies HTTPS-only. Defaults to `true` outside local development.
 - `SAAOE_CPU_THRESHOLD`, `SAAOE_MEMORY_THRESHOLD`, `SAAOE_DISK_THRESHOLD`, `SAAOE_NETWORK_THRESHOLD`: telemetry thresholds used by seeded rules and live scoring.
 
 See [Operational Startup](docs/operational-startup.md) for the local startup checklist, health check, and operational defaults.

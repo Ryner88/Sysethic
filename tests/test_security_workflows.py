@@ -484,6 +484,84 @@ class SecurityWorkflowTests(unittest.TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_disabling_user_revokes_existing_session(self):
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp.close()
+        os.unlink(tmp.name)
+        original_db_path = self.appmod.DB_PATH
+        self.appmod.DB_PATH = tmp.name
+        try:
+            self.appmod.init_db()
+            org_id = self.appmod.create_organization('Session Revocation Workspace', created_by='owner')
+            self.appmod.create_user('owner', 'longpassword8', 'admin', organization_id=org_id)
+            self.appmod.create_user('member', 'longpassword9', 'viewer', organization_id=org_id)
+            member = self.appmod.get_user_by_username('member')
+            owner_client = self.appmod.app.test_client()
+            member_client = self.appmod.app.test_client()
+
+            response = member_client.post('/login', data={'username': 'member', 'password': 'longpassword9'})
+            self.assertEqual(response.status_code, 302)
+            response = member_client.get('/api/usage')
+            self.assertEqual(response.status_code, 200)
+
+            owner_client.post('/login', data={'username': 'owner', 'password': 'longpassword8'})
+            response = owner_client.post('/api/users', json={'action': 'disable', 'id': member['id']})
+            self.assertEqual(response.status_code, 200)
+
+            response = member_client.get('/api/usage')
+            self.assertEqual(response.status_code, 401)
+            disabled = self.appmod.get_user_by_username('member')
+            self.assertGreater(disabled['session_version'], member['session_version'])
+
+            response = member_client.post('/login', data={'username': 'member', 'password': 'longpassword9'})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'Invalid username or password', response.data)
+        finally:
+            self.appmod.DB_PATH = original_db_path
+            try:
+                os.unlink(tmp.name)
+            except FileNotFoundError:
+                pass
+
+    def test_invalid_usernames_are_rejected(self):
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp.close()
+        os.unlink(tmp.name)
+        original_db_path = self.appmod.DB_PATH
+        self.appmod.DB_PATH = tmp.name
+        try:
+            self.appmod.init_db()
+            client = self.appmod.app.test_client()
+
+            response = client.post('/setup', data={
+                'username': 'x',
+                'password': 'longpassword7',
+                'confirm': 'longpassword7',
+            })
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'Username must be 3-64 characters', response.data)
+
+            response = client.post('/setup', data={
+                'username': 'bootstrap-admin',
+                'password': 'longpassword7',
+                'confirm': 'longpassword7',
+            })
+            self.assertEqual(response.status_code, 302)
+
+            response = client.post('/api/users', json={
+                'username': 'bad user',
+                'password': 'longpassword8',
+                'role': 'viewer',
+            })
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('Username must be 3-64 characters', response.json['error'])
+        finally:
+            self.appmod.DB_PATH = original_db_path
+            try:
+                os.unlink(tmp.name)
+            except FileNotFoundError:
+                pass
+
 
 if __name__ == '__main__':
     unittest.main()
