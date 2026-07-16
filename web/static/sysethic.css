@@ -75,6 +75,7 @@ select{padding:7px 8px}
 .legend-dot.critical{background:var(--bad);}
 .legend-dot.medium{background:var(--warn);}
 .legend-dot.low{background:#8d7cff;}
+.legend-dot.info{background:#4aa8bf;}
 
 .table{width:100%;border-collapse:collapse;font-size:12px;display:block;overflow-x:auto;white-space:nowrap;}
 .table thead,.table tbody,.table tr{width:100%;}
@@ -89,6 +90,19 @@ select{padding:7px 8px}
 .badge-state.sandboxed{background:#281c40;color:#b79aff;border-color:#8d7cff;}
 .badge-state.terminated{background:#3d1418;color:#ff5a5f;border-color:#ff5a5f;}
 
+.vocabulary-badge{display:inline-flex;align-items:center;white-space:nowrap;font-size:11px;font-weight:700;border-radius:6px;padding:3px 8px;border:1px solid transparent;letter-spacing:0;}
+.severity-info{background:#17313a;color:#8ed9e8;border-color:#285563;}
+.severity-low{background:#21352c;color:#86d7ac;border-color:#37634c;}
+.severity-medium{background:#3f300a;color:#f5c451;border-color:#80651d;}
+.severity-high{background:#45270d;color:#ffad66;border-color:#91521d;}
+.severity-critical{background:#3d1418;color:#ff8b8f;border-color:#a53239;}
+.status-open{background:#17313a;color:#8ed9e8;border-color:#285563;}
+.status-investigating{background:#3f300a;color:#f5c451;border-color:#80651d;}
+.status-waiting-for-approval{background:#281c40;color:#c7adff;border-color:#65449b;}
+.status-resolved{background:#073a28;color:#78e4ad;border-color:#238b5c;}
+.status-dismissed{background:#292d30;color:#b8c1c5;border-color:#505b60;}
+.status-failed{background:#3d1418;color:#ff8b8f;border-color:#a53239;}
+
 .alert-list,.audit-list{min-height:220px;}
 .alert-item,.audit-item{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:13px;font-family:var(--font-mono);}
 .alert-badge,.audit-badge{font-size:11px;font-weight:700;border-radius:6px;padding:2px 8px;margin-right:8px;text-transform:uppercase;letter-spacing:0;}
@@ -96,10 +110,14 @@ select{padding:7px 8px}
 .alert-badge.critical{background:var(--bad);color:#fff;}
 .alert-badge.medium{background:var(--warn);color:#071012;}
 .alert-badge.low{background:#8d7cff;color:#fff;}
+.alert-badge.info,.alert-badge.severity-info{background:#17313a;color:#8ed9e8;}
 .alert-status{margin-left:auto;font-size:12px;border-radius:6px;padding:2px 8px;background:#222;color:#fff;font-family:var(--font-mono);}
 .alert-status.open{background:var(--bad);color:#fff;}
 .alert-status.investigating{background:var(--warn);color:#071012;}
 .alert-status.resolved{background:var(--accent);color:#071012;}
+.alert-status.waiting_for_approval,.alert-status.status-waiting-for-approval{background:#65449b;color:#fff;}
+.alert-status.dismissed,.alert-status.status-dismissed{background:#505b60;color:#fff;}
+.alert-status.failed,.alert-status.status-failed{background:var(--bad);color:#fff;}
 .audit-badge.allowed{background:var(--accent);color:#071012;}
 .audit-badge.flagged{background:var(--warn);color:#071012;}
 .audit-badge.denied{background:var(--bad);color:#fff;}
@@ -493,11 +511,11 @@ select{padding:7px 8px}
     font-size: 2rem;
   }
 }
-.toast.critical {
+.toast.critical,.toast.severity-critical {
   border-color: var(--bad);
   background: rgba(255, 68, 68, 0.1);
 }
-.toast.high {
+.toast.high,.toast.severity-high {
   border-color: var(--warn);
   background: rgba(255, 255, 0, 0.1);
 }
@@ -598,13 +616,18 @@ select{padding:7px 8px}
 .heat-cell.medium[data-level="1"],
 .heat-cell.medium[data-level="2"],
 .heat-cell.low[data-level="1"],
-.heat-cell.low[data-level="2"] { background: rgba(0,224,198,0.16); }
+.heat-cell.low[data-level="2"],
+.heat-cell.info[data-level="1"],
+.heat-cell.info[data-level="2"] { background: rgba(0,224,198,0.16); }
 .heat-cell.medium[data-level="3"],
 .heat-cell.medium[data-level="4"],
 .heat-cell.medium[data-level="5"],
 .heat-cell.low[data-level="3"],
 .heat-cell.low[data-level="4"],
-.heat-cell.low[data-level="5"] { background: rgba(0,224,198,0.46); color:#0a0a0a; }
+.heat-cell.low[data-level="5"],
+.heat-cell.info[data-level="3"],
+.heat-cell.info[data-level="4"],
+.heat-cell.info[data-level="5"] { background: rgba(0,224,198,0.46); color:#0a0a0a; }
 
 .risk {
   display: inline-flex;
@@ -619,6 +642,11 @@ select{padding:7px 8px}
 .risk.critical { background: var(--bad); color: #fff; }
 .risk.high { background: var(--warn); color: #0a0a0a; }
 .risk.medium { background: rgba(0,255,255,0.18); color: var(--accent); }
+.risk.severity-critical{background:var(--bad);color:#fff;}
+.risk.severity-high{background:#45270d;color:#ffad66;}
+.risk.severity-medium{background:#3f300a;color:#f5c451;}
+.risk.severity-low{background:#21352c;color:#86d7ac;}
+.risk.severity-info{background:#17313a;color:#8ed9e8;}
 
 .local-machine-card {
   margin-bottom: 18px;

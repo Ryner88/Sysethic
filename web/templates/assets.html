@@ -34,7 +34,7 @@ function refreshAssets(){
     document.getElementById('assetScan').textContent = latest;
     data.assets.forEach(a=>{
       const tr=document.createElement('tr');
-      tr.innerHTML=`<td>${a.name}</td><td>${a.ip}</td><td>${a.health}</td><td>${a.active_processes}</td><td>${a.vuln_scan}</td>`;
+      tr.innerHTML=`<td>${a.name}</td><td>${a.ip}</td><td>${SysEthicVocabulary.severityBadge(a.health)}</td><td>${a.active_processes}</td><td>${a.vuln_scan}</td>`;
       tbody.appendChild(tr);
     });
   });

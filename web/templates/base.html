@@ -61,6 +61,8 @@
   </div>
   <div class="toast-container" id="toastContainer"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>window.SYSETHIC_VOCABULARY = {{ severity_status_vocabulary|tojson }};</script>
+  <script src="{{ url_for('static', filename='vocabulary.js') }}"></script>
   <script>
   // Global status update
   function updateStatus(connected) {
@@ -75,7 +77,8 @@
   function showToast(severity, title, message, actionText, actionCallback) {
     const container = document.getElementById('toastContainer');
     const toast = document.createElement('div');
-    toast.className = `toast ${severity}`;
+    const severityValue = SysEthicVocabulary.normalizeSeverity(severity);
+    toast.className = `toast ${SysEthicVocabulary.severity(severityValue).css_class}`;
     toast.id = `toast-${toastId++}`;
     toast.innerHTML = `
       <div class="toast-content">
@@ -98,12 +101,13 @@
   const eventSource = new EventSource('/api/notifications');
   eventSource.onmessage = function(event) {
     const data = JSON.parse(event.data);
-    if (data.type === 'anomaly' && (data.severity === 'critical' || data.severity === 'high')) {
-      const title = `${data.severity.toUpperCase()} Anomaly Detected`;
+    const severity = SysEthicVocabulary.severity(data.severity);
+    if (data.type === 'anomaly' && (severity.value === 'critical' || severity.value === 'high')) {
+      const title = `${severity.label} Anomaly Detected`;
       const message = `${data.metric.replace('_', ' ').toUpperCase()}: ${data.value.toFixed(2)}%`;
       const actionText = 'Investigate';
       const actionCallback = `window.location.href='/analytics'`;
-      showToast(data.severity, title, message, actionText, actionCallback);
+      showToast(severity.value, title, message, actionText, actionCallback);
     }
   };
   eventSource.onerror = function() {

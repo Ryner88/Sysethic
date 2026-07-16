@@ -38,7 +38,7 @@
       <input type="datetime-local" id="filterEnd" class="btn" style="width:48%;margin:2px;" />
       <button id="applyFilterBtn" class="btn" style="width:100%; margin-top:10px;">Apply Filter</button>
       <div class="label" style="margin-top:12px;">Severity</div>
-      <select id="filterSeverity" class="btn" style="width:100%; margin-top:6px;"><option value="all">All</option><option value="critical">Critical</option><option value="high">High</option></select>
+      <select id="filterSeverity" class="btn" style="width:100%; margin-top:6px;"><option value="all">All</option><option value="info">Info</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select>
     </div>
   </section>
 
@@ -64,7 +64,7 @@
           <label>Metric<select id="newMetric" class="btn"><option value="cpu_percent">CPU %</option><option value="memory_percent">Memory %</option></select></label>
           <label>Operator<select id="newOp" class="btn"><option value=">">&gt;</option><option value=">=">&gt;=</option><option value="<">&lt;</option><option value="<=">&lt;=</option></select></label>
           <label>Threshold<input id="newThreshold" type="number" class="btn" value="90"/></label>
-          <label>Severity<select id="newSeverity" class="btn"><option value="high">High</option><option value="critical">Critical</option></select></label>
+          <label>Severity<select id="newSeverity" class="btn"><option value="info">Info</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
           <label style="display:block;margin-top:8px;"><input type="checkbox" id="newInApp" checked/> In-App alert</label>
           <label><input type="checkbox" id="newEmail"/> Email alert</label>
           <button id="addRuleBtn" class="btn">Add Rule</button>
@@ -94,6 +94,7 @@ const state = {
   anomalies: [],
   feed: []
 };
+const Vocabulary = SysEthicVocabulary;
 
 const timelineCtx = document.getElementById('timelineChart').getContext('2d');
 const timelineChart = new Chart(timelineCtx, {
@@ -117,16 +118,16 @@ function fetchAnomalies() {
 function renderAnomalies(data) {
   state.anomalies = data.anomalies;
   document.getElementById('openAnomalies').textContent = data.anomalies.length;
-  document.getElementById('criticalAlerts').textContent = data.anomalies.filter(a=>a.severity==='critical').length;
-  document.getElementById('highAlerts').textContent = data.anomalies.filter(a=>a.severity==='high').length;
+  document.getElementById('criticalAlerts').textContent = data.anomalies.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='critical').length;
+  document.getElementById('highAlerts').textContent = data.anomalies.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='high').length;
 
   const rows = data.anomalies.slice(0, 20).map(a => `
     <tr>
       <td>${new Date(a.timestamp).toLocaleString()}</td>
       <td>${a.metric}</td>
       <td>${a.value.toFixed(2)}</td>
-      <td><span class="badge" style="color:${a.severity==='critical'?'#ff4d4d':'#ffc107'}">${a.severity}</span></td>
-      <td><span class="risk ${riskClass(a.risk_score)}">${a.risk_score}</span></td>
+      <td>${Vocabulary.severityBadge(a.severity)}</td>
+      <td><span class="risk ${Vocabulary.risk(a.risk_score).css_class}">${a.risk_score} ${Vocabulary.risk(a.risk_score).label}</span></td>
       <td>${a.indicator_type}: ${a.indicator}<br><span class="label">${a.threat_intel.matched ? a.threat_intel.source : 'no match'}</span></td>
       <td>${(a.frameworks || []).slice(0, 3).map(f=>`<span class="badge">${f}</span>`).join('')}</td>
       <td>
@@ -141,21 +142,15 @@ function renderAnomalies(data) {
   timelineChart.data.datasets[0].data = timelineData;
   timelineChart.update();
 
-  appendFeed(data.anomalies.slice(0, 5).map(a=>`${new Date(a.timestamp).toLocaleTimeString()} ${a.severity.toUpperCase()} ${a.metric}=${a.value.toFixed(2)}`));
-}
-
-function riskClass(score){
-  if (score >= 80) return 'critical';
-  if (score >= 55) return 'high';
-  return 'medium';
+  appendFeed(data.anomalies.slice(0, 5).map(a=>`${new Date(a.timestamp).toLocaleTimeString()} ${Vocabulary.severity(a.severity).label} ${a.metric}=${a.value.toFixed(2)}`));
 }
 
 function renderHeatmap(data) {
-  const severities = ['critical', 'high', 'medium', 'low'];
+  const severities = ['critical', 'high', 'medium', 'low', 'info'];
   const max = Math.max(1, ...data.buckets.flatMap(b => severities.map(s => b[s] || 0)));
   const html = severities.map(sev => `
     <div class="heatmap-row">
-      <div class="heatmap-label">${sev}</div>
+      <div class="heatmap-label">${Vocabulary.severity(sev).label}</div>
       ${data.buckets.map(b => {
         const count = b[sev] || 0;
         const level = Math.ceil((count / max) * 5);
@@ -182,7 +177,7 @@ function fetchRules(){
     document.getElementById('activeRules').textContent = res.rules.filter(r=>r.enabled).length;
     res.rules.forEach(r=> {
       const row = document.createElement('div');
-      row.innerHTML = `<div>${r.metric} ${r.operator} ${r.threshold} (${r.severity}) <button class="btn" data-id="${r.id}" style="font-size:11px;padding:3px 6px;">Delete</button></div>`;
+      row.innerHTML = `<div>${r.metric} ${r.operator} ${r.threshold} ${Vocabulary.severityBadge(r.severity)} <button class="btn" data-id="${r.id}" style="font-size:11px;padding:3px 6px;">Delete</button></div>`;
       row.querySelector('button').onclick = e => {
         fetch('/api/anomaly_rules', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'delete',id:r.id})})
           .then(_=>fetchRules())
@@ -193,7 +188,7 @@ function fetchRules(){
 }
 
 function exportCSV(){
-  const rows = [ ['timestamp','metric','value','severity','category'] ].concat(state.anomalies.map(a=>[a.timestamp,a.metric,a.value,a.severity,a.category]));
+  const rows = [ ['timestamp','metric','value','severity','category'] ].concat(state.anomalies.map(a=>[a.timestamp,a.metric,a.value,Vocabulary.severity(a.severity).label,a.category]));
   const blob = new Blob([rows.map(r=>r.join(',')).join('\n')], {type:'text/csv'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download='anomalies.csv'; a.click();
@@ -207,7 +202,7 @@ function exportPDF(){
   doc.setFontSize(12);
   doc.text('Anomalies report', 14, 14);
   state.anomalies.slice(0, 25).forEach((a,i)=> {
-    doc.text(`${a.timestamp} ${a.metric}=${a.value.toFixed(2)} ${a.severity}`, 14, 24 + i*6);
+    doc.text(`${a.timestamp} ${a.metric}=${a.value.toFixed(2)} ${Vocabulary.severity(a.severity).label}`, 14, 24 + i*6);
   });
   doc.save('anomalies.pdf');
 }
@@ -231,7 +226,7 @@ function respond(id) {
         <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);">
           <div class="stat-card"><div class="stat-label">PLAYBOOK</div><div class="stat-value" style="font-size:1.2rem;">${data.run.name}</div></div>
           <div class="stat-card"><div class="stat-label">ACTION</div><div class="stat-value" style="font-size:1.2rem;">${data.run.action}</div></div>
-          <div class="stat-card"><div class="stat-label">STATUS</div><div class="stat-value" style="font-size:1.2rem;">${data.run.status}</div></div>
+          <div class="stat-card"><div class="stat-label">STATUS</div><div class="stat-value" style="font-size:1.2rem;">${Vocabulary.statusBadge(data.run.status)}</div></div>
         </div>
         <pre class="yaml-view">${data.run.yaml || 'No YAML steps defined.'}</pre>`;
     }

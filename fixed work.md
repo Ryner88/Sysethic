@@ -66,3 +66,22 @@ venv/bin/python -m unittest discover -s tests
 ```
 
 Result: Ran 14 tests in 60.559s - OK
+
+### 6. Standardize Severity, Status, and Risk Labels — Complete
+
+Implemented shared severity, status, and risk vocabulary across API payloads, UI badges, reports, legacy data backfill, and frontend helpers. Added `/api/vocabulary`, stable lowercase API values, human-readable labels, consistent CSS classes, and manual Phase 2 verification evidence.
+
+Acceptance verified:
+
+- Dashboard, Security, Anomalies, Reports, and Incident views use shared labels and badge classes.
+- API payloads use stable lowercase values for severity and status.
+- Reports use the same severity and status vocabulary as the app.
+- Manual tests cover audit logging, incident workflow, and vocabulary standardization.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```
+
+Result: Ran 21 tests in 105.451s - OK

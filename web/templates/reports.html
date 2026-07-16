@@ -34,11 +34,16 @@
       <table class="table" id="reportAnomalies"><thead><tr><th>Time</th><th>Severity</th><th>Risk</th><th>Controls</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
+  <section class="card" style="margin-top:14px;">
+    <div class="label">Incident Status</div>
+    <table class="table" id="reportIncidents"><thead><tr><th>Updated</th><th>Incident</th><th>Severity</th><th>Status</th></tr></thead><tbody></tbody></table>
+  </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+const Vocabulary = SysEthicVocabulary;
 fetch('/api/reports/summary').then(r=>r.json()).then(data => {
   document.getElementById('anomalyCount').textContent = data.anomaly_count;
   document.getElementById('criticalCount').textContent = data.critical_count;
@@ -47,7 +52,9 @@ fetch('/api/reports/summary').then(r=>r.json()).then(data => {
   document.querySelector('#frameworkTable tbody').innerHTML = Object.entries(data.frameworks)
     .map(([name, controls]) => `<tr><td>${name}</td><td>${controls.map(c=>`<span class="badge">${c}</span>`).join('')}</td></tr>`).join('');
   document.querySelector('#reportAnomalies tbody').innerHTML = data.anomalies.slice(0, 12)
-    .map(a => `<tr><td>${new Date(a.timestamp).toLocaleString()}</td><td>${a.severity}</td><td><span class="risk ${a.risk_score >= 80 ? 'critical' : 'high'}">${a.risk_score}</span></td><td>${a.frameworks.slice(0,3).join(', ')}</td></tr>`).join('');
+    .map(a => `<tr><td>${new Date(a.timestamp).toLocaleString()}</td><td>${Vocabulary.severityBadge(a.severity)}</td><td><span class="risk ${Vocabulary.risk(a.risk_score).css_class}">${a.risk_score} ${Vocabulary.risk(a.risk_score).label}</span></td><td>${a.frameworks.slice(0,3).join(', ')}</td></tr>`).join('');
+  document.querySelector('#reportIncidents tbody').innerHTML = (data.incidents || []).slice(0, 12)
+    .map(i => `<tr><td>${new Date(i.updated_at).toLocaleString()}</td><td>${i.id}</td><td>${Vocabulary.severityBadge(i.severity)}</td><td>${Vocabulary.statusBadge(i.status)}</td></tr>`).join('');
 });
 </script>
 {% endblock %}

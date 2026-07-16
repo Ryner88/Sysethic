@@ -50,11 +50,7 @@
 <script>
 function badgeClass(type, val) {
   if(type==='severity') {
-    val = (val||'').toLowerCase();
-    if(val==='critical') return 'audit-badge denied';
-    if(val==='warning') return 'audit-badge flagged';
-    if(val==='info') return 'audit-badge allowed';
-    return 'audit-badge';
+    return `vocabulary-badge ${SysEthicVocabulary.severity(val).css_class}`;
   }
   if(type==='outcome') {
     val = (val||'').toLowerCase();
@@ -72,7 +68,7 @@ function renderLogRow(r) {
     <td style="font-family:var(--font-mono);font-size:13px;">${r.time||r.timestamp||''}</td>
     <td style="font-weight:700;">${r.action||r.event||''}</td>
     <td><span class="${badgeClass('role',r.role)}">${r.role||''}</span></td>
-    <td><span class="${badgeClass('severity',r.severity)}">${r.severity||''}</span></td>
+    <td>${SysEthicVocabulary.severityBadge(r.severity)}</td>
     <td><span class="${badgeClass('outcome',r.outcome)}">${r.outcome||''}</span></td>
     <td style="font-family:var(--font-mono);font-size:13px;">${r.resource||''}</td>
     <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.details||''}</td>
@@ -103,7 +99,7 @@ async function loadAuditLogs() {
 
   // Filters
   const roles = Array.from(new Set(logs.map(l=>l.role||'Unknown')));
-  const severities = Array.from(new Set(logs.map(l=>l.severity||'Unknown')));
+  const severities = Array.from(new Set(logs.map(l=>SysEthicVocabulary.normalizeSeverity(l.severity))));
   const outcomes = Array.from(new Set(logs.map(l=>l.outcome||'Unknown')));
   const roleSel = document.getElementById('roleFilter');
   const sevSel = document.getElementById('severityFilter');
@@ -112,7 +108,7 @@ async function loadAuditLogs() {
     roleSel.innerHTML = '<option value="">All Roles</option>' + roles.map(r=>`<option value="${r}">${r}</option>`).join('');
   }
   if(sevSel.options.length===0) {
-    sevSel.innerHTML = '<option value="">All Severity</option>' + severities.map(s=>`<option value="${s}">${s}</option>`).join('');
+    sevSel.innerHTML = '<option value="">All Severity</option>' + severities.map(s=>`<option value="${s}">${SysEthicVocabulary.severity(s).label}</option>`).join('');
   }
   if(outSel.options.length===0) {
     outSel.innerHTML = '<option value="">All Outcomes</option>' + outcomes.map(o=>`<option value="${o}">${o}</option>`).join('');
@@ -120,7 +116,7 @@ async function loadAuditLogs() {
 
   // Filtering
   const rf = roleSel.value, sf = sevSel.value, of = outSel.value;
-  const filtered = logs.filter(l => (!rf||l.role===rf) && (!sf||l.severity===sf) && (!of||l.outcome===of));
+  const filtered = logs.filter(l => (!rf||l.role===rf) && (!sf||SysEthicVocabulary.normalizeSeverity(l.severity)===sf) && (!of||l.outcome===of));
 
   // Table
   document.getElementById('logsTable').querySelector('tbody').innerHTML = filtered.map(renderLogRow).join('');

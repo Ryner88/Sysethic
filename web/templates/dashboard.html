@@ -222,10 +222,10 @@
         alertSeverityChart = new Chart(alertSeverityCtx, {
           type: 'doughnut',
           data: {
-            labels: ['High', 'Critical', 'Medium', 'Low'],
+            labels: ['Critical', 'High', 'Medium', 'Low', 'Info'],
             datasets: [{
-              data: [0, 0, 0, 0],
-              backgroundColor: ['#00e0c6', '#ff4444', '#ffb300', '#7c5fff'],
+              data: [0, 0, 0, 0, 0],
+              backgroundColor: ['#ff4444', '#ff8a3d', '#ffb300', '#31d07d', '#4aa8bf'],
               borderWidth: 0
             }]
           },
@@ -513,24 +513,27 @@
 
     function drawSecurityAlerts(data){
       const alerts = data.alerts || [];
+      const Vocabulary = SysEthicVocabulary;
       const counts = {
-        high: alerts.filter(a=>String(a.severity).toLowerCase()==='high').length,
-        critical: alerts.filter(a=>String(a.severity).toLowerCase()==='critical').length,
-        medium: alerts.filter(a=>String(a.severity).toLowerCase()==='medium').length,
-        low: alerts.filter(a=>String(a.severity).toLowerCase()==='low').length
+        critical: alerts.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='critical').length,
+        high: alerts.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='high').length,
+        medium: alerts.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='medium').length,
+        low: alerts.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='low').length,
+        info: alerts.filter(a=>Vocabulary.normalizeSeverity(a.severity)==='info').length
       };
-      $('openAlerts').textContent = alerts.filter(a=>a.status==='open').length;
+      $('openAlerts').textContent = alerts.filter(a=>Vocabulary.normalizeStatus(a.status)==='open').length;
       $('severityLegend').innerHTML = `
-        <span class="legend-dot high"></span> High (${counts.high})
         <span class="legend-dot critical"></span> Critical (${counts.critical})
+        <span class="legend-dot high"></span> High (${counts.high})
         <span class="legend-dot medium"></span> Medium (${counts.medium})
-        <span class="legend-dot low"></span> Low (${counts.low})`;
+        <span class="legend-dot low"></span> Low (${counts.low})
+        <span class="legend-dot info"></span> Info (${counts.info})`;
       if (alertSeverityChart) {
-        alertSeverityChart.data.datasets[0].data = [counts.high, counts.critical, counts.medium, counts.low];
+        alertSeverityChart.data.datasets[0].data = [counts.critical, counts.high, counts.medium, counts.low, counts.info];
         alertSeverityChart.update('none');
       }
       $('dashboardAlertList').innerHTML = '<div class="label">Recent Alerts</div>' + (
-        alerts.slice(0,5).map(a => `<div class="alert-item ${a.severity}"><span class="alert-badge ${a.severity}">${a.severity}</span>${a.event}<span class="alert-status ${a.status}">${a.status}</span></div>`).join('') ||
+        alerts.slice(0,5).map(a => `<div class="alert-item">${Vocabulary.severityBadge(a.severity)}${a.event}${Vocabulary.statusBadge(a.status)}</div>`).join('') ||
         '<div class="label">No telemetry alerts.</div>'
       );
     }

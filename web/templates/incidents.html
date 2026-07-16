@@ -22,12 +22,13 @@
 </div>
 <script>
 const CAN_ANALYST = {{ 'true' if can('analyst') else 'false' }};
+const Vocabulary = SysEthicVocabulary;
 async function loadIncidents(){
   const data = await fetch('/api/incidents').then(r=>r.json());
   const body = document.querySelector('#incidentTable tbody');
   body.innerHTML = (data.incidents || []).map(i => `
     <tr>
-      <td>${i.id}</td><td>${i.title}</td><td>${i.severity}</td><td>${i.status}</td><td>${i.owner || ''}</td><td>${i.updated_at}</td>
+      <td>${i.id}</td><td>${i.title}</td><td>${Vocabulary.severityBadge(i.severity)}</td><td>${Vocabulary.statusBadge(i.status)}</td><td>${i.owner || ''}</td><td>${i.updated_at}</td>
       <td><button class="btn btn-small" onclick="openIncident('${i.id}')">Open</button></td>
     </tr>
   `).join('');
@@ -53,7 +54,7 @@ async function openIncident(id){
     </div>
   ` : '';
   document.getElementById('incidentDetail').innerHTML = `
-    <div><strong>${data.incident.title}</strong> · ${data.incident.status}</div>
+    <div><strong>${data.incident.title}</strong> · ${Vocabulary.severityBadge(data.incident.severity)} ${Vocabulary.statusBadge(data.incident.status)}</div>
     ${controls}
     ${events || '<div class="label">No timeline events.</div>'}
   `;

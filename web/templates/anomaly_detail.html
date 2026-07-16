@@ -22,9 +22,10 @@
 {% block scripts %}
 <script>
 const anomalyId = {{ anomaly_id|tojson }};
+const Vocabulary = SysEthicVocabulary;
 fetch(`/api/anomalies/${anomalyId}`).then(r=>r.json()).then(data => {
   const a = data.anomaly;
-  document.getElementById('detailSubtitle').textContent = `${a.severity} ${a.metric} at ${new Date(a.timestamp).toLocaleString()}`;
+  document.getElementById('detailSubtitle').innerHTML = `${Vocabulary.severityBadge(a.severity)} ${a.metric} at ${new Date(a.timestamp).toLocaleString()}`;
   document.getElementById('detailStats').innerHTML = `
     <div class="stat-card"><div class="stat-label">VALUE</div><div class="stat-value">${a.value.toFixed(2)}</div></div>
     <div class="stat-card"><div class="stat-label">RISK SCORE</div><div class="stat-value">${a.risk_score}</div></div>

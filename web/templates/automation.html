@@ -37,7 +37,7 @@ function refreshAutomation(){
       <tr><td>${r.name}</td><td>${r.field} ${r.operator} ${r.value}</td><td>${r.action}</td><td>${r.enabled}</td>
       <td><button class="btn btn-small" onclick="deleteRule(${r.id})">Delete</button></td></tr>`).join('');
     document.getElementById('automationHistory').innerHTML = (data.history || []).slice().reverse().map(h => `
-      <div class="event-item"><strong>${h.action}</strong><span>${new Date(h.timestamp).toLocaleString()} · ${h.rule_name} · ${h.status}</span><small>${h.details}</small></div>`).join('') || '<div class="label">No automated actions yet.</div>';
+      <div class="event-item"><strong>${h.action}</strong><span>${new Date(h.timestamp).toLocaleString()} · ${h.rule_name} · ${SysEthicVocabulary.statusBadge(h.status)}</span><small>${h.details}</small></div>`).join('') || '<div class="label">No automated actions yet.</div>';
   });
 }
 function deleteRule(id){

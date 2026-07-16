@@ -258,7 +258,11 @@ Verification:
 venv/bin/python -m unittest discover -s tests
 ```
 
-Result: Ran 12 tests in 48.643s - OK
+Result: Ran 21 tests in 105.451s - OK
+
+Manual test:
+
+`manual-testing/audit-logging-manual-test.md`
 
 Why priority: audit history is required for trust, debugging, accountability, and incident review.
 
@@ -281,11 +285,40 @@ Verification:
 venv/bin/python -m unittest discover -s tests
 ```
 
-Result: Ran 14 tests in 60.559s - OK
+Result: Ran 21 tests in 105.451s - OK
+
+Manual test:
+
+`manual-testing/incident-workflow-manual-test.md`
 
 Why priority: users need an investigation workflow, not just charts and alerts.
 
-### 6. Standardize Severity, Status, and Risk Labels
+### 6. Standardize Severity, Status, and Risk Labels — Complete
+
+Implemented shared severity and status vocabularies for API payloads, UI badges, filtering, report output, and legacy data backfill. Added stable lowercase API values, human-readable labels, shared CSS classes, risk labels derived from risk scores, and a `/api/vocabulary` endpoint for frontend consistency.
+
+Acceptance verified:
+
+- Dashboard, Security, Anomalies, Reports, and Incident views use shared labels and badge classes.
+- API payloads use stable lowercase values for severity and status.
+- UI labels are human-readable and consistently colored.
+- Reports use the same severity and status vocabulary as the app.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```
+
+Result: Ran 21 tests in 132.224s - OK
+
+Manual test:
+
+`manual-testing/severity-status-risk-manual-test.md`
+
+Why priority: consistent language reduces operator mistakes and makes reporting clearer.
+
+Historical plan:
 
 Goal: make alerts, anomalies, incidents, and responses use the same language throughout the app.
 
@@ -312,8 +345,6 @@ Acceptance criteria:
 - API payloads use stable lowercase values.
 - UI labels are human-readable and consistently colored.
 - Reports use the same severity and status vocabulary as the app.
-
-Why priority: consistent language reduces operator mistakes and makes reporting clearer.
 
 ## Phase 3: Controlled Operations
 

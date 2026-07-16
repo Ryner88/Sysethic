@@ -64,7 +64,7 @@ function refreshPlaybooks(){
     runs.innerHTML = '';
     (data.runs || []).slice(-8).reverse().forEach(r=>{
       const d=document.createElement('div');
-      d.textContent = `${r.timestamp} ${r.name} -> ${r.action} (${r.status})`;
+      d.innerHTML = `${r.timestamp} ${r.name} -> ${r.action} ${SysEthicVocabulary.statusBadge(r.status)}`;
       runs.appendChild(d);
     });
   });

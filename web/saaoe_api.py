@@ -135,9 +135,24 @@ FILES_ACCESS_CACHE_TTL_SECONDS = CONFIG.files_access_cache_ttl_seconds
 _files_access_cache = {'timestamp': 0.0, 'payload': None}
 _threat_intel_cache = {'mtime': None, 'data': None}
 
-SEVERITIES = {'info', 'low', 'medium', 'high', 'critical'}
-STATUSES = {'open', 'investigating', 'waiting_for_approval', 'resolved', 'dismissed', 'failed'}
-INCIDENT_STATUSES = {'open', 'investigating', 'waiting_for_approval', 'resolved', 'dismissed'}
+SEVERITY_VOCABULARY = {
+    'info': {'label': 'Info', 'css_class': 'severity-info', 'aliases': {'info', 'informational', 'ok', 'success', 'pass'}},
+    'low': {'label': 'Low', 'css_class': 'severity-low', 'aliases': {'low', 'minor'}},
+    'medium': {'label': 'Medium', 'css_class': 'severity-medium', 'aliases': {'medium', 'moderate', 'warning', 'warn', 'alert'}},
+    'high': {'label': 'High', 'css_class': 'severity-high', 'aliases': {'high', 'major', 'error', 'danger'}},
+    'critical': {'label': 'Critical', 'css_class': 'severity-critical', 'aliases': {'critical', 'severe', 'fatal'}},
+}
+STATUS_VOCABULARY = {
+    'open': {'label': 'Open', 'css_class': 'status-open', 'aliases': {'open', 'new', 'active', 'triggered', 'pending', 'ready', 'manual_triggered', 'created'}},
+    'investigating': {'label': 'Investigating', 'css_class': 'status-investigating', 'aliases': {'investigating', 'in_progress', 'review', 'reviewing'}},
+    'waiting_for_approval': {'label': 'Waiting for Approval', 'css_class': 'status-waiting-for-approval', 'aliases': {'waiting_for_approval', 'approval', 'pending_approval', 'needs_approval', 'approved'}},
+    'resolved': {'label': 'Resolved', 'css_class': 'status-resolved', 'aliases': {'resolved', 'closed', 'complete', 'completed', 'success', 'executed', 'executed_dry_run', 'incident_created'}},
+    'dismissed': {'label': 'Dismissed', 'css_class': 'status-dismissed', 'aliases': {'dismissed', 'ignored', 'false_positive', 'suppressed', 'rejected'}},
+    'failed': {'label': 'Failed', 'css_class': 'status-failed', 'aliases': {'failed', 'error', 'failure', 'expired'}},
+}
+SEVERITIES = set(SEVERITY_VOCABULARY)
+STATUSES = set(STATUS_VOCABULARY)
+INCIDENT_STATUSES = STATUSES
 RESPONSE_ACTIONS = {'kill_process', 'quarantine_file', 'block_ip', 'create_incident_report'}
 QUARANTINE_DIR = str(CONFIG.quarantine_dir)
 TERMINAL_OUTPUT_LIMIT = CONFIG.terminal_output_limit
@@ -465,6 +480,7 @@ def init_db():
         conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE file_classifications SET path = 'org:' || organization_id || ':' || path WHERE path NOT LIKE 'org:%'")
         conn.execute("UPDATE app_configuration SET key = 'org:' || organization_id || ':' || key WHERE key NOT LIKE 'org:%'")
+        _backfill_vocabulary(conn)
         conn.commit()
     finally:
         conn.close()
@@ -474,6 +490,30 @@ def _ensure_column(conn, table, column, definition):
     columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _backfill_vocabulary(conn):
+    for row in conn.execute("SELECT id, severity FROM anomalies").fetchall():
+        normalized = normalize_severity(row[1], default='info')
+        if row[1] != normalized:
+            conn.execute("UPDATE anomalies SET severity = ? WHERE id = ?", (normalized, row[0]))
+    for row in conn.execute("SELECT id, severity FROM anomaly_rules").fetchall():
+        normalized = normalize_severity(row[1], default='info')
+        if row[1] != normalized:
+            conn.execute("UPDATE anomaly_rules SET severity = ? WHERE id = ?", (normalized, row[0]))
+    for row in conn.execute("SELECT id, severity, status FROM incidents").fetchall():
+        normalized_severity = normalize_severity(row[1], default='info')
+        normalized_status = normalize_status(row[2], default='open')
+        if row[1] != normalized_severity or row[2] != normalized_status:
+            conn.execute(
+                "UPDATE incidents SET severity = ?, status = ? WHERE id = ?",
+                (normalized_severity, normalized_status, row[0])
+            )
+    for table in ('playbook_runs', 'automation_history', 'validation_events'):
+        for row in conn.execute(f"SELECT id, status FROM {table}").fetchall():
+            normalized = normalize_status(row[1], default='open')
+            if row[1] != normalized:
+                conn.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (normalized, row[0]))
 
 
 def _table_count(name):
@@ -537,6 +577,8 @@ def _json_loads(value, default):
 
 
 def _anomaly_from_row(row):
+    severity = normalize_severity(row.get('severity'), default='info')
+    risk_level = risk_severity(row.get('risk_score') or 0)
     return {
         'id': row['id'],
         'organization_id': row.get('organization_id'),
@@ -544,7 +586,9 @@ def _anomaly_from_row(row):
         'metric': row['metric'],
         'value': row['value'],
         'threshold': row['threshold'],
-        'severity': row['severity'],
+        'severity': severity,
+        'severity_label': severity_label(severity),
+        'severity_class': severity_class(severity),
         'category': row['category'],
         'confidence': row.get('confidence') or 0,
         'rule_name': row.get('rule_name'),
@@ -552,6 +596,9 @@ def _anomaly_from_row(row):
         'indicator': row.get('indicator'),
         'threat_intel': _json_loads(row.get('threat_intel'), {}),
         'risk_score': row.get('risk_score') or 0,
+        'risk_level': risk_level,
+        'risk_label': severity_label(risk_level),
+        'risk_class': severity_class(risk_level),
         'frameworks': _json_loads(row.get('frameworks'), []),
         'validation': bool(row.get('validation')),
     }
@@ -561,6 +608,7 @@ def _persist_anomaly(anomaly, organization_id=None):
     now = datetime.now().isoformat()
     organization_id = organization_id if organization_id is not None else anomaly.get('organization_id')
     anomaly['organization_id'] = organization_id
+    anomaly['severity'] = normalize_severity(anomaly.get('severity'), default='info')
     if 'id' not in anomaly:
         _decorate_threat_intel(anomaly)
     if 'risk_score' not in anomaly:
@@ -597,7 +645,7 @@ def _persist_anomaly(anomaly, organization_id=None):
         (
             anomaly['id'], organization_id, anomaly['timestamp'], anomaly['metric'],
             float(anomaly.get('value', 0)), float(anomaly.get('threshold', 0)),
-            normalize_severity(anomaly.get('severity')), anomaly.get('category') or 'system',
+            anomaly['severity'], anomaly.get('category') or 'system',
             float(anomaly.get('confidence', 0)), anomaly.get('rule_name'),
             anomaly.get('indicator_type'), anomaly.get('indicator'),
             _json_dumps(anomaly.get('threat_intel')), int(anomaly.get('risk_score', 0)),
@@ -628,7 +676,7 @@ def _stored_anomalies(start=None, end=None, severity=None, organization_id=None,
         params.append(end)
     if severity:
         where.append("severity = ?")
-        params.append(severity)
+        params.append(normalize_severity(severity, default='info'))
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     params.append(limit)
     return [
@@ -671,7 +719,13 @@ def _playbook_runs_from_db(organization_id=None, playbook_ids=None, limit=100):
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     params.append(limit)
     rows = _db_query(f"SELECT * FROM playbook_runs {where_sql} ORDER BY id DESC LIMIT ?", tuple(params))
-    return list(reversed(rows))
+    normalized = []
+    for row in rows:
+        row['status'] = normalize_status(row.get('status'), default='open')
+        row['status_label'] = status_label(row['status'])
+        row['status_class'] = status_class(row['status'])
+        normalized.append(row)
+    return list(reversed(normalized))
 
 
 def _automation_rules_from_db():
@@ -686,13 +740,30 @@ def _automation_rules_from_db():
     } for row in _db_query("SELECT * FROM automation_rules ORDER BY id")]
 
 
+def _status_record(row, field='status', default='open'):
+    record = dict(row)
+    record[field] = normalize_status(row.get(field), default=default)
+    record[f'{field}_label'] = status_label(record[field], default=default)
+    record[f'{field}_class'] = status_class(record[field], default=default)
+    return record
+
+
+def _automation_history_from_db(limit=100):
+    return [
+        _status_record(row)
+        for row in _db_query("SELECT * FROM automation_history ORDER BY id DESC LIMIT ?", (limit,))
+    ]
+
+
 def _anomaly_rules_from_db():
     return [{
         'id': row['id'],
         'metric': row['metric'],
         'operator': row['operator'],
         'threshold': row['threshold'],
-        'severity': row['severity'],
+        'severity': normalize_severity(row['severity'], default='info'),
+        'severity_label': severity_label(row['severity']),
+        'severity_class': severity_class(row['severity']),
         'enabled': _bool_row(row, 'enabled'),
         'alert_in_app': _bool_row(row, 'alert_in_app'),
         'alert_email': _bool_row(row, 'alert_email'),
@@ -705,12 +776,13 @@ def load_persistent_state():
 
     anomaly_rules = []
     for row in _db_query("SELECT * FROM anomaly_rules ORDER BY id"):
+        severity = normalize_severity(row['severity'], default='info')
         anomaly_rules.append({
             'id': row['id'],
             'metric': row['metric'],
             'operator': row['operator'],
             'threshold': row['threshold'],
-            'severity': row['severity'],
+            'severity': severity,
             'enabled': _bool_row(row, 'enabled'),
             'alert_in_app': _bool_row(row, 'alert_in_app'),
             'alert_email': _bool_row(row, 'alert_email'),
@@ -737,6 +809,7 @@ def load_persistent_state():
 
     playbook_runs = []
     for row in _db_query("SELECT * FROM playbook_runs ORDER BY id DESC LIMIT 100"):
+        run_status = normalize_status(row['status'], default='open')
         playbook_runs.append({
             'id': row['id'],
             'organization_id': row.get('organization_id'),
@@ -750,7 +823,9 @@ def load_persistent_state():
             'target': row['target'],
             'timestamp': row['timestamp'],
             'auto': _bool_row(row, 'auto'),
-            'status': row['status'],
+            'status': run_status,
+            'status_label': status_label(run_status),
+            'status_class': status_class(run_status),
             'yaml': row['yaml'],
         })
     playbook_runs = list(reversed(playbook_runs))
@@ -768,7 +843,7 @@ def load_persistent_state():
         })
     next_automation_rule_id = (max([r['id'] for r in automation_rules]) + 1) if automation_rules else 1
 
-    automation_history = _db_query("SELECT * FROM automation_history ORDER BY id DESC LIMIT 100")
+    automation_history = _automation_history_from_db()
     automation_history = list(reversed(automation_history))
 
 
@@ -932,18 +1007,69 @@ def audit_event(
     )
 
 
-def normalize_severity(value, default='medium'):
-    value = str(value or default).lower().replace('-', '_').replace(' ', '_')
-    return value if value in SEVERITIES else default
+def normalize_severity(value, default='info'):
+    key = str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+    for canonical, config in SEVERITY_VOCABULARY.items():
+        if key in config['aliases']:
+            return canonical
+    return default if default in SEVERITIES else 'info'
 
 
 def normalize_status(value, default='open'):
-    value = str(value or default).lower().replace('-', '_').replace(' ', '_')
-    return value if value in INCIDENT_STATUSES else default
+    key = str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+    for canonical, config in STATUS_VOCABULARY.items():
+        if key in config['aliases']:
+            return canonical
+    return default if default in STATUSES else 'open'
+
+
+def severity_label(value):
+    return SEVERITY_VOCABULARY[normalize_severity(value, default='info')]['label']
+
+
+def severity_class(value):
+    return SEVERITY_VOCABULARY[normalize_severity(value, default='info')]['css_class']
+
+
+def risk_severity(score):
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return 'info'
+    if score >= 80:
+        return 'critical'
+    if score >= 55:
+        return 'high'
+    if score >= 30:
+        return 'medium'
+    if score > 0:
+        return 'low'
+    return 'info'
+
+
+def status_label(value, default='open'):
+    return STATUS_VOCABULARY[normalize_status(value, default=default)]['label']
+
+
+def status_class(value, default='open'):
+    return STATUS_VOCABULARY[normalize_status(value, default=default)]['css_class']
+
+
+def vocabulary_payload():
+    def serialize(vocabulary):
+        return {
+            key: {
+                'label': config['label'],
+                'css_class': config['css_class'],
+                'aliases': sorted(config['aliases']),
+            }
+            for key, config in vocabulary.items()
+        }
+    return {'severities': serialize(SEVERITY_VOCABULARY), 'statuses': serialize(STATUS_VOCABULARY)}
 
 
 def _incident_status_label(status):
-    return str(status or '').replace('_', ' ').title()
+    return status_label(status)
 
 
 def _incident_linked_anomalies(row):
@@ -956,10 +1082,15 @@ def _incident_linked_anomalies(row):
 def _incident_from_row(row):
     linked = _incident_linked_anomalies(row)
     incident = dict(row)
+    incident['severity'] = normalize_severity(row.get('severity'), default='info')
+    incident['status'] = normalize_status(row.get('status'), default='open')
     incident['incident_id'] = row['id']
     incident['assignee'] = row.get('owner')
     incident['linked_anomalies'] = linked
-    incident['status_label'] = _incident_status_label(row.get('status'))
+    incident['severity_label'] = severity_label(incident['severity'])
+    incident['severity_class'] = severity_class(incident['severity'])
+    incident['status_label'] = _incident_status_label(incident['status'])
+    incident['status_class'] = status_class(incident['status'])
     return incident
 
 
@@ -1018,7 +1149,7 @@ def _incident_timeline(incident):
     for anomaly in _incident_anomalies(incident):
         entries.append(_timeline_entry(
             anomaly['timestamp'], 'system', 'linked_anomaly',
-            f"{anomaly['severity']} {anomaly['metric']} anomaly", 'anomalies',
+            f"{severity_label(anomaly['severity'])} {anomaly['metric']} anomaly", 'anomalies',
             anomaly_id=anomaly['id']
         ))
 
@@ -1030,7 +1161,7 @@ def _incident_timeline(incident):
         ):
             entries.append(_timeline_entry(
                 run['timestamp'], 'system', 'playbook_run',
-                f"{run['name']} {run['status']}", 'playbook_runs',
+                f"{run['name']} {status_label(run['status'])}", 'playbook_runs',
                 playbook_id=run['playbook_id'], run_id=run['id'], anomaly_id=run['anomaly_id']
             ))
 
@@ -1104,10 +1235,10 @@ def _incident_detail_payload(incident):
             (incident['id'], incident.get('organization_id'), 'note_added')
         )
     ]
-    approvals = _db_query(
+    approvals = [_response_approval_from_row(row) for row in _db_query(
         "SELECT * FROM response_approvals WHERE incident_id = ? AND organization_id = ? ORDER BY created_at DESC",
         (incident['id'], incident.get('organization_id'))
-    )
+    )]
     return {
         'incident': _incident_from_row(incident),
         'anomalies': _incident_anomalies(incident),
@@ -1158,7 +1289,7 @@ def create_incident_from_anomaly(anomaly, actor='system', organization_id=None):
     now = datetime.now().isoformat()
     incident_id = f"SA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     pb = _recommended_playbook(anomaly)
-    title = f"{normalize_severity(anomaly.get('severity')).title()} {anomaly.get('metric')} anomaly"
+    title = f"{severity_label(anomaly.get('severity'))} {anomaly.get('metric')} anomaly"
     _db_exec(
         "INSERT INTO incidents (id, organization_id, title, severity, status, owner, anomaly_id, linked_anomalies, recommended_playbook_id, created_at, updated_at, closed_at, resolution) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (incident_id, organization_id, title, normalize_severity(anomaly.get('severity')), 'open', None, anomaly['id'], _json_dumps([anomaly['id']]), pb['id'] if pb else None, now, now, None, None)
@@ -1206,6 +1337,15 @@ def _validation_anomalies(organization_id=None):
             'frameworks': ['NIST DE.CM-1', 'CIS 8.16'],
             'validation': True,
         }
+        risk_level = risk_severity(anomaly['risk_score'])
+        anomaly.update({
+            'severity': normalize_severity(anomaly['severity'], default='info'),
+            'severity_label': severity_label(anomaly['severity']),
+            'severity_class': severity_class(anomaly['severity']),
+            'risk_level': risk_level,
+            'risk_label': severity_label(risk_level),
+            'risk_class': severity_class(risk_level),
+        })
         anomalies.append(anomaly)
     return anomalies
 
@@ -1587,7 +1727,8 @@ def _load_anomalies(start=None, end=None, severity=None, apply_automation=True, 
             if normalize_severity(anomaly.get('severity')) in {'high', 'critical'}:
                 create_incident_from_anomaly(anomaly, organization_id=organization_id)
     if severity:
-        sorted_list = [a for a in sorted_list if a.get('severity') == severity]
+        requested_severity = normalize_severity(severity, default='info')
+        sorted_list = [a for a in sorted_list if a.get('severity') == requested_severity]
     return sorted_list[:200]
 
 
@@ -1619,7 +1760,7 @@ def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None,
         f"SELECT timestamp, actor, role, event_type, target, target_type, target_id, result, source, detail, details_json FROM audit_events {where_sql} ORDER BY id DESC LIMIT ?",
         tuple(params)
     ):
-        severity = 'warning' if row['result'] in {'denied', 'failed'} else 'info'
+        severity = 'medium' if row['result'] in {'denied', 'failed'} else 'info'
         detail = row.get('detail') or f"actor {row['actor']}"
         structured_details = _json_loads(row.get('details_json'), None)
         logs.append({
@@ -1637,6 +1778,8 @@ def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None,
             'structured_details': structured_details,
             'action': row['event_type'],
             'severity': severity,
+            'severity_label': severity_label(severity),
+            'severity_class': severity_class(severity),
             'outcome': row['result'],
             'resource': row['target'],
             'details': detail,
@@ -1654,8 +1797,8 @@ def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None,
         if end:
             df = df[df['timestamp'] <= pd.to_datetime(end)]
         for _, row in df.iterrows():
-            sev = 'warning' if row.get('cpu_percent', 0) > 70 else 'info'
-            outcome = 'flagged' if sev == 'warning' else 'allowed'
+            sev = 'medium' if row.get('cpu_percent', 0) > 70 else 'info'
+            outcome = 'flagged' if sev == 'medium' else 'allowed'
             detail = f"CPU {row.get('cpu_percent', 0):.1f}%, memory {row.get('memory_percent', 0):.1f}%"
             logs.append({
                 'timestamp': row['timestamp'].isoformat(),
@@ -1672,6 +1815,8 @@ def _audit_rows(limit=100, actor=None, event_type=None, result=None, start=None,
                 'structured_details': None,
                 'action': 'metric_sample',
                 'severity': sev,
+                'severity_label': severity_label(sev),
+                'severity_class': severity_class(sev),
                 'outcome': outcome,
                 'resource': 'host.telemetry',
                 'details': detail
@@ -1684,18 +1829,27 @@ def _report_summary():
     org_id = user.get('organization_id') if user else None
     anomalies = _load_anomalies(apply_automation=False, organization_id=org_id)
     audits = _audit_rows(organization_id=org_id)
+    incidents = [
+        _incident_from_row(row)
+        for row in _db_query(
+            "SELECT * FROM incidents WHERE organization_id = ? ORDER BY updated_at DESC LIMIT 100",
+            (org_id,)
+        )
+    ] if org_id is not None else []
     return {
         'generated_at': datetime.now().isoformat(),
         'anomaly_count': len(anomalies),
         'critical_count': len([a for a in anomalies if a['severity'] == 'critical']),
         'high_risk_count': len([a for a in anomalies if a['risk_score'] >= 75]),
         'audit_count': len(audits),
+        'incident_count': len(incidents),
         'frameworks': {
             'NIST': ['DE.CM-1', 'DE.AE-2', 'RS.MI-1'],
             'CIS': ['8.11', '8.16', '8.17']
         },
         'anomalies': anomalies[:50],
         'audits': audits[-50:],
+        'incidents': incidents[:50],
     }
 
 
@@ -1706,9 +1860,11 @@ def _csv_response(summary):
     writer.writerow([])
     writer.writerow(['type', 'timestamp', 'severity', 'metric_or_action', 'value_or_outcome', 'risk_score', 'frameworks'])
     for a in summary['anomalies']:
-        writer.writerow(['anomaly', a['timestamp'], a['severity'], a['metric'], f"{a['value']:.2f}", a['risk_score'], '; '.join(a['frameworks'])])
+        writer.writerow(['anomaly', a['timestamp'], severity_label(a['severity']), a['metric'], f"{a['value']:.2f}", a['risk_score'], '; '.join(a['frameworks'])])
     for log in summary['audits']:
-        writer.writerow(['audit', log['timestamp'], log['severity'], log['action'], log['outcome'], '', 'NIST AU; CIS 8'])
+        writer.writerow(['audit', log['timestamp'], severity_label(log['severity']), log['action'], log['outcome'], '', 'NIST AU; CIS 8'])
+    for incident in summary['incidents']:
+        writer.writerow(['incident', incident['updated_at'], severity_label(incident['severity']), incident['title'], status_label(incident['status']), '', 'NIST RS; CIS 17'])
     return Response(buf.getvalue(), mimetype='text/csv', headers={'Content-Disposition': 'attachment; filename=security-compliance-report.csv'})
 
 
@@ -1739,12 +1895,15 @@ def _pdf_response(summary):
         'SAAOE Security Compliance Report',
         f"Generated: {summary['generated_at']}",
         f"Anomalies: {summary['anomaly_count']}  Critical: {summary['critical_count']}  High Risk: {summary['high_risk_count']}",
+        f"Incidents: {summary['incident_count']}",
         'Framework Mapping: NIST DE.CM-1, DE.AE-2, RS.MI-1 | CIS 8.11, 8.16, 8.17',
         '',
         'Top Anomalies:',
     ]
     for a in summary['anomalies'][:28]:
-        lines.append(f"{a['timestamp'][:19]} {a['severity']} {a['metric']}={a['value']:.2f} risk={a['risk_score']} {','.join(a['frameworks'][:2])}")
+        lines.append(f"{a['timestamp'][:19]} {severity_label(a['severity'])} {a['metric']}={a['value']:.2f} risk={a['risk_score']} {','.join(a['frameworks'][:2])}")
+    for incident in summary['incidents'][:10]:
+        lines.append(f"{incident['updated_at'][:19]} {severity_label(incident['severity'])} {status_label(incident['status'])} {incident['id']}")
     return Response(_pdf_bytes(lines[:48]), mimetype='application/pdf', headers={'Content-Disposition': 'attachment; filename=security-compliance-report.pdf'})
 
 
@@ -1776,7 +1935,7 @@ def apply_automation_rules(anomalies):
                     'anomaly_id': anomaly['id'],
                     'action': rule['action'],
                     'timestamp': datetime.now().isoformat(),
-                    'status': 'executed',
+                    'status': 'resolved',
                     'details': f"{rule['field']} {rule['operator']} {rule['value']} matched {anomaly['metric']}"
                 }
                 cur = _db_exec(
@@ -1871,7 +2030,15 @@ def _approval_row(approval_id):
         )
     else:
         rows = _db_query("SELECT * FROM response_approvals WHERE id = ?", (approval_id,))
-    return rows[0] if rows else None
+    return _response_approval_from_row(rows[0]) if rows else None
+
+
+def _response_approval_from_row(row):
+    approval = dict(row)
+    approval['workflow_status'] = normalize_status(row.get('status'), default='open')
+    approval['status_label'] = status_label(approval['workflow_status'])
+    approval['status_class'] = status_class(approval['workflow_status'])
+    return approval
 
 
 def _approval_expired(approval, now=None):
@@ -2236,6 +2403,7 @@ def inject_auth_context():
         'admin_configured': active_admin_exists(),
         'can': can,
         'has_permission': has_permission,
+        'severity_status_vocabulary': vocabulary_payload(),
     }
 
 
@@ -2930,7 +3098,7 @@ def api_anomalies_heatmap():
         start = now - pd.Timedelta(hours=hour + 1)
         end = now - pd.Timedelta(hours=hour)
         label = end.strftime('%H:00')
-        row = {'hour': label, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        row = {'hour': label, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
         for anomaly in anomalies:
             ts = pd.to_datetime(anomaly['timestamp'])
             if start <= ts < end:
@@ -3119,10 +3287,10 @@ def api_validation_events():
     user = current_user()
     org_id = user.get('organization_id')
     if request.method == 'GET':
-        return jsonify(events=_db_query(
+        return jsonify(events=[_status_record(row) for row in _db_query(
             "SELECT * FROM validation_events WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100",
             (org_id,)
-        ))
+        )])
     if user['role'] == 'viewer':
         audit_event('access_denied', 'api_validation_events', 'denied', 'regular user cannot create validation events')
         return jsonify(error='workspace admin role required'), 403
@@ -3136,16 +3304,16 @@ def api_validation_events():
     now = datetime.now().isoformat()
     _db_exec(
         "INSERT INTO validation_events (id, organization_id, event_type, status, anomaly_id, incident_id, created_by, created_at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (event_id, org_id, event_type, 'created', anomaly_id, None, user['username'], now, payload.get('detail', 'controlled validation event'))
+        (event_id, org_id, event_type, 'open', anomaly_id, None, user['username'], now, payload.get('detail', 'controlled validation event'))
     )
     anomaly = next(a for a in _validation_anomalies(org_id) if a['id'] == anomaly_id)
     _persist_anomaly(anomaly, organization_id=org_id)
     audit_event('alert_generated', f"anomaly:{anomaly_id}", 'success', f"{event_type} severity={anomaly['severity']}", details={'event_type': event_type, 'severity': anomaly['severity'], 'risk_score': anomaly['risk_score']})
     incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
-    _db_exec("UPDATE validation_events SET incident_id = ?, status = ? WHERE id = ?", (incident['id'], 'incident_created', event_id))
+    _db_exec("UPDATE validation_events SET incident_id = ?, status = ? WHERE id = ?", (incident['id'], 'resolved', event_id))
     audit_event('validation_event_created', f"validation_event:{event_id}", 'success', event_type)
     notification_queue.put({'type': 'validation_event', 'event_type': event_type, 'anomaly_id': anomaly_id, 'incident_id': incident['id']})
-    return jsonify(success=True, event_id=event_id, anomaly=anomaly, incident=incident)
+    return jsonify(success=True, event_id=event_id, anomaly=anomaly, incident=_incident_from_row(incident))
 
 
 @app.route('/api/response_approvals', methods=['GET', 'POST'])
@@ -3153,10 +3321,10 @@ def api_response_approvals():
     user = current_user()
     org_id = user.get('organization_id')
     if request.method == 'GET':
-        return jsonify(approvals=_db_query(
+        return jsonify(approvals=[_response_approval_from_row(row) for row in _db_query(
             "SELECT * FROM response_approvals WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100",
             (org_id,)
-        ))
+        )])
     if user['role'] == 'viewer':
         audit_event('access_denied', 'api_response_approvals', 'denied', 'regular user cannot request approvals')
         return jsonify(error='workspace admin role required'), 403
@@ -3289,7 +3457,7 @@ def apply_playbooks(anomalies):
                     'target': pb['target'],
                     'timestamp': datetime.now().isoformat(),
                     'auto': pb.get('auto', False),
-                    'status': 'executed' if pb.get('auto') else 'ready',
+                    'status': 'resolved' if pb.get('auto') else 'open',
                     'yaml': pb.get('yaml', '')
                 }
                 cur = _db_exec(
@@ -3393,7 +3561,7 @@ def api_playbook_trigger():
         'target': pb['target'],
         'timestamp': datetime.now().isoformat(),
         'auto': False,
-        'status': 'manual_triggered',
+        'status': 'open',
         'anomaly_id': payload.get('anomaly_id'),
         'yaml': pb.get('yaml', '')
     }
@@ -3455,7 +3623,7 @@ def api_automation_rules():
     if request.method == 'GET':
         return jsonify(
             rules=_automation_rules_from_db(),
-            history=list(reversed(_db_query("SELECT * FROM automation_history ORDER BY id DESC LIMIT 100")))
+            history=_automation_history_from_db()
         )
     payload = request.json or {}
     if payload.get('action') == 'delete':
@@ -3523,7 +3691,7 @@ def api_anomaly_rules():
         'metric': payload.get('metric', 'cpu_percent'),
         'operator': payload.get('operator', '>'),
         'threshold': threshold,
-        'severity': payload.get('severity', 'high'),
+        'severity': normalize_severity(payload.get('severity', 'high'), default='info'),
         'enabled': bool(payload.get('enabled', True)),
         'alert_in_app': bool(payload.get('alert_in_app', True)),
         'alert_email': bool(payload.get('alert_email', False))
@@ -3578,13 +3746,18 @@ def api_audit_events():
 def api_audit():
     return api_audit_events()
 
+
+@app.route('/api/vocabulary')
+def api_vocabulary():
+    return jsonify(vocabulary_payload())
+
 @app.route('/api/audit_summary')
 def api_audit_summary():
     user = current_user()
     rows = _audit_rows(limit=200, organization_id=user.get('organization_id') if user else None)
-    warnings = len([r for r in rows if r['severity'] == 'warning'])
+    medium_count = len([r for r in rows if r['severity'] == 'medium'])
     denied = len([r for r in rows if r['outcome'] == 'denied'])
-    return jsonify(summary=f"{len(rows)} telemetry audit events, {warnings} warnings, {denied} denied outcomes")
+    return jsonify(summary=f"{len(rows)} telemetry audit events, {medium_count} Medium severity, {denied} denied outcomes")
 
 @app.route('/api/ai_alerts')
 def api_ai_alerts():
@@ -3599,14 +3772,20 @@ def api_ai_alerts():
 def api_security_alerts():
     alerts = []
     for anomaly in _load_anomalies(apply_automation=False)[:50]:
+        severity = normalize_severity(anomaly.get('severity'), default='info')
+        status = normalize_status('open' if anomaly['risk_score'] >= 75 else 'investigating')
         alerts.append({
             'id': anomaly['id'],
             'time': anomaly['timestamp'],
             'event': f"{anomaly['metric']} anomaly",
-            'severity': anomaly['severity'],
+            'severity': severity,
+            'severity_label': severity_label(severity),
+            'severity_class': severity_class(severity),
             'source': anomaly.get('indicator', 'local telemetry'),
-            'status': 'open' if anomaly['risk_score'] >= 75 else 'investigating',
-            'title': f"{anomaly['severity'].title()} {anomaly['metric']} anomaly",
+            'status': status,
+            'status_label': status_label(status),
+            'status_class': status_class(status),
+            'title': f"{severity_label(severity)} {anomaly['metric']} anomaly",
             'process': anomaly.get('indicator', 'local telemetry'),
             'confidence': round(float(anomaly.get('confidence', 0)) * 100),
             'recommendation': 'Trigger matching playbook' if anomaly['risk_score'] >= 75 else 'Review correlated telemetry',
@@ -3727,7 +3906,7 @@ def playbooks_page():
 def api_assets():
     cpu = psutil.cpu_percent(interval=0.05)
     mem = psutil.virtual_memory().percent
-    health = 'critical' if cpu > CPU_THRESHOLD or mem > MEMORY_THRESHOLD else ('warning' if cpu > (CPU_THRESHOLD * 0.8) or mem > (MEMORY_THRESHOLD * 0.8) else 'good')
+    health = 'critical' if cpu > CPU_THRESHOLD or mem > MEMORY_THRESHOLD else ('medium' if cpu > (CPU_THRESHOLD * 0.8) or mem > (MEMORY_THRESHOLD * 0.8) else 'info')
     addrs = []
     for entries in psutil.net_if_addrs().values():
         for entry in entries:
@@ -3737,6 +3916,8 @@ def api_assets():
         'name': socket.gethostname(),
         'ip': addrs[0] if addrs else '127.0.0.1',
         'health': health,
+        'health_label': severity_label(health),
+        'health_class': severity_class(health),
         'active_processes': len(psutil.pids()),
         'vuln_scan': f"live health: CPU {cpu:.1f}% / memory {mem:.1f}%"
     }
