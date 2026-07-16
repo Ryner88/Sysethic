@@ -47,11 +47,11 @@
       <label>User
         <select id="permissionUser" class="btn" style="width:100%;margin-top:6px;"></select>
       </label>
-      <div class="help" style="margin-top:10px;">Grant or revoke workspace permissions for members.</div>
-      <div class="help" id="fullAccessHelp" style="margin-top:10px;display:none;">Workspace Admins have Full access automatically.</div>
+      <div class="help" style="margin-top:10px;">Grant or revoke workspace permissions for members. Terminal diagnostics are admin-only.</div>
+      <div class="help" id="fullAccessHelp" style="margin-top:10px;display:none;">Workspace Admins have Full access automatically, including the owner console.</div>
       <label style="display:block;margin-top:12px;"><input type="checkbox" id="perm_manage_members"> Manage members</label>
       <label style="display:block;"><input type="checkbox" id="perm_mutate_playbooks"> Mutate playbooks</label>
-      <label style="display:block;"><input type="checkbox" id="perm_access_terminal"> Access terminal diagnostics</label>
+      <label style="display:block;"><input type="checkbox" id="perm_access_terminal" disabled> Access terminal diagnostics (admin-only)</label>
       <button id="savePermissions" class="btn" style="margin-top:12px;">Save Permissions</button>
       <div id="permissionMessage" class="help" style="margin-top:10px;"></div>
     </div>
@@ -156,6 +156,7 @@ if (CAN_WORKSPACE_ADMIN) document.getElementById('permissionUser').addEventListe
   document.getElementById('fullAccessHelp').style.display = isAdmin ? 'block' : 'none';
   document.getElementById('savePermissions').disabled = isAdmin;
   checkboxes.forEach(box => { box.disabled = isAdmin; });
+  document.getElementById('perm_access_terminal').disabled = true;
   document.getElementById('perm_manage_members').checked = isAdmin || selected.permissions.includes('manage_members');
   document.getElementById('perm_mutate_playbooks').checked = isAdmin || selected.permissions.includes('mutate_playbooks');
   document.getElementById('perm_access_terminal').checked = isAdmin || selected.permissions.includes('access_terminal');
@@ -175,7 +176,6 @@ if (CAN_WORKSPACE_ADMIN) document.getElementById('savePermissions').addEventList
   const permissions = [
     document.getElementById('perm_manage_members').checked ? 'manage_members' : null,
     document.getElementById('perm_mutate_playbooks').checked ? 'mutate_playbooks' : null,
-    document.getElementById('perm_access_terminal').checked ? 'access_terminal' : null,
   ].filter(Boolean);
   const res = await fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'permissions', id: userId, permissions})});
   const data = await res.json();

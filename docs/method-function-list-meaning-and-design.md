@@ -213,6 +213,7 @@ Design note: cache TTLs and invalidation should be tuned for deployment size.
 - Parses a browser-submitted diagnostic command.
 - Rejects command paths, unsupported commands, absolute paths, and parent traversal.
 - Resolves allowlisted command names with `shutil.which`.
+- Rejects command arguments unless they match an explicit approved form for that command.
 
 `_ws_send(sock, text)`
 
@@ -235,7 +236,7 @@ Design note: cache TTLs and invalidation should be tuned for deployment size.
 `TerminalWebSocketHandler.handle()`
 
 - Performs the WebSocket handshake.
-- Validates and runs allowlisted diagnostic commands without shell execution.
+- Validates and runs allowlisted diagnostic command forms without shell execution.
 - Streams command output back to the browser.
 
 `start_terminal_ws()`

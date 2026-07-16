@@ -124,7 +124,15 @@ automation_history = []
 
 THREAT_INTEL_PATH = str(CONFIG.threat_intel_path)
 
-DIAGNOSTIC_COMMANDS = {'netstat', 'ss', 'grep', 'rg', 'ps', 'uptime', 'whoami', 'hostname'}
+TERMINAL_TIMEOUT_SECONDS = 12
+DIAGNOSTIC_COMMANDS = {
+    'hostname': {()},
+    'whoami': {()},
+    'uptime': {(), ('-p',), ('-s',)},
+    'ps': {('aux',), ('-ef',), ('-eo', 'pid,ppid,user,stat,comm')},
+    'ss': {('-tulpen',), ('-tulpn',), ('-tunap',)},
+    'netstat': {('-tulpen',), ('-tulpn',), ('-an',)},
+}
 TERMINAL_WS_HOST = CONFIG.terminal_ws_host
 TERMINAL_WS_PORT = CONFIG.terminal_ws_port
 TERMINAL_WS_SCHEME = CONFIG.terminal_ws_scheme
@@ -1984,6 +1992,13 @@ def _validate_terminal_command(command):
         return None, f"Command '{base}' is not enabled. Allowed: {', '.join(sorted(DIAGNOSTIC_COMMANDS))}"
     if any(token.startswith('/') or '..' in token for token in parts[1:]):
         return None, 'Absolute paths and parent directory traversal are blocked in browser diagnostics.'
+    args = tuple(parts[1:])
+    if args not in DIAGNOSTIC_COMMANDS[base]:
+        allowed_args = [
+            f"{base} {' '.join(spec)}".strip()
+            for spec in sorted(DIAGNOSTIC_COMMANDS[base])
+        ]
+        return None, f"Arguments for '{base}' are not enabled. Allowed forms: {', '.join(allowed_args)}"
     executable = shutil.which(base)
     if not executable:
         return None, f"Command '{base}' is not installed on this host."
@@ -2005,7 +2020,7 @@ def _run_terminal_command(command, incident_id=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=12,
+            timeout=TERMINAL_TIMEOUT_SECONDS,
             check=False,
         )
         output = proc.stdout or ''
@@ -2017,6 +2032,7 @@ def _run_terminal_command(command, incident_id=None):
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", result, f"exit={proc.returncode}", details=audit_details)
         return {'success': proc.returncode == 0, 'returncode': proc.returncode, 'output': output, 'truncated': truncated}, 200
     except subprocess.TimeoutExpired:
+        audit_details['timeout_seconds'] = TERMINAL_TIMEOUT_SECONDS
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details=audit_details)
         return {'success': False, 'error': 'command timed out', 'output': ''}, 408
 
@@ -2170,14 +2186,8 @@ class TerminalWebSocketHandler(socketserver.BaseRequestHandler):
 
 def start_terminal_ws():
     global TERMINAL_WS_SERVER, TERMINAL_WS_STARTED
-    if TERMINAL_WS_STARTED:
-        return
-    try:
-        TERMINAL_WS_SERVER = TerminalWebSocketServer((TERMINAL_WS_HOST, TERMINAL_WS_PORT), TerminalWebSocketHandler)
-        threading.Thread(target=TERMINAL_WS_SERVER.serve_forever, daemon=True).start()
-        TERMINAL_WS_STARTED = True
-    except OSError:
-        pass
+    TERMINAL_WS_SERVER = None
+    TERMINAL_WS_STARTED = False
 
 
 def current_user():
@@ -2313,6 +2323,10 @@ def _user_has_permission(user, permission):
     return permission in permissions
 
 
+def _user_can_access_terminal(user):
+    return bool(user and user.get('role') == 'admin' and _user_has_permission(user, 'access_terminal'))
+
+
 def require_permission(permission):
     def decorator(fn):
         @wraps(fn)
@@ -2324,6 +2338,17 @@ def require_permission(permission):
             return fn(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def require_terminal_access(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not _user_can_access_terminal(user):
+            audit_event('access_denied', request.endpoint or fn.__name__, 'denied', 'admin terminal access required')
+            return _auth_failed(403, 'Admin terminal access required')
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 @app.before_request
@@ -2606,9 +2631,9 @@ def files():
 @app.route('/terminal')
 def terminal_page():
     user = current_user()
-    if not _user_has_permission(user, 'access_terminal'):
-        audit_event('access_denied', 'terminal_page', 'denied', 'access_terminal permission required')
-        return _auth_failed(403, 'Access terminal permission required')
+    if not _user_can_access_terminal(user):
+        audit_event('access_denied', 'terminal_page', 'denied', 'admin terminal access required')
+        return _auth_failed(403, 'Admin terminal access required')
     return render_template('terminal.html')
 
 @app.route('/reports')
@@ -2675,6 +2700,9 @@ def api_users():
         if target.get('organization_id') != org_id:
             audit_event('access_denied', f"user:{target['username']}", 'denied', 'cross-workspace permission change blocked')
             return jsonify(error='user not found'), 404
+        if target.get('role') != 'admin' and 'access_terminal' in requested_permissions:
+            audit_event('permission_change_failed', f"user:{target['username']}", 'failed', 'terminal access is admin-only')
+            return jsonify(error='terminal access is admin-only'), 400
         existing = get_user_permissions(uid)
         requested = set(requested_permissions)
         to_add = requested - existing
@@ -2973,19 +3001,23 @@ def api_visualization_lab():
 @app.route('/api/terminal/status')
 def api_terminal_status():
     user = current_user()
-    if not _user_has_permission(user, 'access_terminal'):
-        audit_event('access_denied', 'api_terminal_status', 'denied', 'access_terminal permission required')
-        return jsonify(error='Access terminal permission required'), 403
+    if not _user_can_access_terminal(user):
+        audit_event('access_denied', 'api_terminal_status', 'denied', 'admin terminal access required')
+        return jsonify(error='Admin terminal access required'), 403
     return jsonify(
         host=TERMINAL_WS_HOST,
         port=TERMINAL_WS_PORT,
-        websocket_url=f'{TERMINAL_WS_SCHEME}://{TERMINAL_WS_HOST}:{TERMINAL_WS_PORT}',
-        running=TERMINAL_WS_STARTED,
-        allowed=sorted(DIAGNOSTIC_COMMANDS),
+        websocket_url=None,
+        running=False,
+        legacy_websocket='disabled',
+        allowed=[f"{base} {' '.join(args)}".strip() for base, specs in sorted(DIAGNOSTIC_COMMANDS.items()) for args in sorted(specs)],
+        timeout_seconds=TERMINAL_TIMEOUT_SECONDS,
+        output_limit=TERMINAL_OUTPUT_LIMIT,
+        warning='Admin-only audited diagnostics. Shell expansion, command paths, and unapproved arguments are blocked.',
     )
 
 @app.route('/api/terminal/run', methods=['POST'])
-@require_permission('access_terminal')
+@require_terminal_access
 def api_terminal_run():
     payload = request.json or {}
     command = payload.get('command', '')

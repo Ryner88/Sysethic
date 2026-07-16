@@ -85,3 +85,25 @@ venv/bin/python -m unittest discover -s tests
 ```
 
 Result: Ran 21 tests in 105.451s - OK
+
+## Phase 3: Controlled Operations
+
+### 7. Harden the Diagnostic Terminal — Complete
+
+Implemented admin-only diagnostic terminal access, explicit command and argument allowlists, disabled legacy WebSocket startup, timeout enforcement, output truncation, and audit logging for allowed, denied, failed, and timed-out command attempts.
+
+Acceptance verified:
+
+- Non-admin users cannot open or use terminal routes.
+- Commands and argument forms outside the allowlist are rejected and audited.
+- Long-running commands are terminated.
+- Large command output is truncated safely.
+- Every command attempt records actor, command, result, and timestamp.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```
+
+Result: Ran 24 tests in 104.262s - OK

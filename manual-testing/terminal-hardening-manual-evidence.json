@@ -1,0 +1,33 @@
+{
+  "access_denied_count": 3,
+  "admin_status_allowed_count": 14,
+  "admin_status_legacy_websocket": "disabled",
+  "admin_status_output_limit": 12000,
+  "admin_status_running": false,
+  "admin_status_timeout_seconds": 12,
+  "admin_status_warning": "Admin-only audited diagnostics. Shell expansion, command paths, and unapproved arguments are blocked.",
+  "member_terminal_grant_error": "terminal access is admin-only",
+  "member_terminal_grant_status": 400,
+  "member_terminal_page_status": 403,
+  "member_terminal_run_status": 403,
+  "member_terminal_status_status": 403,
+  "permission_failure_count": 1,
+  "rejected_args_error": "Arguments for 'ps' are not enabled. Allowed forms: ps -ef, ps -eo pid,ppid,user,stat,comm, ps aux",
+  "rejected_args_status": 400,
+  "rejected_command_error": "Command 'cat' is not enabled. Allowed: hostname, netstat, ps, ss, uptime, whoami",
+  "rejected_command_status": 400,
+  "terminal_audit_count": 4,
+  "terminal_audit_has_command_details": true,
+  "terminal_audit_has_timeout": true,
+  "terminal_audit_has_truncated": true,
+  "terminal_audit_results": [
+    "denied",
+    "failed",
+    "success"
+  ],
+  "timeout_error": "command timed out",
+  "timeout_status": 408,
+  "truncated_flag": true,
+  "truncated_output_suffix": "\n[output truncated]\n",
+  "truncated_status": 200
+}

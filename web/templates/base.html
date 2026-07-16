@@ -35,7 +35,7 @@
         <li><a href="{{ url_for('ethics') }}" class="{% if request.endpoint == 'ethics' %}active{% endif %}">⚖️ Ethics</a></li>
         <li><a href="{{ url_for('anomalies_page') }}" class="{% if request.endpoint == 'anomalies_page' %}active{% endif %}">🚨 Anomalies</a></li>
         <li><a href="{{ url_for('files') }}" class="{% if request.endpoint == 'files' %}active{% endif %}">📁 Files</a></li>
-        {% if has_permission('access_terminal') %}
+        {% if can('admin') and has_permission('access_terminal') %}
         <li><a href="{{ url_for('terminal_page') }}" class="{% if request.endpoint == 'terminal_page' %}active{% endif %}">⌨️ Owner Console</a></li>
         {% endif %}
         {% if has_permission('manage_members') %}

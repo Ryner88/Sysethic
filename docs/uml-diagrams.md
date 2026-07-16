@@ -26,7 +26,7 @@ flowchart LR
     Flask --> Logs
     Flask --> Rules
     Flask --> ThreatIntel
-    TerminalWS -->|allowlisted commands| Psutil
+    TerminalWS -->|disabled legacy path| API
 
     subgraph Pages
       Dashboard[Dashboard]

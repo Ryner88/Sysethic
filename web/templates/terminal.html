@@ -7,7 +7,7 @@
   <div class="page-header">
     <div>
       <h2>Owner Console</h2>
-      <div class="label">Audited constrained security diagnostics</div>
+      <div class="label">Admin-only audited constrained security diagnostics</div>
     </div>
     <div class="controls">
       <button id="clearBtn" class="btn">Clear</button>
@@ -26,7 +26,7 @@
     <div class="card">
       <div class="label">Owner Commands</div>
       <div id="allowedCommands" class="pill-list"></div>
-      <div class="help" id="terminalHelp">Platform-owner diagnostics are separate from workspace administration.</div>
+      <div class="help" id="terminalHelp">Admin-only diagnostics run through a constrained API with shell execution disabled.</div>
     </div>
   </section>
 </div>
@@ -57,7 +57,7 @@ async function runCommand() {
 
 fetch('/api/terminal/status').then(r=>r.json()).then(data => {
   document.getElementById('allowedCommands').innerHTML = data.allowed.map(c => `<span class="badge">${c}</span>`).join('');
-  document.getElementById('terminalHelp').textContent = `Platform-owner commands run through a constrained API with shell execution disabled. Legacy WebSocket status: ${data.running ? 'running' : 'disabled'}.`;
+  document.getElementById('terminalHelp').textContent = `${data.warning} Timeout: ${data.timeout_seconds}s. Output limit: ${data.output_limit} characters. Legacy WebSocket: ${data.legacy_websocket}.`;
 });
 document.getElementById('runBtn').onclick = runCommand;
 document.getElementById('clearBtn').onclick = () => out.textContent = '';

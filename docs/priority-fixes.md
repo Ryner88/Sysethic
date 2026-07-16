@@ -348,7 +348,33 @@ Acceptance criteria:
 
 ## Phase 3: Controlled Operations
 
-### 7. Harden the Diagnostic Terminal
+### 7. Harden the Diagnostic Terminal — Complete
+
+Implemented admin-only diagnostic terminal access, per-command argument allowlists, legacy WebSocket disablement, command timeout enforcement, output truncation, and full audit coverage for allowed, denied, failed, and timed-out command attempts.
+
+Acceptance verified:
+
+- Non-admin users cannot open or use the terminal page, API, or legacy WebSocket path.
+- Commands and argument forms outside the allowlist are rejected and audited.
+- Long-running commands are terminated.
+- Large command output is truncated safely.
+- Every command attempt records actor, command, result, and timestamp.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover -s tests
+```
+
+Result: Ran 24 tests in 104.262s - OK
+
+Manual test:
+
+`manual-testing/terminal-hardening-manual-test.md`
+
+Why priority: terminal access is one of the highest-risk surfaces in SAAOE.
+
+Historical plan:
 
 Goal: keep diagnostic access useful without turning the local dashboard into an unsafe command surface.
 
@@ -369,8 +395,6 @@ Acceptance criteria:
 - Long-running commands are terminated.
 - Large command output is truncated safely.
 - Every command attempt records actor, command, result, and timestamp.
-
-Why priority: terminal access is one of the highest-risk surfaces in SAAOE.
 
 ### 8. Add Manual Approval for Risky Actions
 

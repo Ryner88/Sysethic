@@ -81,8 +81,8 @@ venv/bin/python -c "import web.saaoe_api; print(web.saaoe_api.DB_PATH)"
 - Existing sessions are rejected after a user is disabled.
 - Signup creates a new workspace with the creator as Workspace Admin; joining with a workspace code creates or requests a Regular User account based on the workspace policy.
 - Workspace Admins can invite members, disable members, and assign workspace permissions.
-- Regular Users can use normal workspace features, and extra permissions are independent: `manage_members`, `mutate_playbooks`, and `access_terminal`.
+- Regular Users can use normal workspace features, and extra permissions are independent: `manage_members` and `mutate_playbooks`.
 - `manage_members` allows `/users` and `/api/users` member management, but not playbook mutation or terminal diagnostics.
 - `mutate_playbooks` allows creating and deleting workspace playbooks, but not member management or terminal diagnostics.
-- `access_terminal` allows `/terminal`, `/api/terminal/status`, and `/api/terminal/run`, but not member or playbook mutation.
+- Terminal diagnostics are admin-only. The owner console uses `/terminal`, `/api/terminal/status`, and `/api/terminal/run`; regular users cannot be granted terminal access.
 - Permission grants, permission revokes, access denials, login, logout, user creation, and user disablement create audit records scoped to the current workspace.

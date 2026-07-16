@@ -450,10 +450,16 @@ class SecurityWorkflowTests(unittest.TestCase):
             response = client.post('/api/users', json={
                 'action': 'permissions',
                 'id': member['id'],
-                'permissions': ['access_terminal']
+                'permissions': []
             })
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json['permissions'], ['access_terminal'])
+            response = client.post('/api/users', json={
+                'action': 'permissions',
+                'id': member['id'],
+                'permissions': ['access_terminal']
+            })
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json['error'], 'terminal access is admin-only')
             client.get('/logout')
 
             client.post('/login', data={'username': 'member', 'password': 'longpassword9'})
@@ -462,19 +468,19 @@ class SecurityWorkflowTests(unittest.TestCase):
             response = client.post('/api/playbooks', json={'name': 'blocked again'})
             self.assertEqual(response.status_code, 403)
             response = client.get('/terminal')
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 403)
             response = client.get('/api/terminal/status')
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 403)
             response = client.post('/api/terminal/run', json={'command': 'hostname'})
-            self.assertIn(response.status_code, {200, 400})
+            self.assertEqual(response.status_code, 403)
 
             events = self.appmod._db_query(
-                "SELECT event_type, target, result, detail FROM audit_events WHERE event_type IN (?, ?) ORDER BY id",
-                ('permission_granted', 'permission_revoked')
+                "SELECT event_type, target, result, detail FROM audit_events WHERE event_type IN (?, ?, ?) ORDER BY id",
+                ('permission_granted', 'permission_revoked', 'permission_change_failed')
             )
             self.assertTrue(any(e['event_type'] == 'permission_granted' and 'permission=manage_members' in e['detail'] for e in events))
             self.assertTrue(any(e['event_type'] == 'permission_granted' and 'permission=mutate_playbooks' in e['detail'] for e in events))
-            self.assertTrue(any(e['event_type'] == 'permission_granted' and 'permission=access_terminal' in e['detail'] for e in events))
+            self.assertTrue(any(e['event_type'] == 'permission_change_failed' and 'terminal access is admin-only' in e['detail'] for e in events))
             self.assertTrue(any(e['event_type'] == 'permission_revoked' and 'permission=manage_members' in e['detail'] for e in events))
             self.assertTrue(any(e['event_type'] == 'permission_revoked' and 'permission=mutate_playbooks' in e['detail'] for e in events))
         finally:
