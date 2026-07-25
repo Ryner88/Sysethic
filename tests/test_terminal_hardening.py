@@ -4,6 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 class TerminalHardeningTests(unittest.TestCase):
@@ -99,6 +100,24 @@ class TerminalHardeningTests(unittest.TestCase):
         self.assertGreaterEqual(len(denied), 2)
         self.assertTrue(all(row['actor'] == 'admin' for row in denied))
         self.assertTrue(all(row['structured_details'].get('command') for row in denied))
+        self.assertTrue(all(row['structured_details'].get('shell') is False for row in denied))
+
+    def test_terminal_rejects_shell_syntax_and_malformed_payloads_with_audit(self):
+        response = self.client.post('/api/terminal/run', json={'command': 'hostname; whoami'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Shell syntax', response.json['error'])
+
+        response = self.client.post('/api/terminal/run', json={'command': ['hostname']})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json['error'], 'Command must be a string.')
+
+        denied = self.client.get('/api/audit_events?event_type=terminal_command_attempted&result=denied').json['logs']
+        details = [row['structured_details'] for row in denied]
+        self.assertTrue(all(detail['timeout_seconds'] == self.appmod.TERMINAL_TIMEOUT_SECONDS for detail in details))
+        self.assertTrue(all(detail['output_limit'] == self.appmod.TERMINAL_OUTPUT_LIMIT for detail in details))
+        self.assertTrue(all(detail['shell'] is False for detail in details))
+        self.assertTrue(any('hostname; whoami' == detail['command'] for detail in details))
+        self.assertTrue(any("['hostname']" == detail['command'] for detail in details))
 
     def test_terminal_timeout_and_output_truncation_are_enforced_and_audited(self):
         with tempfile.TemporaryDirectory() as bin_dir:
@@ -126,6 +145,20 @@ class TerminalHardeningTests(unittest.TestCase):
         logs = self.client.get('/api/audit_events?event_type=terminal_command_attempted').json['logs']
         self.assertTrue(any(row['result'] == 'failed' and row['detail'] == 'timeout' for row in logs))
         self.assertTrue(any(row['result'] == 'success' and row['structured_details'].get('truncated') for row in logs))
+
+    def test_terminal_execution_errors_are_audited(self):
+        with mock.patch.object(self.appmod.subprocess, 'run', side_effect=OSError('exec denied')):
+            response = self.client.post('/api/terminal/run', json={'command': 'hostname'})
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json['error'], 'command execution failed')
+
+        logs = self.client.get('/api/audit_events?event_type=terminal_command_attempted&result=failed').json['logs']
+        self.assertTrue(any(
+            row['detail'] == 'execution failed'
+            and row['structured_details'].get('error_type') == 'OSError'
+            and row['structured_details'].get('shell') is False
+            for row in logs
+        ))
 
 
 if __name__ == '__main__':

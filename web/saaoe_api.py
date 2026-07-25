@@ -125,6 +125,8 @@ automation_history = []
 THREAT_INTEL_PATH = str(CONFIG.threat_intel_path)
 
 TERMINAL_TIMEOUT_SECONDS = 12
+TERMINAL_COMMAND_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+TERMINAL_SHELL_SYNTAX_RE = re.compile(r'[;&|<>`$*?\[\]{}~#()!\\\n\r]')
 DIAGNOSTIC_COMMANDS = {
     'hostname': {()},
     'whoami': {()},
@@ -1978,7 +1980,19 @@ def _timeline_for_anomaly(anomaly_id):
     return anomaly, sorted(events, key=lambda x: x['time'])
 
 
+def _terminal_allowed_forms():
+    return [
+        f"{base} {' '.join(args)}".strip()
+        for base, specs in sorted(DIAGNOSTIC_COMMANDS.items())
+        for args in sorted(specs)
+    ]
+
+
 def _validate_terminal_command(command):
+    if not isinstance(command, str):
+        return None, 'Command must be a string.'
+    if TERMINAL_SHELL_SYNTAX_RE.search(command):
+        return None, 'Shell syntax and expansion characters are blocked in browser diagnostics.'
     try:
         parts = shlex.split(command)
     except ValueError as exc:
@@ -1988,6 +2002,8 @@ def _validate_terminal_command(command):
     if os.path.basename(parts[0]) != parts[0]:
         return None, 'Command paths are blocked. Use an enabled diagnostic command name only.'
     base = parts[0]
+    if not TERMINAL_COMMAND_NAME_RE.fullmatch(base):
+        return None, 'Command names may contain only letters, numbers, dots, dashes, and underscores.'
     if base not in DIAGNOSTIC_COMMANDS:
         return None, f"Command '{base}' is not enabled. Allowed: {', '.join(sorted(DIAGNOSTIC_COMMANDS))}"
     if any(token.startswith('/') or '..' in token for token in parts[1:]):
@@ -2005,14 +2021,31 @@ def _validate_terminal_command(command):
     return [executable, *parts[1:]], None
 
 
+def _terminal_audit_details(command, incident_id=None):
+    details = {
+        'command': command if isinstance(command, str) else repr(command),
+        'allowed_forms': _terminal_allowed_forms(),
+        'timeout_seconds': TERMINAL_TIMEOUT_SECONDS,
+        'output_limit': TERMINAL_OUTPUT_LIMIT,
+        'shell': False,
+    }
+    if incident_id:
+        details['incident_id'] = incident_id
+    return details
+
+
 def _run_terminal_command(command, incident_id=None):
     args, error = _validate_terminal_command(command)
-    audit_details = {'command': command}
-    if incident_id:
-        audit_details['incident_id'] = incident_id
+    audit_details = _terminal_audit_details(command, incident_id=incident_id)
     if error:
         audit_event('terminal_command_attempted', f"command:{command}", 'denied', error, details=audit_details)
         return {'success': False, 'error': error, 'output': ''}, 400
+    audit_details.update({
+        'executable': args[0],
+        'argv': args,
+        'command_name': os.path.basename(args[0]),
+        'arguments': args[1:],
+    })
     try:
         proc = subprocess.run(
             args,
@@ -2024,17 +2057,26 @@ def _run_terminal_command(command, incident_id=None):
             check=False,
         )
         output = proc.stdout or ''
-        truncated = len(output) > TERMINAL_OUTPUT_LIMIT
+        original_output_chars = len(output)
+        truncated = original_output_chars > TERMINAL_OUTPUT_LIMIT
         if truncated:
             output = output[:TERMINAL_OUTPUT_LIMIT] + '\n[output truncated]\n'
         result = 'success' if proc.returncode == 0 else 'failed'
-        audit_details.update({'returncode': proc.returncode, 'truncated': truncated})
+        audit_details.update({
+            'returncode': proc.returncode,
+            'truncated': truncated,
+            'output_chars': len(output),
+            'original_output_chars': original_output_chars,
+        })
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", result, f"exit={proc.returncode}", details=audit_details)
         return {'success': proc.returncode == 0, 'returncode': proc.returncode, 'output': output, 'truncated': truncated}, 200
     except subprocess.TimeoutExpired:
-        audit_details['timeout_seconds'] = TERMINAL_TIMEOUT_SECONDS
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details=audit_details)
         return {'success': False, 'error': 'command timed out', 'output': ''}, 408
+    except OSError as exc:
+        audit_details.update({'error_type': type(exc).__name__, 'error': str(exc)})
+        audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'execution failed', details=audit_details)
+        return {'success': False, 'error': 'command execution failed', 'output': ''}, 500
 
 
 def _approval_row(approval_id):
@@ -3010,7 +3052,7 @@ def api_terminal_status():
         websocket_url=None,
         running=False,
         legacy_websocket='disabled',
-        allowed=[f"{base} {' '.join(args)}".strip() for base, specs in sorted(DIAGNOSTIC_COMMANDS.items()) for args in sorted(specs)],
+        allowed=_terminal_allowed_forms(),
         timeout_seconds=TERMINAL_TIMEOUT_SECONDS,
         output_limit=TERMINAL_OUTPUT_LIMIT,
         warning='Admin-only audited diagnostics. Shell expansion, command paths, and unapproved arguments are blocked.',
