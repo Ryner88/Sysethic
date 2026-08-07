@@ -14,6 +14,17 @@ Secure Autonomous Operating Environment monitoring and response workspace.
 | **Workspace audit logging** | Records workspace activity, security events, and operational changes. |
 | **Privacy-conscious files** | Tracks file access with privacy classification and review context. |
 
+## Project Status
+
+Phase 3, Controlled Operations, is complete. The current `main` history preserves the final Phase 3 work as:
+
+- `70e5c01` - approval contract foundation for risky response actions.
+- `831f1dc` - first bounded approved host-impacting execution path.
+
+Verification: `venv/bin/python -m unittest discover tests` passed with 37 tests.
+
+Phase 4 handoff: continue with controlled operational validation, starting at Phase 4 #10, from the clean Phase 3 closeout on `main`.
+
 ## Architecture
 
 See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams. See [Priority Fixes](docs/priority-fixes.md), [Future Feature Implementation](docs/future-feature-implementation.md), and [Method, Function, List Meaning, and Design](docs/method-function-list-meaning-and-design.md) for roadmap and implementation reference docs.
@@ -92,7 +103,7 @@ See [Operational Startup](docs/operational-startup.md) for the local startup che
 
 ## Tests
 
-Run the workflow tests:
+Run the full regression suite:
 
 ```bash
 venv/bin/python -m unittest discover -s tests

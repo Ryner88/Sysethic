@@ -426,6 +426,10 @@ Acceptance criteria:
 - Rejected and expired approvals prevent execution.
 - Approval decisions appear in the incident timeline and audit log.
 
+Status: Complete in `70e5c01` (`Add approval contract foundation`).
+
+Verification: `venv/bin/python -m unittest tests.test_response_approval_contract` passed with 8 approval-contract tests before the #9 execution layer was restored.
+
 Why priority: operational response must be controlled, attributable, and reversible where possible.
 
 ### 9. Implement Real, Gated Response Actions
@@ -464,10 +468,16 @@ Phase 3 #9 status:
 - The only enabled target is `saaoe-dashboard`, mapped to fixed `systemctl restart saaoe-dashboard.service` arguments with `shell=False` and a 15 second timeout.
 - Recovery is fixed to `systemctl start saaoe-dashboard.service` and is recorded with the execution result.
 - `kill_process`, `quarantine_file`, and `block_ip` remain authorization-only no-ops until their own bounded adapters are implemented.
+- Commit: `831f1dc` (`Add bounded approved service restart execution`).
+- Verification: `venv/bin/python -m unittest discover tests` passed with 37 tests.
+
+Phase 3 closeout: Complete. The branch was split into the #8 foundation commit and #9 bounded-execution commit, merged to `main`, and pushed.
 
 Why priority: this is the main difference between a monitoring dashboard and an operational response system.
 
 ## Phase 4: Operational Validation
+
+Handoff: begin with #10, Controlled Validation Event Center. Validation work should reuse the completed approval contract and bounded execution safeguards instead of adding broader host-impacting adapters.
 
 ### 10. Add Controlled Validation Event Center
 

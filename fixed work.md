@@ -107,3 +107,55 @@ venv/bin/python -m unittest discover -s tests
 ```
 
 Result: Ran 24 tests in 104.262s - OK
+
+### 8. Add Manual Approval for Risky Actions — Complete
+
+Implemented the durable response approval contract for risky actions. Requests now store requester and approver roles, decision reasons, expiration, canonical payload digests, deterministic preview digests, action type, required role, and single-use consumption metadata. Approval decisions and execution authorization are written to audit history and incident timelines with `correlation_id = approval:<approval_id>`.
+
+Acceptance verified:
+
+- Requests require supported actions and validated targets.
+- Approve, reject, cancel, expire, and consume transitions are bounded.
+- Requesters cannot approve or consume their own approvals.
+- Rejected, expired, replayed, and digest-mismatched requests cannot execute.
+- Host-impacting `kill_process`, `quarantine_file`, and `block_ip` remain authorization-only no-ops until bounded adapters exist.
+
+Relevant commit:
+
+- `70e5c01` Add approval contract foundation
+
+Verification:
+
+```bash
+venv/bin/python -m unittest tests.test_response_approval_contract
+```
+
+Result: Ran 8 tests - OK
+
+### 9. Add First Bounded Approved Execution Path — Complete
+
+Implemented `restart_service` as the first real host-impacting execution path connected to the approval contract. The only enabled target is `saaoe-dashboard`; execution uses fixed argv `systemctl restart saaoe-dashboard.service` with `shell=False`, a 15 second timeout, single-use approval consumption, audit/timeline result recording, and fixed recovery via `systemctl start saaoe-dashboard.service`.
+
+Acceptance verified:
+
+- Only approved, unexpired, digest-matching requests execute.
+- No arbitrary shell-command support exists in the approval execution path.
+- Target allowlist, timeout, idempotency, and single-use approval consumption are enforced.
+- Success, failure, and recovery metadata are recorded in audit logs and incident timelines.
+- Tests cover rejection, expiry, replay, digest mismatch, concurrency, and execution failure.
+
+Relevant commit:
+
+- `831f1dc` Add bounded approved service restart execution
+
+Verification:
+
+```bash
+venv/bin/python -m unittest discover tests
+```
+
+Result: Ran 37 tests in 111.192s - OK
+
+Phase 3 status: Complete.
+
+Phase 4 handoff: start with Phase 4 #10, Controlled Validation Event Center, using the completed approval and bounded-execution path as the safety boundary for validation workflows.

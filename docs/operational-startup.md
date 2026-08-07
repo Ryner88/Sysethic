@@ -82,6 +82,13 @@ Safeguards:
 - On failure or timeout, SAAOE attempts fixed recovery: `systemctl start saaoe-dashboard.service`.
 - Success, failure, and recovery metadata are written to the response approval, incident timeline, and audit log.
 
+Phase 3 closeout:
+
+- `70e5c01` added the durable approval contract foundation.
+- `831f1dc` added bounded approved service restart execution.
+- `venv/bin/python -m unittest discover tests` passed with 37 tests.
+- Phase 4 handoff starts at Controlled Validation Event Center work; do not add broader host-impacting adapters without the same approval, allowlist, timeout, recovery, audit, and replay protections.
+
 Operational API writes insert or update SQLite before returning success. In-memory lists are only runtime caches and are reloaded from SQLite on startup. API storage failures return JSON errors with `error: "storage write failed"` and an explanatory `detail` field.
 
 Database setup is automatic when the Flask app imports. For a manual initialization check, run:

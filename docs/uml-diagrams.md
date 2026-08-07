@@ -11,22 +11,27 @@ flowchart LR
     Flask[Flask App<br/>web/saaoe_api.py]
     Sampler[Background Sampler Thread]
     Psutil[psutil / Host OS]
+    SQLite[(SQLite operational store)]
     Logs[(logs/system_log.csv)]
     Rules[(In-memory Rules<br/>anomaly, automation, playbooks)]
     ThreatIntel[(Local Threat Intel JSON)]
-    TerminalWS[Diagnostic WebSocket<br/>127.0.0.1:8765]
+    TerminalAPI[Authenticated terminal API<br/>/api/terminal/run]
+    ApprovalBoundary[Approval authorization boundary]
 
     Operator --> Browser
     Browser -->|HTML pages| Flask
     Browser -->|REST fetch / SSE| Flask
-    Browser -->|WebSocket commands| TerminalWS
     Flask --> Sampler
     Sampler --> Psutil
     Flask --> Psutil
+    Flask --> SQLite
     Flask --> Logs
     Flask --> Rules
     Flask --> ThreatIntel
-    TerminalWS -->|disabled legacy path| API
+    Flask --> TerminalAPI
+    Flask --> ApprovalBoundary
+    TerminalAPI -->|fixed diagnostic allowlist| Psutil
+    ApprovalBoundary -->|bounded service restart allowlist| Psutil
 
     subgraph Pages
       Dashboard[Dashboard]
@@ -109,6 +114,19 @@ classDiagram
         +string status
     }
 
+    class ResponseApproval {
+        +string id
+        +string action
+        +string target
+        +string status
+        +string requested_by
+        +string approved_by
+        +string payload_digest
+        +string preview_digest
+        +datetime expires_at
+        +datetime consumed_at
+    }
+
     class ReportSummary {
         +int anomaly_count
         +int critical_count
@@ -122,6 +140,8 @@ classDiagram
     AutomationRule --> Anomaly : matches
     Playbook --> Anomaly : responds to
     Playbook --> PlaybookRun : creates
+    Playbook --> ResponseApproval : requests risky action
+    ResponseApproval --> PlaybookRun : gates bounded execution
     ReportSummary --> Anomaly : summarizes
 ```
 
@@ -182,6 +202,23 @@ stateDiagram-v2
     Disabled --> [*]
 ```
 
+## Response Approval State Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: request created
+    Pending --> Approved: authorized approver + reason
+    Pending --> Rejected: authorized reject + reason
+    Pending --> Cancelled: requester or admin cancels
+    Pending --> Expired: TTL elapsed
+    Approved --> Consumed: digest match + single-use authorization
+    Approved --> Expired: TTL elapsed before consumption
+    Consumed --> [*]
+    Rejected --> [*]
+    Cancelled --> [*]
+    Expired --> [*]
+```
+
 ## Runtime Deployment Diagram
 
 ```mermaid
@@ -189,8 +226,10 @@ flowchart TB
     subgraph HostMachine["Local SAAOE Host"]
         FlaskProcess["Python Flask Process"]
         SamplerThread["Sampler Thread"]
-        TerminalServer["Terminal WebSocket Server"]
+        TerminalApi["Authenticated Terminal API"]
+        ApprovalBoundary["Response Approval Boundary"]
         StaticAssets["Templates + CSS + Chart.js"]
+        SQLiteStore["SQLite operational store"]
         LogFile["logs/system_log.csv"]
         HostOS["Operating System APIs"]
     end
@@ -201,13 +240,16 @@ flowchart TB
 
     Browser -->|HTTP 5001 default| FlaskProcess
     Browser -->|SSE notifications| FlaskProcess
-    Browser -->|WS 8765 localhost| TerminalServer
     FlaskProcess --> StaticAssets
+    FlaskProcess --> SQLiteStore
     FlaskProcess --> LogFile
     FlaskProcess --> HostOS
+    FlaskProcess --> TerminalApi
+    FlaskProcess --> ApprovalBoundary
     SamplerThread --> HostOS
     FlaskProcess --> SamplerThread
-    TerminalServer --> HostOS
+    TerminalApi --> HostOS
+    ApprovalBoundary --> HostOS
 ```
 
 ## Feature and Page UML
@@ -387,9 +429,9 @@ flowchart TB
 flowchart TB
     TerminalPage[terminal.html]
     TerminalPage --> StatusApi["/api/terminal/status"]
-    TerminalPage --> WebSocket["wss://127.0.0.1:8765"]
+    TerminalPage --> RunApi["/api/terminal/run"]
     StatusApi --> Allowlist[Allowed diagnostic commands]
-    WebSocket --> Validator[_validate_terminal_command]
+    RunApi --> Validator[_validate_terminal_command]
     Validator --> Allowlist
     Validator --> Subprocess[subprocess without shell]
     Subprocess --> OutputStream[Terminal output stream]
@@ -531,25 +573,56 @@ sequenceDiagram
     API-->>UI: Return run status and YAML
 ```
 
+### Approved Bounded Execution Workflow
+
+```mermaid
+sequenceDiagram
+    participant Analyst as Requester
+    participant Admin as Approver
+    participant API as Response Approval API
+    participant DB as SQLite
+    participant Boundary as authorizeApprovedAction
+    participant Adapter as restart_service adapter
+    participant Audit as Audit + Incident Timeline
+
+    Analyst->>API: POST /api/response_approvals
+    API->>API: Normalize target and compute payload + preview digests
+    API->>DB: Store pending request with expiry
+    Admin->>API: Approve with reason
+    API->>DB: Transactionally record decision
+    Admin->>API: Execute approval
+    API->>Boundary: Validate approved, unexpired, digest-matching request
+    Boundary->>DB: Consume approval once
+    API->>Adapter: Run fixed allowlisted restart argv
+    alt restart succeeds
+        Adapter-->>API: success result
+    else restart fails or times out
+        Adapter->>Adapter: Attempt fixed recovery argv
+        Adapter-->>API: failure + recovery result
+    end
+    API->>Audit: Record execution result
+    API-->>Admin: Return bounded execution result
+```
+
 ### Terminal Command Workflow
 
 ```mermaid
 sequenceDiagram
     participant User as Operator
     participant UI as Terminal Page
-    participant WS as Terminal WebSocket
+    participant API as /api/terminal/run
     participant Guard as Command Validator
     participant Proc as subprocess
 
     User->>UI: Enter diagnostic command
-    UI->>WS: Send command text
-    WS->>Guard: Validate command and arguments
+    UI->>API: POST command text
+    API->>Guard: Validate command and arguments
     alt allowed command
         Guard->>Proc: Execute with shell disabled
-        Proc-->>WS: Stream stdout and stderr
-        WS-->>UI: Display terminal output
+        Proc-->>API: Return bounded stdout and stderr
+        API-->>UI: Display terminal output
     else blocked command
-        Guard-->>WS: Return refusal
-        WS-->>UI: Display refusal
+        Guard-->>API: Return refusal
+        API-->>UI: Display refusal
     end
 ```
