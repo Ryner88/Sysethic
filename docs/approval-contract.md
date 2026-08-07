@@ -28,6 +28,7 @@ Consumption records `consumed_by`, `consumed_at`, and `executed_at` when the no-
 - `kill_process`: `admin`.
 - `quarantine_file`: `admin`.
 - `block_ip`: `admin`.
+- `restart_service`: `admin`.
 
 Requesters cannot approve or consume their own approvals.
 
@@ -46,7 +47,13 @@ Each request stores `preview_digest = sha256(payload_digest + canonical_preview)
 
 `authorizeApprovedAction` validates approval status, expiry, approver role, action type, target, requester, payload digest, and single-use consumption in one SQLite `BEGIN IMMEDIATE` transaction.
 
-Host-impacting actions remain disabled. Consuming an approval for `kill_process`, `quarantine_file`, or `block_ip` records authorization and returns a no-op result without changing the host.
+Host-impacting actions remain disabled by default for `kill_process`, `quarantine_file`, and `block_ip`. Consuming an approval for those actions records authorization and returns a no-op result without changing the host.
+
+`restart_service` is the first bounded host-impacting action. It does not accept shell commands. It accepts only exact service allowlist keys and currently enables:
+
+- `saaoe-dashboard`: runs fixed argv `systemctl restart saaoe-dashboard.service` with `shell=False` and a 15 second timeout.
+
+The recovery adapter for `saaoe-dashboard` is fixed argv `systemctl start saaoe-dashboard.service`. If restart fails or times out, SAAOE attempts that recovery action, records whether recovery succeeded, and writes the failed execution result to the approval row, incident timeline, and audit log. The consumed approval cannot be replayed after either success or failure.
 
 Every approval audit and incident timeline entry carries `correlation_id = approval:<approval_id>` along with the request, incident, actor, action, target, status, and payload digest fields.
 

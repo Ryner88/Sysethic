@@ -67,6 +67,21 @@ The following operational records are initialized in SQLite and must survive pro
 - Anomalies, anomaly rules, automation rules, automation history, playbooks, and playbook runs.
 - File classifications, report generation history, and workspace app configuration.
 
+## Bounded Approved Service Restart
+
+SAAOE supports one real host-impacting approved action: `restart_service` with target `saaoe-dashboard`.
+
+Safeguards:
+
+- The target must match the hard-coded allowlist key `saaoe-dashboard`.
+- Execution requires an approved, unexpired, digest-matching response approval.
+- Approval consumption is single-use and happens before the service adapter runs.
+- The adapter runs fixed arguments only: `systemctl restart saaoe-dashboard.service`.
+- Shell syntax and arbitrary command strings are not accepted.
+- The restart has a 15 second timeout.
+- On failure or timeout, SAAOE attempts fixed recovery: `systemctl start saaoe-dashboard.service`.
+- Success, failure, and recovery metadata are written to the response approval, incident timeline, and audit log.
+
 Operational API writes insert or update SQLite before returning success. In-memory lists are only runtime caches and are reloaded from SQLite on startup. API storage failures return JSON errors with `error: "storage write failed"` and an explanatory `detail` field.
 
 Database setup is automatic when the Flask app imports. For a manual initialization check, run:

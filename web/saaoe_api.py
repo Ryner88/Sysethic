@@ -170,12 +170,24 @@ APPROVAL_ACTION_CONTRACTS = {
     'kill_process': {'required_role': 'admin', 'action_type': 'host_process', 'host_impacting': True},
     'quarantine_file': {'required_role': 'admin', 'action_type': 'host_file', 'host_impacting': True},
     'block_ip': {'required_role': 'admin', 'action_type': 'network_firewall', 'host_impacting': True},
+    'restart_service': {'required_role': 'admin', 'action_type': 'service_control', 'host_impacting': True},
     'create_incident_report': {'required_role': 'analyst', 'action_type': 'record_report', 'host_impacting': False},
 }
 RESPONSE_ACTIONS = set(APPROVAL_ACTION_CONTRACTS)
 QUARANTINE_DIR = str(CONFIG.quarantine_dir)
 TERMINAL_OUTPUT_LIMIT = CONFIG.terminal_output_limit
 APPROVAL_TTL_SECONDS = CONFIG.approval_ttl_seconds
+SERVICE_RESTART_TIMEOUT_SECONDS = 15
+SERVICE_RESTART_TARGET_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,80}$')
+APPROVED_SERVICE_RESTARTS = {
+    'saaoe-dashboard': {
+        'manager': 'systemctl',
+        'service': 'saaoe-dashboard.service',
+        'restart': ('systemctl', 'restart', 'saaoe-dashboard.service'),
+        'rollback': ('systemctl', 'start', 'saaoe-dashboard.service'),
+        'recovery': 'If restart fails, SAAOE will attempt systemctl start saaoe-dashboard.service.',
+    },
+}
 
 
 def _db():
@@ -688,6 +700,13 @@ def _approval_canonical_target(action, target):
         return os.path.relpath(path, BASE_DIR)
     if action == 'block_ip':
         return str(ipaddress.ip_address(target))
+    if action == 'restart_service':
+        if not SERVICE_RESTART_TARGET_RE.fullmatch(target):
+            raise ValueError('restart service target is not a valid service allowlist key')
+        if target not in APPROVED_SERVICE_RESTARTS:
+            allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
+            raise ValueError(f"restart service target is not approved. Allowed: {allowed}")
+        return target
     if action == 'create_incident_report':
         if not target:
             raise ValueError('incident report target is required')
@@ -707,13 +726,15 @@ def approval_preview(payload):
     if not contract:
         raise ValueError('unsupported response action')
     canonical_target = _approval_canonical_target(normalized['action'], normalized['target'])
-    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'])
+    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'] and normalized['action'] != 'restart_service')
     if normalized['action'] == 'kill_process':
         effect = f"Would validate termination of PID {canonical_target}."
     elif normalized['action'] == 'quarantine_file':
         effect = f"Would validate quarantine of {canonical_target}."
     elif normalized['action'] == 'block_ip':
         effect = f"Would validate firewall block for {canonical_target}."
+    elif normalized['action'] == 'restart_service':
+        effect = f"Would restart approved service target {canonical_target} with timeout {SERVICE_RESTART_TIMEOUT_SECONDS}s."
     else:
         effect = f"Would create incident report for {canonical_target}."
     if disabled_host_action:
@@ -2541,13 +2562,109 @@ def _dry_run_response_action(action, target):
     return approval_preview({'action': action, 'target': target, 'dry_run': True})['detail']
 
 
+def _service_restart_plan(target):
+    canonical_target = _approval_canonical_target('restart_service', target)
+    plan = APPROVED_SERVICE_RESTARTS[canonical_target]
+    restart = tuple(plan.get('restart') or ())
+    rollback = tuple(plan.get('rollback') or ())
+    if not restart:
+        raise ValueError(f"approved service target {canonical_target} has no restart adapter")
+    if not rollback:
+        raise ValueError(f"approved service target {canonical_target} has no recovery adapter")
+    for argv in (restart, rollback):
+        if not all(isinstance(part, str) and part for part in argv):
+            raise ValueError(f"approved service target {canonical_target} has invalid adapter arguments")
+        if any(TERMINAL_SHELL_SYNTAX_RE.search(part) for part in argv):
+            raise ValueError(f"approved service target {canonical_target} contains blocked shell syntax")
+    return canonical_target, plan, restart, rollback
+
+
+def _resolve_fixed_argv(argv):
+    executable = shutil.which(argv[0])
+    if not executable:
+        raise ValueError(f"required service manager '{argv[0]}' is not installed")
+    return [executable, *argv[1:]]
+
+
+def _run_fixed_service_argv(argv, timeout_seconds):
+    proc = subprocess.run(
+        _resolve_fixed_argv(argv),
+        cwd=BASE_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    output = proc.stdout or ''
+    if len(output) > TERMINAL_OUTPUT_LIMIT:
+        output = output[:TERMINAL_OUTPUT_LIMIT] + '\n[output truncated]\n'
+    return proc.returncode, output
+
+
+def _restart_approved_service(target):
+    canonical_target, plan, restart_argv, rollback_argv = _service_restart_plan(target)
+    result = {
+        'executed': False,
+        'target': canonical_target,
+        'service': plan.get('service'),
+        'timeout_seconds': SERVICE_RESTART_TIMEOUT_SECONDS,
+        'rollback_attempted': False,
+        'rollback_succeeded': None,
+        'recovery': plan.get('recovery'),
+    }
+    try:
+        returncode, output = _run_fixed_service_argv(restart_argv, SERVICE_RESTART_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        result.update({'error': 'service restart timed out', 'output': exc.stdout or ''})
+        return _recover_service_restart(result, rollback_argv)
+    except OSError as exc:
+        result.update({'error': f'service restart execution failed: {exc}'})
+        return _recover_service_restart(result, rollback_argv)
+    if returncode != 0:
+        result.update({'error': f'service restart failed with exit={returncode}', 'returncode': returncode, 'output': output})
+        return _recover_service_restart(result, rollback_argv)
+    result.update({
+        'executed': True,
+        'returncode': returncode,
+        'output': output,
+        'detail': f"Restarted approved service target {canonical_target}.",
+    })
+    return result
+
+
+def _recover_service_restart(result, rollback_argv):
+    result['rollback_attempted'] = True
+    try:
+        rollback_code, rollback_output = _run_fixed_service_argv(rollback_argv, SERVICE_RESTART_TIMEOUT_SECONDS)
+        result.update({
+            'rollback_returncode': rollback_code,
+            'rollback_output': rollback_output,
+            'rollback_succeeded': rollback_code == 0,
+        })
+    except Exception as exc:
+        result.update({
+            'rollback_error': str(exc),
+            'rollback_succeeded': False,
+        })
+    detail = result.get('error') or 'service restart failed'
+    if result.get('rollback_succeeded'):
+        detail = f"{detail}; recovery start completed"
+    else:
+        detail = f"{detail}; recovery start failed"
+    result['detail'] = detail
+    raise RuntimeError(_json_dumps(result))
+
+
 def _execute_response_action(action, target, dry_run=True):
     preview = approval_preview({'action': action, 'target': target, 'dry_run': dry_run})
     if dry_run:
         return {'executed': False, 'detail': preview['detail']}
     contract = _approval_contract(action) or {}
-    if contract.get('host_impacting'):
+    if contract.get('host_impacting') and action != 'restart_service':
         return {'executed': False, 'detail': preview['detail']}
+    if action == 'restart_service':
+        return _restart_approved_service(target)
     if action == 'kill_process':
         pid = int(target)
         if pid == os.getpid():
@@ -3994,21 +4111,23 @@ def api_response_approval_detail(approval_id):
             _db_exec("UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?", (now, now, result['detail'], approval_id))
             executed_approval = _approval_row(approval_id)
             _approval_incident_event(executed_approval, 'response_executed', result['detail'], actor=user['username'], result='success', executed=result['executed'])
-            result_details = _approval_structured_details(executed_approval, result='success', executed=result['executed'])
+            result_details = _approval_structured_details(executed_approval, result='success', executed=result['executed'], execution_result=result)
             audit_event('response_action_succeeded', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
             audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
             return jsonify(success=True, result=result, approval=executed_approval)
         except Exception as exc:
+            failure_result = _json_loads(str(exc), None)
+            failure_detail = failure_result.get('detail') if isinstance(failure_result, dict) else str(exc)
             _db_exec(
-                "UPDATE response_approvals SET updated_at = ?, result = ? WHERE id = ?",
-                (now, str(exc), approval_id)
+                "UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
+                (now, now, failure_detail, approval_id)
             )
             failed_approval = _approval_row(approval_id)
-            _approval_incident_event(failed_approval, 'response_failed', str(exc), actor=user['username'], result='failed')
-            failed_details = _approval_structured_details(failed_approval, error=str(exc), result='failed')
-            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', str(exc), details=failed_details)
-            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', str(exc), details=failed_details)
-            return jsonify(error=str(exc), approval=failed_approval), 400
+            _approval_incident_event(failed_approval, 'response_failed', failure_detail, actor=user['username'], result='failed')
+            failed_details = _approval_structured_details(failed_approval, error=failure_detail, result='failed', execution_result=failure_result)
+            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
+            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
+            return jsonify(error=failure_detail, result=failure_result, approval=failed_approval), 400
     audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', f"unsupported command={command}")
     return jsonify(error='unsupported command'), 400
 

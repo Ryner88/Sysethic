@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 
 class ResponseApprovalContractTests(unittest.TestCase):
@@ -71,6 +72,26 @@ class ResponseApprovalContractTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 200)
         return response.json['approval']['id']
+
+    def request_restart_approval(self, incident_id=None, target='saaoe-dashboard', dry_run=False):
+        response = self.client.post('/api/response_approvals', json={
+            'incident_id': incident_id,
+            'action': 'restart_service',
+            'target': target,
+            'dry_run': dry_run,
+            'reason': 'restart approved service',
+        })
+        self.assertEqual(response.status_code, 200)
+        return response.json['approval']['id']
+
+    def approve_as_admin2(self, approval_id):
+        self.login('admin2', 'longpassword3')
+        response = self.client.post(
+            f'/api/response_approvals/{approval_id}',
+            json={'command': 'approve', 'reason': 'bounded service restart approved'},
+        )
+        self.assertEqual(response.status_code, 200)
+        return response
 
     def test_decisions_require_reasons_and_prevent_self_approval(self):
         incident_id = self.create_incident()
@@ -252,27 +273,123 @@ class ResponseApprovalContractTests(unittest.TestCase):
         self.assertIn(approval['status'], {'approved', 'rejected'})
         self.assertEqual(sum(1 for status, _ in results if status == 200), 1)
 
-    def test_host_impacting_actions_are_authorized_as_no_ops(self):
-        approval = self.client.post('/api/response_approvals', json={
-            'action': 'kill_process',
-            'target': os.getpid(),
+    def test_restart_service_rejects_unapproved_targets_and_shell_syntax(self):
+        response = self.client.post('/api/response_approvals', json={
+            'action': 'restart_service',
+            'target': 'ssh',
             'dry_run': False,
-            'reason': 'validate disabled host boundary',
+            'reason': 'unapproved target',
         })
-        self.assertEqual(approval.status_code, 200)
-        approval_id = approval.json['approval']['id']
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('not approved', response.json['error'])
 
-        self.login('admin2', 'longpassword3')
+        response = self.client.post('/api/response_approvals', json={
+            'action': 'restart_service',
+            'target': 'saaoe-dashboard;reboot',
+            'dry_run': False,
+            'reason': 'blocked shell syntax',
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('valid service allowlist key', response.json['error'])
+
+    def test_restart_service_executes_only_after_approved_digest_matching_request(self):
+        incident_id = self.create_incident()
+        approval_id = self.request_restart_approval(incident_id=incident_id)
+        self.approve_as_admin2(approval_id)
+
         response = self.client.post(
             f'/api/response_approvals/{approval_id}',
-            json={'command': 'approve', 'reason': 'validate no-op boundary'},
+            json={'command': 'execute', 'target': 'saaoe-dashboard2'},
         )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json['error'], 'approval target or action does not match request payload')
+
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            class Proc:
+                returncode = 0
+                stdout = 'restart ok'
+            return Proc()
+
+        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+                patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
+            response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
+
         self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json['result']['executed'])
+        self.assertEqual(response.json['result']['target'], 'saaoe-dashboard')
+        self.assertEqual(calls[0][0], ['/bin/systemctl', 'restart', 'saaoe-dashboard.service'])
+        self.assertFalse(calls[0][1].get('shell', False))
+        self.assertEqual(calls[0][1]['timeout'], self.appmod.SERVICE_RESTART_TIMEOUT_SECONDS)
 
         response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.json['result']['executed'])
-        self.assertIn('disabled', response.json['result']['detail'])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json['approval']['status'], 'consumed')
+
+        detail = self.client.get(f'/api/incidents/{incident_id}').json
+        self.assertTrue(any(event['event_type'] == 'response_executed' for event in detail['timeline']))
+        executed = self.client.get('/api/audit_events?event_type=response_action_executed').json['logs'][0]
+        self.assertEqual(executed['structured_details']['execution_result']['target'], 'saaoe-dashboard')
+
+    def test_restart_service_execution_failure_records_recovery(self):
+        incident_id = self.create_incident()
+        approval_id = self.request_restart_approval(incident_id=incident_id)
+        self.approve_as_admin2(approval_id)
+
+        def fake_run(argv, **kwargs):
+            class Proc:
+                stdout = 'service manager output'
+            proc = Proc()
+            if argv[1] == 'restart':
+                proc.returncode = 1
+            else:
+                proc.returncode = 0
+            return proc
+
+        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+                patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
+            response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('recovery start completed', response.json['error'])
+        self.assertTrue(response.json['result']['rollback_attempted'])
+        self.assertTrue(response.json['result']['rollback_succeeded'])
+        approval = self.client.get(f'/api/response_approvals/{approval_id}').json['approval']
+        self.assertEqual(approval['status'], 'consumed')
+
+    def test_concurrent_restart_execution_consumes_once(self):
+        self.login('analyst', 'longpassword2')
+        approval_id = self.request_restart_approval()
+        self.approve_as_admin2(approval_id)
+        client_one = self.logged_in_client('admin', 'longpassword1')
+        client_two = self.logged_in_client('admin2', 'longpassword3')
+        barrier = threading.Barrier(2)
+        results = []
+        lock = threading.Lock()
+
+        def execute(client):
+            barrier.wait()
+            response = client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
+            with lock:
+                results.append(response.status_code)
+
+        def fake_run(argv, **kwargs):
+            class Proc:
+                returncode = 0
+                stdout = 'restart ok'
+            return Proc()
+
+        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+                patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
+            threads = [threading.Thread(target=execute, args=(client_one,)), threading.Thread(target=execute, args=(client_two,))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(sorted(results), [200, 409])
 
 
 if __name__ == '__main__':

@@ -16,10 +16,11 @@
           <option value="kill_process">Kill process</option>
           <option value="quarantine_file">Quarantine file</option>
           <option value="block_ip">Block IP</option>
+          <option value="restart_service">Restart approved service</option>
           <option value="create_incident_report">Create incident report</option>
         </select>
       </label>
-      <label>Target <input id="target" class="btn" style="width:100%;margin-top:6px;text-align:left;" placeholder="PID, file path, or IP"></label>
+      <label>Target <input id="target" class="btn" style="width:100%;margin-top:6px;text-align:left;" placeholder="PID, file path, IP, or saaoe-dashboard"></label>
       <label>Incident ID <input id="incidentId" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
       <label><input id="dryRun" type="checkbox" checked> Dry run</label>
       <label>Decision Reason <input id="decisionReason" class="btn" style="width:100%;margin-top:6px;text-align:left;" placeholder="Required for approve, reject, or cancel"></label>

@@ -434,6 +434,7 @@ Goal: make playbook and automation actions affect the host only after permission
 
 Start with:
 
+- Restart approved service target
 - Kill process by PID
 - Suspend or resume process where supported
 - Quarantine file by moving it to a controlled local folder
@@ -456,6 +457,13 @@ Acceptance criteria:
 - Each response action refuses invalid or stale targets.
 - Each response action writes success or failure to the incident timeline and audit log.
 - OS-specific unsupported actions fail closed with a clear message.
+
+Phase 3 #9 status:
+
+- Implemented `restart_service` as the first real bounded host-impacting execution path.
+- The only enabled target is `saaoe-dashboard`, mapped to fixed `systemctl restart saaoe-dashboard.service` arguments with `shell=False` and a 15 second timeout.
+- Recovery is fixed to `systemctl start saaoe-dashboard.service` and is recorded with the execution result.
+- `kill_process`, `quarantine_file`, and `block_ip` remain authorization-only no-ops until their own bounded adapters are implemented.
 
 Why priority: this is the main difference between a monitoring dashboard and an operational response system.
 
