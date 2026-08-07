@@ -68,7 +68,17 @@ class IncidentWorkflowTests(unittest.TestCase):
         approval_id = approval.json['approval']['id']
         self.assertEqual(approval.json['approval']['status'], 'pending')
 
-        response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'approve'})
+        self.client.post('/api/users', json={
+            'username': 'admin2',
+            'password': 'longpassword2',
+            'role': 'admin',
+        })
+        self.client.get('/logout')
+        self.client.post('/login', data={'username': 'admin2', 'password': 'longpassword2'})
+        response = self.client.post(
+            f'/api/response_approvals/{approval_id}',
+            json={'command': 'approve', 'reason': 'incident workflow validated'},
+        )
         self.assertEqual(response.status_code, 200)
         response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
         self.assertEqual(response.status_code, 200)

@@ -22,6 +22,7 @@
       <label>Target <input id="target" class="btn" style="width:100%;margin-top:6px;text-align:left;" placeholder="PID, file path, or IP"></label>
       <label>Incident ID <input id="incidentId" class="btn" style="width:100%;margin-top:6px;text-align:left;"></label>
       <label><input id="dryRun" type="checkbox" checked> Dry run</label>
+      <label>Decision Reason <input id="decisionReason" class="btn" style="width:100%;margin-top:6px;text-align:left;" placeholder="Required for approve, reject, or cancel"></label>
       <button id="requestApproval" class="btn" style="margin-top:10px;">Request Approval</button>
       <div id="approvalMessage" class="help" style="margin-top:10px;"></div>
     </div>
@@ -44,13 +45,16 @@ async function loadApprovals(){
       <td>
         ${CAN_ADMIN ? `<button class="btn btn-small" onclick="approvalCommand('${a.id}','approve')">Approve</button>
         <button class="btn btn-small" onclick="approvalCommand('${a.id}','reject')">Reject</button>
+        <button class="btn btn-small" onclick="approvalCommand('${a.id}','cancel')">Cancel</button>
         <button class="btn btn-small" onclick="approvalCommand('${a.id}','execute')">Execute</button>` : ''}
       </td>
     </tr>
   `).join('');
 }
 async function approvalCommand(id, command){
-  const res = await fetch('/api/response_approvals/' + id, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({command})});
+  const body = {command};
+  if(command !== 'execute') body.reason = decisionReason.value;
+  const res = await fetch('/api/response_approvals/' + id, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   const data = await res.json();
   document.getElementById('approvalMessage').textContent = data.error || data.result?.detail || command + ' complete';
   loadApprovals();

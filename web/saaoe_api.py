@@ -156,14 +156,23 @@ STATUS_VOCABULARY = {
     'open': {'label': 'Open', 'css_class': 'status-open', 'aliases': {'open', 'new', 'active', 'triggered', 'pending', 'ready', 'manual_triggered', 'created'}},
     'investigating': {'label': 'Investigating', 'css_class': 'status-investigating', 'aliases': {'investigating', 'in_progress', 'review', 'reviewing'}},
     'waiting_for_approval': {'label': 'Waiting for Approval', 'css_class': 'status-waiting-for-approval', 'aliases': {'waiting_for_approval', 'approval', 'pending_approval', 'needs_approval', 'approved'}},
-    'resolved': {'label': 'Resolved', 'css_class': 'status-resolved', 'aliases': {'resolved', 'closed', 'complete', 'completed', 'success', 'executed', 'executed_dry_run', 'incident_created'}},
+    'resolved': {'label': 'Resolved', 'css_class': 'status-resolved', 'aliases': {'resolved', 'closed', 'complete', 'completed', 'success', 'consumed', 'executed', 'executed_dry_run', 'incident_created'}},
     'dismissed': {'label': 'Dismissed', 'css_class': 'status-dismissed', 'aliases': {'dismissed', 'ignored', 'false_positive', 'suppressed', 'rejected'}},
     'failed': {'label': 'Failed', 'css_class': 'status-failed', 'aliases': {'failed', 'error', 'failure', 'expired'}},
 }
 SEVERITIES = set(SEVERITY_VOCABULARY)
 STATUSES = set(STATUS_VOCABULARY)
 INCIDENT_STATUSES = STATUSES
-RESPONSE_ACTIONS = {'kill_process', 'quarantine_file', 'block_ip', 'create_incident_report'}
+APPROVAL_STATUSES = {'pending', 'approved', 'rejected', 'cancelled', 'expired', 'consumed'}
+APPROVAL_DECISION_STATUSES = {'approved', 'rejected', 'cancelled', 'expired'}
+APPROVAL_TERMINAL_STATUSES = {'rejected', 'cancelled', 'expired', 'consumed'}
+APPROVAL_ACTION_CONTRACTS = {
+    'kill_process': {'required_role': 'admin', 'action_type': 'host_process', 'host_impacting': True},
+    'quarantine_file': {'required_role': 'admin', 'action_type': 'host_file', 'host_impacting': True},
+    'block_ip': {'required_role': 'admin', 'action_type': 'network_firewall', 'host_impacting': True},
+    'create_incident_report': {'required_role': 'analyst', 'action_type': 'record_report', 'host_impacting': False},
+}
+RESPONSE_ACTIONS = set(APPROVAL_ACTION_CONTRACTS)
 QUARANTINE_DIR = str(CONFIG.quarantine_dir)
 TERMINAL_OUTPUT_LIMIT = CONFIG.terminal_output_limit
 APPROVAL_TTL_SECONDS = CONFIG.approval_ttl_seconds
@@ -374,14 +383,24 @@ def init_db():
                 action TEXT NOT NULL,
                 target TEXT NOT NULL,
                 requested_by TEXT NOT NULL,
+                requester_role TEXT,
                 approved_by TEXT,
+                approver_role TEXT,
                 status TEXT NOT NULL,
                 reason TEXT,
+                decision_reason TEXT,
                 dry_run INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 expires_at TEXT,
+                decided_at TEXT,
                 executed_at TEXT,
+                consumed_by TEXT,
+                consumed_at TEXT,
+                payload_digest TEXT,
+                preview_digest TEXT,
+                action_type TEXT,
+                required_role TEXT,
                 result TEXT
             );
 
@@ -462,8 +481,18 @@ def init_db():
         _ensure_column(conn, 'incidents', 'closed_at', 'TEXT')
         _ensure_column(conn, 'incident_events', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'response_approvals', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'response_approvals', 'requester_role', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'approver_role', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'decision_reason', 'TEXT')
         _ensure_column(conn, 'validation_events', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'response_approvals', 'expires_at', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'decided_at', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'consumed_by', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'consumed_at', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'payload_digest', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'preview_digest', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'action_type', 'TEXT')
+        _ensure_column(conn, 'response_approvals', 'required_role', 'TEXT')
         _ensure_column(conn, 'file_classifications', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'app_configuration', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'report_history', 'organization_id', 'INTEGER')
@@ -484,6 +513,34 @@ def init_db():
         conn.execute("UPDATE incidents SET linked_anomalies = '[\"' || replace(anomaly_id, '\"', '\\\"') || '\"]' WHERE (linked_anomalies IS NULL OR linked_anomalies = '[]') AND anomaly_id IS NOT NULL")
         conn.execute("UPDATE incident_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE response_approvals SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        for approval in conn.execute("SELECT id, action, target, incident_id, anomaly_id, dry_run, payload_digest, preview_digest FROM response_approvals").fetchall():
+            action_contract = APPROVAL_ACTION_CONTRACTS.get(approval[1], {})
+            approval_payload = {
+                'action': approval[1],
+                'target': approval[2],
+                'incident_id': approval[3],
+                'anomaly_id': approval[4],
+                'dry_run': bool(approval[5]),
+            }
+            payload_digest = approval[6] or approval_payload_digest(approval_payload)
+            try:
+                preview = approval_preview(approval_payload)
+                preview_digest = approval[7] or approval_preview_digest(approval_payload, preview)
+                preview_detail = preview['detail']
+            except ValueError:
+                preview_digest = approval[7]
+                preview_detail = None
+            conn.execute(
+                """
+                UPDATE response_approvals
+                SET payload_digest = ?, preview_digest = COALESCE(preview_digest, ?),
+                    result = COALESCE(result, ?), action_type = COALESCE(action_type, ?),
+                    required_role = COALESCE(required_role, ?),
+                    requester_role = COALESCE(requester_role, 'analyst')
+                WHERE id = ?
+                """,
+                (payload_digest, preview_digest, preview_detail, action_contract.get('action_type'), action_contract.get('required_role'), approval[0])
+            )
         conn.execute("UPDATE validation_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE file_classifications SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE app_configuration SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
@@ -584,6 +641,171 @@ def _json_loads(value, default):
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return default
+
+
+def _clean_optional_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _approval_payload(action, target, incident_id=None, anomaly_id=None, dry_run=True):
+    return {
+        'action': str(action or '').strip(),
+        'target': str(target or '').strip(),
+        'incident_id': _clean_optional_text(incident_id),
+        'anomaly_id': _clean_optional_text(anomaly_id),
+        'dry_run': bool(dry_run),
+    }
+
+
+def approval_payload_digest(payload):
+    canonical = json.dumps(_approval_payload(
+        payload.get('action'),
+        payload.get('target'),
+        payload.get('incident_id'),
+        payload.get('anomaly_id'),
+        payload.get('dry_run', True),
+    ), sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _approval_canonical_target(action, target):
+    target = str(target or '').strip()
+    if action == 'kill_process':
+        try:
+            pid = int(target)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('kill process target must be a PID') from exc
+        if pid <= 0:
+            raise ValueError('kill process target must be a positive PID')
+        return str(pid)
+    if action == 'quarantine_file':
+        path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
+        if not path.startswith(BASE_DIR + os.sep):
+            raise ValueError('quarantine target must be inside the SAAOE project directory')
+        return os.path.relpath(path, BASE_DIR)
+    if action == 'block_ip':
+        return str(ipaddress.ip_address(target))
+    if action == 'create_incident_report':
+        if not target:
+            raise ValueError('incident report target is required')
+        return target
+    raise ValueError('unsupported response action')
+
+
+def approval_preview(payload):
+    normalized = _approval_payload(
+        payload.get('action'),
+        payload.get('target'),
+        payload.get('incident_id'),
+        payload.get('anomaly_id'),
+        payload.get('dry_run', True),
+    )
+    contract = _approval_contract(normalized['action'])
+    if not contract:
+        raise ValueError('unsupported response action')
+    canonical_target = _approval_canonical_target(normalized['action'], normalized['target'])
+    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'])
+    if normalized['action'] == 'kill_process':
+        effect = f"Would validate termination of PID {canonical_target}."
+    elif normalized['action'] == 'quarantine_file':
+        effect = f"Would validate quarantine of {canonical_target}."
+    elif normalized['action'] == 'block_ip':
+        effect = f"Would validate firewall block for {canonical_target}."
+    else:
+        effect = f"Would create incident report for {canonical_target}."
+    if disabled_host_action:
+        effect = f"Host-impacting action {normalized['action']} is disabled; authorization will be recorded as a no-op."
+    return {
+        **normalized,
+        'canonical_target': canonical_target,
+        'action_type': contract['action_type'],
+        'required_role': contract['required_role'],
+        'host_impacting': bool(contract.get('host_impacting')),
+        'disabled_host_action': disabled_host_action,
+        'detail': effect,
+    }
+
+
+def approval_preview_digest(payload, preview=None):
+    preview = preview or approval_preview(payload)
+    canonical = json.dumps({
+        'payload_digest': approval_payload_digest(payload),
+        'preview': preview,
+    }, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _approval_error(message, status_code=409, approval=None):
+    return {'ok': False, 'error': message, 'status_code': status_code, 'approval': approval}
+
+
+def _approval_contract(action):
+    return APPROVAL_ACTION_CONTRACTS.get(action)
+
+
+def _mark_approval_expired(conn, approval, now):
+    if approval.get('status') == 'pending':
+        conn.execute(
+            "UPDATE response_approvals SET status = ?, decided_at = ?, updated_at = ?, result = ? WHERE id = ? AND status = ?",
+            ('expired', now, now, 'approval expired', approval['id'], 'pending')
+        )
+    elif approval.get('status') == 'approved':
+        conn.execute(
+            "UPDATE response_approvals SET status = ?, updated_at = ?, result = ? WHERE id = ? AND status = ?",
+            ('expired', now, 'approval expired', approval['id'], 'approved')
+        )
+
+
+def _approval_target_matches(approval, expected):
+    return (
+        approval.get('action') == expected.get('action')
+        and str(approval.get('target')) == str(expected.get('target'))
+        and _clean_optional_text(approval.get('incident_id')) == _clean_optional_text(expected.get('incident_id'))
+        and _clean_optional_text(approval.get('anomaly_id')) == _clean_optional_text(expected.get('anomaly_id'))
+        and bool(approval.get('dry_run')) == bool(expected.get('dry_run', True))
+    )
+
+
+def _approval_correlation_id(approval_id):
+    return f"approval:{approval_id}"
+
+
+def _approval_structured_details(approval, **extra):
+    details = {
+        'approval_id': approval.get('id'),
+        'correlation_id': _approval_correlation_id(approval.get('id')),
+        'incident_id': approval.get('incident_id'),
+        'anomaly_id': approval.get('anomaly_id'),
+        'action': approval.get('action'),
+        'action_type': approval.get('action_type'),
+        'target': approval.get('target'),
+        'requested_by': approval.get('requested_by'),
+        'requester_role': approval.get('requester_role'),
+        'approved_by': approval.get('approved_by'),
+        'approver_role': approval.get('approver_role'),
+        'status': approval.get('status'),
+        'payload_digest': approval.get('payload_digest'),
+        'preview_digest': approval.get('preview_digest'),
+        'dry_run': bool(approval.get('dry_run')),
+    }
+    details.update({key: value for key, value in extra.items() if value is not None})
+    return details
+
+
+def _approval_incident_event(approval, event_type, detail, actor=None, **extra):
+    if not approval.get('incident_id'):
+        return
+    structured = _approval_structured_details(approval, event_type=event_type, detail=detail, **extra)
+    _incident_event(
+        approval['incident_id'],
+        event_type,
+        _json_dumps(structured),
+        actor=actor,
+        organization_id=approval.get('organization_id'),
+    )
 
 
 def _anomaly_from_row(row):
@@ -1137,6 +1359,12 @@ def _timeline_entry(timestamp, actor, event_type, detail, source, **extra):
         'detail': detail,
         'source': source,
     }
+    structured_detail = _json_loads(detail, None)
+    if isinstance(structured_detail, dict):
+        entry['structured_details'] = structured_detail
+        for key in ('approval_id', 'correlation_id', 'incident_id', 'anomaly_id', 'action', 'target', 'result'):
+            if key in structured_detail and key not in extra:
+                extra[key] = structured_detail[key]
     entry.update(extra)
     return entry
 
@@ -2093,10 +2321,113 @@ def _approval_row(approval_id):
 
 def _response_approval_from_row(row):
     approval = dict(row)
-    approval['workflow_status'] = normalize_status(row.get('status'), default='open')
+    approval['dry_run'] = bool(approval.get('dry_run'))
+    contract = _approval_contract(approval.get('action'))
+    approval['host_impacting'] = bool(contract and contract.get('host_impacting'))
+    approval['workflow_status'] = normalize_status(approval.get('status'), default='open')
     approval['status_label'] = status_label(approval['workflow_status'])
     approval['status_class'] = status_class(approval['workflow_status'])
     return approval
+
+
+def _approval_audit_events(approval):
+    rows = _db_query(
+        """
+        SELECT timestamp, actor, role, event_type, target, target_type, target_id,
+               result, source, detail, details_json
+        FROM audit_events
+        WHERE organization_id = ? AND target = ?
+        ORDER BY timestamp, rowid
+        """,
+        (approval.get('organization_id'), _approval_correlation_id(approval['id']))
+    )
+    events = []
+    for row in rows:
+        structured_details = _json_loads(row.get('details_json'), None)
+        events.append({
+            **row,
+            'structured_details': structured_details,
+            'correlation_id': (structured_details or {}).get('correlation_id') or _approval_correlation_id(approval['id']),
+        })
+    return events
+
+
+def _approval_timeline_events(approval):
+    if not approval.get('incident_id'):
+        return []
+    incident = _incident_row(approval['incident_id'], approval.get('organization_id'))
+    if not incident:
+        return []
+    correlation_id = _approval_correlation_id(approval['id'])
+    events = []
+    for event in _incident_timeline(incident):
+        structured = event.get('structured_details') or {}
+        if event.get('approval_id') == approval['id'] or structured.get('correlation_id') == correlation_id:
+            events.append(event)
+    return events
+
+
+def _approval_diagnostics(approval):
+    request_payload = _approval_payload(
+        approval.get('action'),
+        approval.get('target'),
+        approval.get('incident_id'),
+        approval.get('anomaly_id'),
+        approval.get('dry_run', True),
+    )
+    expected_payload_digest = approval_payload_digest(request_payload)
+    try:
+        expected_preview = approval_preview(request_payload)
+        expected_preview_digest = approval_preview_digest(request_payload, expected_preview)
+        preview_error = None
+    except ValueError as exc:
+        expected_preview = None
+        expected_preview_digest = None
+        preview_error = str(exc)
+    audit_events = _approval_audit_events(approval)
+    timeline_events = _approval_timeline_events(approval)
+    reconstruction = []
+    for event in audit_events:
+        reconstruction.append({
+            'timestamp': event['timestamp'],
+            'source': 'audit',
+            'event_type': event['event_type'],
+            'actor': event['actor'],
+            'result': event['result'],
+            'detail': event.get('detail'),
+            'correlation_id': event.get('correlation_id'),
+        })
+    for event in timeline_events:
+        reconstruction.append({
+            'timestamp': event['timestamp'],
+            'source': 'incident_timeline',
+            'event_type': event['event_type'],
+            'actor': event['actor'],
+            'result': (event.get('structured_details') or {}).get('result'),
+            'detail': event.get('detail'),
+            'correlation_id': event.get('correlation_id') or (event.get('structured_details') or {}).get('correlation_id'),
+        })
+    reconstruction.sort(key=lambda event: event.get('timestamp') or '')
+    return {
+        'approval': approval,
+        'request_payload': request_payload,
+        'expected_preview': expected_preview,
+        'diagnostics': {
+            'correlation_id': _approval_correlation_id(approval['id']),
+            'payload_digest_matches': approval.get('payload_digest') == expected_payload_digest,
+            'preview_digest_matches': approval.get('preview_digest') == expected_preview_digest,
+            'expected_payload_digest': expected_payload_digest,
+            'expected_preview_digest': expected_preview_digest,
+            'stored_payload_digest': approval.get('payload_digest'),
+            'stored_preview_digest': approval.get('preview_digest'),
+            'preview_error': preview_error,
+            'audit_event_count': len(audit_events),
+            'timeline_event_count': len(timeline_events),
+        },
+        'audit_events': audit_events,
+        'timeline_events': timeline_events,
+        'reconstruction': reconstruction,
+    }
 
 
 def _approval_expired(approval, now=None):
@@ -2110,30 +2441,113 @@ def _approval_expired(approval, now=None):
         return True
 
 
+def authorizeApprovedAction(approval_id, payload, actor=None, consume=True):
+    actor = actor or current_user()
+    if not actor:
+        return _approval_error('authentication required', 401)
+
+    expected_payload = _approval_payload(
+        payload.get('action'),
+        payload.get('target'),
+        payload.get('incident_id'),
+        payload.get('anomaly_id'),
+        payload.get('dry_run', True),
+    )
+    expected_digest = approval_payload_digest(expected_payload)
+    now_dt = datetime.now()
+    now = now_dt.isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM response_approvals WHERE id = ? AND organization_id = ?",
+            (approval_id, actor.get('organization_id'))
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return _approval_error('approval not found', 404)
+        approval = _response_approval_from_row(row)
+        contract = _approval_contract(approval.get('action'))
+        if not contract:
+            conn.rollback()
+            return _approval_error('unsupported response action', 400, approval)
+        if approval.get('status') == 'approved' and _approval_expired(approval, now_dt):
+            _mark_approval_expired(conn, approval, now)
+            conn.commit()
+            return _approval_error('approval request has expired', 409, _approval_row(approval_id))
+        if approval.get('status') != 'approved':
+            conn.rollback()
+            return _approval_error('approval must be approved before execution', 409, approval)
+        if approval.get('requested_by') == actor.get('username'):
+            conn.rollback()
+            return _approval_error('requester cannot consume their own approval', 403, approval)
+        if not _role_allows(actor, approval.get('required_role') or contract['required_role']):
+            conn.rollback()
+            return _approval_error(f"{contract['required_role']} role required", 403, approval)
+        if approval.get('approver_role') and ROLES.get(approval['approver_role'], 0) < ROLES[contract['required_role']]:
+            conn.rollback()
+            return _approval_error('approver role no longer satisfies action contract', 403, approval)
+        if approval.get('requested_by') != _clean_optional_text(payload.get('requester', approval.get('requested_by'))):
+            conn.rollback()
+            return _approval_error('requester does not match approval request', 409, approval)
+        if not _approval_target_matches(approval, expected_payload):
+            conn.rollback()
+            return _approval_error('approval target or action does not match request payload', 409, approval)
+        if approval.get('payload_digest') != expected_digest:
+            conn.rollback()
+            return _approval_error('approval payload digest mismatch', 409, approval)
+        expected_preview = approval_preview(expected_payload)
+        expected_preview_digest = approval_preview_digest(expected_payload, expected_preview)
+        if approval.get('preview_digest') != expected_preview_digest:
+            conn.rollback()
+            return _approval_error('approval preview digest mismatch', 409, approval)
+        if consume:
+            cur = conn.execute(
+                """
+                UPDATE response_approvals
+                SET status = ?, consumed_by = ?, consumed_at = ?, updated_at = ?, result = ?
+                WHERE id = ? AND organization_id = ? AND status = ?
+                """,
+                ('consumed', actor['username'], now, now, 'approval consumed by authorization boundary',
+                 approval_id, actor.get('organization_id'), 'approved')
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return _approval_error('approval has already been consumed or changed', 409, approval)
+        conn.commit()
+        authorized = _approval_row(approval_id)
+        return {
+            'ok': True,
+            'approval': authorized,
+            'payload': expected_payload,
+            'payload_digest': expected_digest,
+            'preview': expected_preview,
+            'preview_digest': expected_preview_digest,
+            'contract': contract,
+        }
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def authorize_approved_action(approval_id, payload, actor=None, consume=True):
+    return authorizeApprovedAction(approval_id, payload, actor=actor, consume=consume)
+
+
 def _dry_run_response_action(action, target):
-    if action == 'kill_process':
-        pid = int(target)
-        proc = psutil.Process(pid)
-        return f"Would terminate PID {pid} ({proc.name()})"
-    if action == 'quarantine_file':
-        path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
-        if not path.startswith(BASE_DIR + os.sep):
-            raise ValueError('quarantine target must be inside the SAAOE project directory')
-        if not os.path.isfile(path):
-            raise ValueError('quarantine target file does not exist')
-        return f"Would move {os.path.relpath(path, BASE_DIR)} to quarantine/"
-    if action == 'block_ip':
-        ipaddress.ip_address(target)
-        return 'Firewall block is not enabled on this host; execution will fail closed unless an OS adapter is configured.'
-    if action == 'create_incident_report':
-        return 'Would create an incident report record.'
-    raise ValueError('unsupported response action')
+    return approval_preview({'action': action, 'target': target, 'dry_run': True})['detail']
 
 
 def _execute_response_action(action, target, dry_run=True):
-    preview = _dry_run_response_action(action, target)
+    preview = approval_preview({'action': action, 'target': target, 'dry_run': dry_run})
     if dry_run:
-        return {'executed': False, 'detail': preview}
+        return {'executed': False, 'detail': preview['detail']}
+    contract = _approval_contract(action) or {}
+    if contract.get('host_impacting'):
+        return {'executed': False, 'detail': preview['detail']}
     if action == 'kill_process':
         pid = int(target)
         if pid == os.getpid():
@@ -2154,6 +2568,10 @@ def _execute_response_action(action, target, dry_run=True):
     if action == 'block_ip':
         raise ValueError('firewall adapter is not configured; action failed closed')
     raise ValueError('unsupported response action')
+
+
+def _preview_authorized_action(action, target, dry_run=True):
+    return approval_preview({'action': action, 'target': target, 'dry_run': dry_run})['detail']
 
 
 def _ws_send(sock, text):
@@ -3401,10 +3819,12 @@ def api_response_approvals():
         )])
     if user['role'] == 'viewer':
         audit_event('access_denied', 'api_response_approvals', 'denied', 'regular user cannot request approvals')
-        return jsonify(error='workspace admin role required'), 403
+        return jsonify(error='analyst role required'), 403
     payload = request.json or {}
-    action = payload.get('action')
+    action = str(payload.get('action') or '').strip()
     target = str(payload.get('target', '')).strip()
+    dry_run = bool(payload.get('dry_run', True))
+    contract = _approval_contract(action)
     if action not in RESPONSE_ACTIONS:
         audit_event('response_approval_failed', 'api_response_approvals', 'failed', f"unsupported action={action}")
         return jsonify(error='unsupported response action'), 400
@@ -3412,93 +3832,183 @@ def api_response_approvals():
         audit_event('response_approval_failed', 'api_response_approvals', 'failed', 'target is required')
         return jsonify(error='target is required'), 400
     try:
-        preview = _dry_run_response_action(action, target)
+        preview = _preview_authorized_action(action, target, dry_run=dry_run)
     except Exception as exc:
         audit_event('response_approval_failed', f"response_action:{action}", 'failed', str(exc))
         return jsonify(error=str(exc)), 400
-    if payload.get('incident_id'):
-        incident = _db_query("SELECT id FROM incidents WHERE id = ? AND organization_id = ?", (payload.get('incident_id'), org_id))
+    incident_id = _clean_optional_text(payload.get('incident_id'))
+    anomaly_id = _clean_optional_text(payload.get('anomaly_id'))
+    if incident_id:
+        incident = _db_query("SELECT id FROM incidents WHERE id = ? AND organization_id = ?", (incident_id, org_id))
         if not incident:
-            audit_event('response_approval_failed', f"incident:{payload.get('incident_id')}", 'failed', 'incident not found')
+            audit_event('response_approval_failed', f"incident:{incident_id}", 'failed', 'incident not found')
             return jsonify(error='incident not found'), 404
     approval_id = f"RA-{uuid.uuid4().hex[:10]}"
     now = datetime.now().isoformat()
     expires_at = (datetime.now() + timedelta(seconds=APPROVAL_TTL_SECONDS)).isoformat()
+    request_payload = _approval_payload(action, target, incident_id=incident_id, anomaly_id=anomaly_id, dry_run=dry_run)
+    preview_model = approval_preview(request_payload)
+    preview = preview_model['detail']
+    payload_digest = approval_payload_digest(request_payload)
+    preview_digest = approval_preview_digest(request_payload, preview_model)
     _db_exec(
-        "INSERT INTO response_approvals (id, organization_id, incident_id, anomaly_id, action, target, requested_by, approved_by, status, reason, dry_run, created_at, updated_at, expires_at, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (approval_id, org_id, payload.get('incident_id'), payload.get('anomaly_id'), action, target, user['username'], None, 'pending', payload.get('reason'), int(bool(payload.get('dry_run', True))), now, now, expires_at, preview)
+        """
+        INSERT INTO response_approvals (
+            id, organization_id, incident_id, anomaly_id, action, target, requested_by,
+            requester_role, approved_by, approver_role, status, reason, decision_reason,
+            dry_run, created_at, updated_at, expires_at, decided_at, executed_at,
+            consumed_by, consumed_at, payload_digest, preview_digest, action_type, required_role, result
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            approval_id, org_id, incident_id, anomaly_id, action, target, user['username'],
+            user['role'], None, None, 'pending', _clean_optional_text(payload.get('reason')), None,
+            int(dry_run), now, now, expires_at, None, None, None, None, payload_digest, preview_digest,
+            contract['action_type'], contract['required_role'], preview
+        )
     )
-    if payload.get('incident_id'):
-        _incident_event(payload.get('incident_id'), 'approval_requested', f"{action} target={target}", organization_id=org_id)
-        _incident_event(payload.get('incident_id'), 'status_updated', json.dumps({'status': 'waiting_for_approval'}), organization_id=org_id)
-        _db_exec("UPDATE incidents SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?", ('waiting_for_approval', now, payload.get('incident_id'), org_id))
+    created_approval = _approval_row(approval_id)
+    if incident_id:
+        _approval_incident_event(
+            created_approval,
+            'approval_requested',
+            f"{action} target={target}",
+            actor=user['username'],
+            result='success',
+        )
+        _incident_event(incident_id, 'status_updated', json.dumps({'status': 'waiting_for_approval'}), organization_id=org_id)
+        _db_exec("UPDATE incidents SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ?", ('waiting_for_approval', now, incident_id, org_id))
     audit_detail = f"{action} target={target}"
-    audit_payload = {'action': action, 'target': target, 'incident_id': payload.get('incident_id'), 'dry_run': bool(payload.get('dry_run', True))}
+    audit_payload = {
+        **_approval_structured_details(created_approval),
+        'action_type': contract['action_type'],
+        'required_role': contract['required_role'],
+        'payload_digest': payload_digest,
+    }
     audit_event('response_action_requested', f"approval:{approval_id}", 'success', audit_detail, details=audit_payload)
     audit_event('response_approval_requested', f"approval:{approval_id}", 'success', audit_detail, details=audit_payload)
     return jsonify(success=True, approval=_approval_row(approval_id), preview=preview)
 
 
-@app.route('/api/response_approvals/<approval_id>', methods=['POST'])
-@require_admin
+@app.route('/api/response_approvals/<approval_id>', methods=['GET', 'POST'])
 def api_response_approval_detail(approval_id):
     approval = _approval_row(approval_id)
     if not approval:
         return jsonify(error='approval not found'), 404
+    if request.method == 'GET':
+        return jsonify(_approval_diagnostics(approval))
     payload = request.json or {}
     command = payload.get('command')
     user = current_user()
     now = datetime.now().isoformat()
-    if command in {'approve', 'reject'}:
-        if command == 'approve' and _approval_expired(approval, datetime.fromisoformat(now)):
-            _db_exec("UPDATE response_approvals SET status = ?, updated_at = ? WHERE id = ?", ('expired', now, approval_id))
-            if approval.get('incident_id'):
-                _incident_event(approval['incident_id'], 'approval_expired', f"{approval['action']} target={approval['target']}")
-            audit_event('response_approval_expired', f"approval:{approval_id}", 'denied', approval['action'])
-            return jsonify(error='approval request has expired', approval=_approval_row(approval_id)), 409
-        status = 'approved' if command == 'approve' else 'rejected'
-        _db_exec(
-            "UPDATE response_approvals SET status = ?, approved_by = ?, updated_at = ? WHERE id = ?",
-            (status, user['username'], now, approval_id)
-        )
-        if approval.get('incident_id'):
-            _incident_event(approval['incident_id'], f"approval_{status}", f"{approval['action']} target={approval['target']}")
-        audit_event(f"response_action_{status}", f"approval:{approval_id}", 'success', approval['action'], details={'action': approval['action'], 'target': approval['target']})
-        audit_event(f"response_approval_{status}", f"approval:{approval_id}", 'success', approval['action'], details={'action': approval['action'], 'target': approval['target']})
-        return jsonify(success=True, approval=_approval_row(approval_id))
-    if command == 'execute':
-        if approval['status'] != 'approved':
-            audit_event('response_action_started', f"approval:{approval_id}", 'denied', 'approval must be approved before execution')
-            return jsonify(error='approval must be approved before execution'), 409
-        if _approval_expired(approval, datetime.fromisoformat(now)):
-            _db_exec("UPDATE response_approvals SET status = ?, updated_at = ? WHERE id = ?", ('expired', now, approval_id))
-            if approval.get('incident_id'):
-                _incident_event(approval['incident_id'], 'approval_expired', f"{approval['action']} target={approval['target']}")
-            audit_event('response_action_started', f"approval:{approval_id}", 'denied', 'approval expired')
-            return jsonify(error='approval request has expired', approval=_approval_row(approval_id)), 409
+    if command in {'approve', 'reject', 'cancel'}:
+        decision_reason = _clean_optional_text(payload.get('reason') or payload.get('decision_reason'))
+        if not decision_reason:
+            _approval_incident_event(approval, 'approval_decision_blocked', 'decision reason is required', actor=user['username'], result='denied')
+            audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', 'decision reason is required')
+            return jsonify(error='decision reason is required'), 400
+        contract = _approval_contract(approval['action'])
+        if not contract:
+            _approval_incident_event(approval, 'approval_decision_blocked', 'unsupported response action', actor=user['username'], result='failed')
+            audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', 'unsupported response action')
+            return jsonify(error='unsupported response action'), 400
+        if command in {'approve', 'reject'} and not _role_allows(user, contract['required_role']):
+            _approval_incident_event(approval, 'approval_decision_blocked', f"{contract['required_role']} role required", actor=user['username'], result='denied')
+            audit_event('access_denied', f"approval:{approval_id}", 'denied', f"{contract['required_role']} role required")
+            return jsonify(error=f"{contract['required_role']} role required"), 403
+        if command == 'approve' and approval['requested_by'] == user['username']:
+            _approval_incident_event(approval, 'approval_decision_blocked', 'self approval is prohibited', actor=user['username'], result='denied')
+            audit_event('response_approval_failed', f"approval:{approval_id}", 'denied', 'self approval is prohibited')
+            return jsonify(error='requester cannot approve their own request'), 403
+        if command == 'cancel' and approval['requested_by'] != user['username'] and user['role'] != 'admin':
+            _approval_incident_event(approval, 'approval_decision_blocked', 'only requester or admin can cancel approval', actor=user['username'], result='denied')
+            audit_event('access_denied', f"approval:{approval_id}", 'denied', 'only requester or admin can cancel approval')
+            return jsonify(error='only requester or admin can cancel approval'), 403
+        status = 'cancelled' if command == 'cancel' else ('approved' if command == 'approve' else 'rejected')
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
         try:
-            audit_event('response_action_started', f"approval:{approval_id}", 'success', approval['action'], details={'action': approval['action'], 'target': approval['target'], 'dry_run': bool(approval['dry_run'])})
-            result = _execute_response_action(approval['action'], approval['target'], dry_run=bool(approval['dry_run']))
-            status = 'executed_dry_run' if approval['dry_run'] else 'executed'
-            _db_exec(
-                "UPDATE response_approvals SET status = ?, executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
-                (status, now, now, result['detail'], approval_id)
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM response_approvals WHERE id = ? AND organization_id = ?",
+                (approval_id, user.get('organization_id'))
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return jsonify(error='approval not found'), 404
+            current = _response_approval_from_row(row)
+            if current['status'] != 'pending':
+                conn.rollback()
+                _approval_incident_event(current, 'approval_decision_blocked', 'approval already has a terminal decision', actor=user['username'], result='denied')
+                audit_event('response_approval_failed', f"approval:{approval_id}", 'denied', 'approval already has a terminal decision')
+                return jsonify(error='approval already has a terminal decision', approval=current), 409
+            if _approval_expired(current, datetime.fromisoformat(now)):
+                _mark_approval_expired(conn, current, now)
+                conn.commit()
+                expired_approval = _approval_row(approval_id)
+                _approval_incident_event(expired_approval, 'approval_expired', f"{current['action']} target={current['target']}", actor=user['username'], result='denied')
+                audit_event('response_approval_expired', f"approval:{approval_id}", 'denied', current['action'])
+                return jsonify(error='approval request has expired', approval=expired_approval), 409
+            updated = conn.execute(
+                """
+                UPDATE response_approvals
+                SET status = ?, approved_by = ?, approver_role = ?, decision_reason = ?,
+                    decided_at = ?, updated_at = ?, result = ?
+                WHERE id = ? AND organization_id = ? AND status = ?
+                """,
+                (status, user['username'], user['role'], decision_reason, now, now, decision_reason,
+                 approval_id, user.get('organization_id'), 'pending')
             )
-            if approval.get('incident_id'):
-                _incident_event(approval['incident_id'], 'response_executed', result['detail'])
-            audit_event('response_action_succeeded', f"approval:{approval_id}", 'success', result['detail'], details={'action': approval['action'], 'target': approval['target'], 'executed': result['executed']})
-            audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'], details={'action': approval['action'], 'target': approval['target'], 'executed': result['executed']})
-            return jsonify(success=True, result=result, approval=_approval_row(approval_id))
+            if updated.rowcount != 1:
+                conn.rollback()
+                return jsonify(error='approval already has a terminal decision', approval=_approval_row(approval_id)), 409
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        updated_approval = _approval_row(approval_id)
+        _approval_incident_event(updated_approval, f"approval_{status}", f"{approval['action']} target={approval['target']}", actor=user['username'], reason=decision_reason, result='success')
+        details = _approval_structured_details(updated_approval, reason=decision_reason, approver_role=user['role'])
+        audit_event(f"response_action_{status}", f"approval:{approval_id}", 'success', approval['action'], details=details)
+        audit_event(f"response_approval_{status}", f"approval:{approval_id}", 'success', approval['action'], details=details)
+        return jsonify(success=True, approval=updated_approval)
+    if command == 'execute':
+        execution_payload = _approval_payload(
+            payload.get('action', approval['action']),
+            payload.get('target', approval['target']),
+            payload.get('incident_id', approval.get('incident_id')),
+            payload.get('anomaly_id', approval.get('anomaly_id')),
+            payload.get('dry_run', bool(approval.get('dry_run'))),
+        )
+        auth = authorizeApprovedAction(approval_id, {**execution_payload, 'requester': approval['requested_by']}, actor=user, consume=True)
+        if not auth['ok']:
+            blocked_approval = auth.get('approval') or approval
+            _approval_incident_event(blocked_approval, 'response_execution_blocked', auth['error'], actor=user['username'], result='denied')
+            audit_event('response_action_started', f"approval:{approval_id}", 'denied', auth['error'], details=_approval_structured_details(blocked_approval, error=auth['error'], result='denied'))
+            return jsonify(error=auth['error'], approval=auth.get('approval')), auth['status_code']
+        try:
+            audit_event('response_action_started', f"approval:{approval_id}", 'success', approval['action'], details=_approval_structured_details(auth['approval'], payload_digest=auth['payload_digest'], result='success'))
+            result = _execute_response_action(approval['action'], approval['target'], dry_run=bool(approval['dry_run']))
+            _db_exec("UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?", (now, now, result['detail'], approval_id))
+            executed_approval = _approval_row(approval_id)
+            _approval_incident_event(executed_approval, 'response_executed', result['detail'], actor=user['username'], result='success', executed=result['executed'])
+            result_details = _approval_structured_details(executed_approval, result='success', executed=result['executed'])
+            audit_event('response_action_succeeded', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
+            audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
+            return jsonify(success=True, result=result, approval=executed_approval)
         except Exception as exc:
             _db_exec(
-                "UPDATE response_approvals SET status = ?, updated_at = ?, result = ? WHERE id = ?",
-                ('failed', now, str(exc), approval_id)
+                "UPDATE response_approvals SET updated_at = ?, result = ? WHERE id = ?",
+                (now, str(exc), approval_id)
             )
-            if approval.get('incident_id'):
-                _incident_event(approval['incident_id'], 'response_failed', str(exc))
-            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', str(exc), details={'action': approval['action'], 'target': approval['target']})
-            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', str(exc), details={'action': approval['action'], 'target': approval['target']})
-            return jsonify(error=str(exc), approval=_approval_row(approval_id)), 400
+            failed_approval = _approval_row(approval_id)
+            _approval_incident_event(failed_approval, 'response_failed', str(exc), actor=user['username'], result='failed')
+            failed_details = _approval_structured_details(failed_approval, error=str(exc), result='failed')
+            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', str(exc), details=failed_details)
+            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', str(exc), details=failed_details)
+            return jsonify(error=str(exc), approval=failed_approval), 400
     audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', f"unsupported command={command}")
     return jsonify(error='unsupported command'), 400
 

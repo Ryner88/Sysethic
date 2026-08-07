@@ -139,7 +139,7 @@ class SecurityWorkflowTests(unittest.TestCase):
         approval_id = response.json['approval']['id']
 
         response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 409)
         response = self.client.post('/api/playbook_trigger', json={'id': 101})
         self.assertEqual(response.status_code, 200)
         response = self.client.post('/api/playbooks', json={'name': 'analyst mutation'})
@@ -166,7 +166,7 @@ class SecurityWorkflowTests(unittest.TestCase):
         self.assertNotIn(requested_incident_id, {i['id'] for i in response.json['incidents']})
         response = self.client.get(f'/api/incidents/{requested_incident_id}')
         self.assertEqual(response.status_code, 404)
-        response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'approve'})
+        response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'approve', 'reason': 'validated incident report request'})
         self.assertEqual(response.status_code, 200)
         response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
         self.assertEqual(response.status_code, 200)
