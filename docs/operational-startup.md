@@ -87,7 +87,15 @@ Phase 3 closeout:
 - `70e5c01` added the durable approval contract foundation.
 - `831f1dc` added bounded approved service restart execution.
 - `venv/bin/python -m unittest discover tests` passed with 37 tests.
-- Phase 4 handoff starts at Controlled Validation Event Center work; do not add broader host-impacting adapters without the same approval, allowlist, timeout, recovery, audit, and replay protections.
+- Do not add broader host-impacting adapters without the same approval, allowlist, timeout, recovery, audit, and replay protections.
+
+Phase 4 #10 closeout:
+
+- Controlled validation events are available for CPU pressure, memory pressure, suspicious network activity, and sensitive file access.
+- Validation events write `validation_events`, normal anomaly rows, incident rows, matching playbook runs, audit events, and incident timeline entries.
+- Validation events are explicitly labeled as controlled validation inputs and never execute dangerous host changes.
+- Approval-required actions remain response-approval gated and are recorded as waiting for approval until an authorized approval flow is completed.
+- `venv/bin/python -m unittest discover` passed with 38 tests.
 
 Operational API writes insert or update SQLite before returning success. In-memory lists are only runtime caches and are reloaded from SQLite on startup. API storage failures return JSON errors with `error: "storage write failed"` and an explanatory `detail` field.
 

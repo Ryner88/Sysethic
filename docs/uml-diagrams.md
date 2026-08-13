@@ -17,6 +17,7 @@ flowchart LR
     ThreatIntel[(Local Threat Intel JSON)]
     TerminalAPI[Authenticated terminal API<br/>/api/terminal/run]
     ApprovalBoundary[Approval authorization boundary]
+    ValidationCenter[Controlled Validation Event Center<br/>/api/validation_events]
 
     Operator --> Browser
     Browser -->|HTML pages| Flask
@@ -30,8 +31,10 @@ flowchart LR
     Flask --> ThreatIntel
     Flask --> TerminalAPI
     Flask --> ApprovalBoundary
+    Flask --> ValidationCenter
     TerminalAPI -->|fixed diagnostic allowlist| Psutil
     ApprovalBoundary -->|bounded service restart allowlist| Psutil
+    ValidationCenter -->|controlled inputs only| SQLite
 
     subgraph Pages
       Dashboard[Dashboard]
@@ -42,6 +45,7 @@ flowchart LR
       Reports[Reports]
       Automation[Automation]
       Playbooks[Playbooks]
+      Validation[Validation]
       Terminal[Terminal]
     end
 
@@ -73,6 +77,17 @@ classDiagram
         +int risk_score
         +string indicator
         +list frameworks
+    }
+
+    class ValidationEvent {
+        +string id
+        +string event_type
+        +string status
+        +string anomaly_id
+        +string incident_id
+        +string created_by
+        +datetime created_at
+        +string detail
     }
 
     class ThreatIntelMatch {
@@ -138,6 +153,8 @@ classDiagram
     SystemMetric --> Anomaly : evaluated into
     Anomaly --> ThreatIntelMatch : decorated with
     AutomationRule --> Anomaly : matches
+    ValidationEvent --> Anomaly : creates controlled input
+    ValidationEvent --> Incident : opens workflow
     Playbook --> Anomaly : responds to
     Playbook --> PlaybookRun : creates
     Playbook --> ResponseApproval : requests risky action
@@ -167,6 +184,30 @@ sequenceDiagram
     API->>PB: Match enabled playbook
     PB->>Rules: Record playbook run
     API-->>UI: Return response run status
+```
+
+## Controlled Validation Event Sequence
+
+```mermaid
+sequenceDiagram
+    participant Operator as Analyst or Admin
+    participant UI as Validation Page
+    participant API as /api/validation_events
+    participant DB as SQLite
+    participant Incidents as Incident Workflow
+    participant PB as Playbook Engine
+    participant Audit as Audit + Timeline
+
+    Operator->>UI: Create CPU, memory, network, or sensitive-file validation event
+    UI->>API: POST controlled event type
+    API->>DB: Store validation_event row
+    API->>DB: Persist normal anomaly marked validation=true
+    API->>Incidents: Create incident from anomaly
+    API->>PB: Match enabled playbooks
+    PB->>DB: Record playbook run
+    API->>Audit: Record controlled validation audit and timeline entries
+    API-->>UI: Return validation event, anomaly, incident, and playbook runs
+    Note over API,PB: Approval-required actions remain waiting_for_approval and are not executed by validation events.
 ```
 
 ## Visualization Lab Sequence

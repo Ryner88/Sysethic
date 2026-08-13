@@ -159,3 +159,22 @@ Result: Ran 37 tests in 111.192s - OK
 Phase 3 status: Complete.
 
 Phase 4 handoff: start with Phase 4 #10, Controlled Validation Event Center, using the completed approval and bounded-execution path as the safety boundary for validation workflows.
+
+### Phase 4 #10: Controlled Validation Event Center
+
+Started the Controlled Validation Event Center with safe CPU pressure, memory pressure, suspicious network, and sensitive-file validation events. Each event is a clearly labeled controlled validation input that creates a normal anomaly, opens an incident through the same incident creation path, records matching playbook runs, and writes validation-specific audit and incident timeline events.
+
+Safety boundary:
+
+- Validation events do not execute dangerous host changes.
+- Approval-contract actions remain approval-gated and are recorded as waiting for approval.
+- Existing bounded execution safeguards are reused; no broader host-impacting adapters were added.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest tests.test_validation_event_center
+venv/bin/python -m unittest tests.test_response_approval_contract
+venv/bin/python -m unittest tests.test_security_workflows
+venv/bin/python -m unittest discover
+```

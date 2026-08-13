@@ -21,9 +21,9 @@ Phase 3, Controlled Operations, is complete. The current `main` history preserve
 - `70e5c01` - approval contract foundation for risky response actions.
 - `831f1dc` - first bounded approved host-impacting execution path.
 
-Verification: `venv/bin/python -m unittest discover tests` passed with 37 tests.
+Phase 4 #10, Controlled Validation Event Center, is complete. It adds safe CPU pressure, memory pressure, suspicious network, and sensitive-file validation events that create normal anomalies, incidents, matching playbook runs, audit records, and incident timeline entries without executing host-impacting actions or bypassing approvals.
 
-Phase 4 handoff: continue with controlled operational validation, starting at Phase 4 #10, from the clean Phase 3 closeout on `main`.
+Verification: `venv/bin/python -m unittest discover` passed with 38 tests.
 
 ## Architecture
 
@@ -42,6 +42,7 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
 - **Analytics**: Detailed real-time system analytics
 - **Visualization Lab**: Advanced scientific-style visualization with timeline replay, heatmaps, and multidimensional metric plots
 - **Security**: Alerts, incident response, approvals, and validation
+- **Validation**: Controlled CPU, memory, network, and sensitive-file workflow checks
 - **Audit Logs**: Transparent logging and compliance
 - **Ethics**: Privacy dashboard and ethical AI monitoring
 - **Files**: Privacy-conscious file handling and access logs
@@ -83,6 +84,8 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
 ## Usage
 
 Log in with a SysEthic workspace account, then navigate through the sidebar to access monitoring sections. Workspace Admins manage members, workspace settings, playbooks, audits, and reports for their own workspace. Regular Users can view assigned dashboards, run allowed playbooks, and submit incident findings. Platform-owner diagnostics are separate from workspace administration.
+
+Use **Validation** to create controlled validation inputs for CPU pressure, memory pressure, suspicious network activity, and sensitive file access. These events are labeled as validation inputs, create normal anomalies and incidents, and record matching playbook runs. Approval-required response actions remain gated by the response approval workflow.
 
 By default, the app binds to `127.0.0.1`, listens on port `5001`, stores operational data in `data/saaoe.db`, reads local telemetry logs from `logs/system_log.csv`, and disables Flask debug mode. Configuration can be changed with environment variables or `.env`.
 

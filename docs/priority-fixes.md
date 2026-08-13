@@ -481,6 +481,8 @@ Handoff: begin with #10, Controlled Validation Event Center. Validation work sho
 
 ### 10. Add Controlled Validation Event Center
 
+Status: Complete.
+
 Goal: generate safe, local validation events that prove detection, incident creation, playbook recommendation, approval, and audit logging work end to end.
 
 Build:
@@ -498,6 +500,15 @@ Acceptance criteria:
 - Validation events never require dangerous system changes.
 - Validation events are clearly marked in the audit log and incident timeline.
 - Users can run a complete validation path from event to incident closure.
+
+Implementation:
+
+- `/api/validation_events` supports CPU pressure, memory pressure, suspicious network, and sensitive-file validation events from a bounded catalog.
+- Each validation event creates a normal anomaly, opens an incident, records matching playbook runs, writes structured audit details, and adds incident timeline entries identifying the controlled validation input.
+- Approval-contract actions remain waiting for approval and cannot be executed by the validation event center.
+- The validation page renders event types from the API and shows validation history.
+
+Verification: `venv/bin/python -m unittest discover` passed with 38 tests.
 
 Why priority: operational systems need repeatable validation without requiring users to create real security problems on their machines.
 

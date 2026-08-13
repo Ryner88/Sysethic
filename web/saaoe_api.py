@@ -188,6 +188,52 @@ APPROVED_SERVICE_RESTARTS = {
         'recovery': 'If restart fails, SAAOE will attempt systemctl start saaoe-dashboard.service.',
     },
 }
+VALIDATION_EVENT_CATALOG = {
+    'cpu_pressure': {
+        'label': 'CPU Pressure',
+        'metric': 'cpu_percent',
+        'value': 96.0,
+        'threshold': CPU_THRESHOLD,
+        'severity': 'critical',
+        'category': 'system',
+        'indicator': 'validation-cpu-pressure',
+        'frameworks': ['NIST DE.CM-1', 'CIS 8.16'],
+        'detail': 'Controlled validation input for runaway CPU detection.',
+    },
+    'memory_pressure': {
+        'label': 'Memory Pressure',
+        'metric': 'memory_percent',
+        'value': 91.0,
+        'threshold': MEMORY_THRESHOLD,
+        'severity': 'high',
+        'category': 'host',
+        'indicator': 'validation-memory-pressure',
+        'frameworks': ['NIST DE.CM-1', 'CIS 8.16'],
+        'detail': 'Controlled validation input for memory pressure detection.',
+    },
+    'suspicious_network': {
+        'label': 'Suspicious Network',
+        'metric': 'network_public_connection',
+        'value': 1.0,
+        'threshold': 0.0,
+        'severity': 'high',
+        'category': 'network',
+        'indicator': '198.51.100.10',
+        'frameworks': ['NIST DE.CM-7', 'CIS 13.5'],
+        'detail': 'Controlled validation input for public network connection review.',
+    },
+    'sensitive_file_access': {
+        'label': 'Sensitive File',
+        'metric': 'sensitive_file_access',
+        'value': 1.0,
+        'threshold': 0.0,
+        'severity': 'high',
+        'category': 'file',
+        'indicator': 'validation/sensitive-seed.txt',
+        'frameworks': ['NIST DE.CM-3', 'CIS 3.3'],
+        'detail': 'Controlled validation input for sensitive file access review.',
+    },
+}
 
 
 def _db():
@@ -1523,15 +1569,65 @@ def _incident_event(incident_id, event_type, detail, actor=None, organization_id
     )
 
 
+def _record_playbook_run(anomaly, pb, seen=None):
+    if seen is None:
+        seen = set()
+    key = (pb['id'], anomaly.get('id'))
+    if key in seen:
+        return None
+    action_contract = _approval_contract(pb.get('action')) or {}
+    requires_approval = bool(action_contract.get('host_impacting') or action_contract.get('required_role') in {'admin', 'analyst'})
+    run_status = 'waiting_for_approval' if requires_approval else ('resolved' if pb.get('auto') else 'open')
+    run_entry = {
+        'playbook_id': pb['id'],
+        'name': pb['name'],
+        'anomaly_id': anomaly.get('id'),
+        'metric': anomaly['metric'],
+        'value': anomaly['value'],
+        'threshold': pb['threshold'],
+        'action': pb['action'],
+        'target': pb['target'],
+        'timestamp': datetime.now().isoformat(),
+        'auto': pb.get('auto', False),
+        'status': run_status,
+        'yaml': pb.get('yaml', ''),
+    }
+    cur = _db_exec(
+        "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (anomaly.get('organization_id'), run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
+    )
+    run_entry['id'] = cur.lastrowid
+    run_entry['organization_id'] = anomaly.get('organization_id')
+    playbook_runs.append(run_entry)
+    seen.add(key)
+    if pb.get('auto') and not requires_approval:
+        notification_queue.put({
+            'type': 'playbook_trigger',
+            'playbook': pb['name'],
+            'details': run_entry,
+        })
+    return run_entry
+
+
+def _matching_playbooks(anomaly):
+    matches = []
+    for pb in _playbooks_from_db(anomaly.get('organization_id')):
+        if not pb.get('enabled', False):
+            continue
+        if anomaly.get('metric') != pb.get('metric'):
+            continue
+        if op_eval(anomaly.get('value', 0), pb.get('operator'), pb.get('threshold')):
+            matches.append(pb)
+    return matches
+
+
 def _recommended_playbook(anomaly):
-    for pb in playbooks:
-        if pb.get('enabled') and pb.get('metric') == anomaly.get('metric'):
-            try:
-                if op_eval(float(anomaly.get('value', 0)), pb.get('operator'), float(pb.get('threshold', 0))):
-                    return pb
-            except (TypeError, ValueError):
-                continue
-    for pb in playbooks:
+    matches = []
+    for pb in _matching_playbooks(anomaly):
+        matches.append(pb)
+    if matches:
+        return sorted(matches, key=lambda pb: (pb.get('category') != anomaly.get('category'), bool(pb.get('auto')), pb['id']))[0]
+    for pb in _playbooks_from_db(anomaly.get('organization_id')):
         if pb.get('enabled') and pb.get('category') == anomaly.get('category'):
             return pb
     return None
@@ -1570,30 +1666,30 @@ def _validation_anomalies(organization_id=None):
             (organization_id,)
         )
     for row in rows:
-        if row['event_type'] == 'cpu_pressure':
-            metric, value, severity, category = 'cpu_percent', 96.0, 'critical', 'system'
-        elif row['event_type'] == 'memory_pressure':
-            metric, value, severity, category = 'memory_percent', 91.0, 'high', 'host'
-        elif row['event_type'] == 'suspicious_network':
-            metric, value, severity, category = 'network_public_connection', 1.0, 'high', 'network'
-        else:
-            metric, value, severity, category = 'sensitive_file_access', 1.0, 'high', 'file'
+        profile = VALIDATION_EVENT_CATALOG.get(row['event_type'])
+        if not profile:
+            continue
         anomaly = {
             'id': row['anomaly_id'],
             'organization_id': row.get('organization_id'),
             'timestamp': row['created_at'],
-            'metric': metric,
-            'value': value,
-            'threshold': 0.0 if value == 1.0 else value - 5,
-            'severity': severity,
-            'category': category,
+            'metric': profile['metric'],
+            'value': profile['value'],
+            'threshold': profile['threshold'],
+            'severity': profile['severity'],
+            'category': profile['category'],
             'confidence': 0.95,
-            'rule_name': f"Controlled validation: {row['event_type']}",
+            'rule_name': f"Controlled validation: {profile['label']}",
             'indicator_type': 'validation',
-            'indicator': row['event_type'],
-            'threat_intel': {'matched': False, 'confidence': 0, 'source': 'controlled validation event', 'tags': ['validation']},
-            'risk_score': 90 if severity == 'critical' else 76,
-            'frameworks': ['NIST DE.CM-1', 'CIS 8.16'],
+            'indicator': profile['indicator'],
+            'threat_intel': {
+                'matched': False,
+                'confidence': 0,
+                'source': 'controlled validation event',
+                'tags': ['validation', row['event_type']],
+            },
+            'risk_score': 90 if profile['severity'] == 'critical' else 76,
+            'frameworks': profile['frameworks'],
             'validation': True,
         }
         risk_level = risk_severity(anomaly['risk_score'])
@@ -3896,7 +3992,7 @@ def api_validation_events():
     user = current_user()
     org_id = user.get('organization_id')
     if request.method == 'GET':
-        return jsonify(events=[_status_record(row) for row in _db_query(
+        return jsonify(event_types=VALIDATION_EVENT_CATALOG, events=[_status_record(row) for row in _db_query(
             "SELECT * FROM validation_events WHERE organization_id = ? ORDER BY created_at DESC LIMIT 100",
             (org_id,)
         )])
@@ -3905,24 +4001,74 @@ def api_validation_events():
         return jsonify(error='workspace admin role required'), 403
     payload = request.json or {}
     event_type = payload.get('event_type', 'cpu_pressure')
-    if event_type not in {'cpu_pressure', 'memory_pressure', 'suspicious_network', 'sensitive_file_access'}:
+    profile = VALIDATION_EVENT_CATALOG.get(event_type)
+    if not profile:
         audit_event('validation_event_failed', 'api_validation_events', 'failed', f"unsupported event_type={event_type}")
         return jsonify(error='unsupported validation event type'), 400
     event_id = f"VE-{uuid.uuid4().hex[:10]}"
     anomaly_id = f"validation-{event_id.lower()}"
     now = datetime.now().isoformat()
+    detail = payload.get('detail') or profile['detail']
     _db_exec(
         "INSERT INTO validation_events (id, organization_id, event_type, status, anomaly_id, incident_id, created_by, created_at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (event_id, org_id, event_type, 'open', anomaly_id, None, user['username'], now, payload.get('detail', 'controlled validation event'))
+        (event_id, org_id, event_type, 'open', anomaly_id, None, user['username'], now, detail)
     )
     anomaly = next(a for a in _validation_anomalies(org_id) if a['id'] == anomaly_id)
     _persist_anomaly(anomaly, organization_id=org_id)
-    audit_event('alert_generated', f"anomaly:{anomaly_id}", 'success', f"{event_type} severity={anomaly['severity']}", details={'event_type': event_type, 'severity': anomaly['severity'], 'risk_score': anomaly['risk_score']})
+    validation_details = {
+        'validation_event_id': event_id,
+        'event_type': event_type,
+        'controlled_validation': True,
+        'severity': anomaly['severity'],
+        'risk_score': anomaly['risk_score'],
+        'metric': anomaly['metric'],
+        'indicator': anomaly['indicator'],
+    }
+    audit_event('alert_generated', f"anomaly:{anomaly_id}", 'success', f"controlled validation {event_type} severity={anomaly['severity']}", details=validation_details)
     incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
+    playbook_runs_created = []
+    seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in _playbook_runs_from_db(org_id, limit=1000)}
+    for pb in _matching_playbooks(anomaly):
+        run = _record_playbook_run(anomaly, pb, seen=seen)
+        if run:
+            playbook_runs_created.append(run)
+    _incident_event(
+        incident['id'],
+        'validation_event_created',
+        _json_dumps({**validation_details, 'detail': detail}),
+        actor=user['username'],
+        organization_id=org_id,
+    )
+    if playbook_runs_created:
+        _incident_event(
+            incident['id'],
+            'validation_playbook_run_created',
+            _json_dumps({
+                'validation_event_id': event_id,
+                'controlled_validation': True,
+                'run_ids': [run['id'] for run in playbook_runs_created],
+                'playbooks': [run['name'] for run in playbook_runs_created],
+            }),
+            actor=user['username'],
+            organization_id=org_id,
+        )
     _db_exec("UPDATE validation_events SET incident_id = ?, status = ? WHERE id = ?", (incident['id'], 'resolved', event_id))
-    audit_event('validation_event_created', f"validation_event:{event_id}", 'success', event_type)
+    audit_event('validation_event_created', f"validation_event:{event_id}", 'success', event_type, details={
+        **validation_details,
+        'anomaly_id': anomaly_id,
+        'incident_id': incident['id'],
+        'playbook_run_ids': [run['id'] for run in playbook_runs_created],
+    })
     notification_queue.put({'type': 'validation_event', 'event_type': event_type, 'anomaly_id': anomaly_id, 'incident_id': incident['id']})
-    return jsonify(success=True, event_id=event_id, anomaly=anomaly, incident=_incident_from_row(incident))
+    return jsonify(
+        success=True,
+        event_id=event_id,
+        event_type=event_type,
+        controlled_validation=True,
+        anomaly=anomaly,
+        incident=_incident_from_row(incident),
+        playbook_runs=playbook_runs_created,
+    )
 
 
 @app.route('/api/response_approvals', methods=['GET', 'POST'])
@@ -4141,42 +4287,8 @@ def op_eval(value, operator, threshold):
 def apply_playbooks(anomalies):
     seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in _playbook_runs_from_db(limit=1000)}
     for anomaly in anomalies:
-        for pb in _playbooks_from_db(anomaly.get('organization_id')):
-            if not pb.get('enabled', False):
-                continue
-            if anomaly.get('metric') != pb.get('metric'):
-                continue
-            if op_eval(anomaly.get('value', 0), pb.get('operator'), pb.get('threshold')):
-                if (pb['id'], anomaly.get('id')) in seen:
-                    continue
-                run_entry = {
-                    'playbook_id': pb['id'],
-                    'name': pb['name'],
-                    'anomaly_id': anomaly.get('id'),
-                    'metric': anomaly['metric'],
-                    'value': anomaly['value'],
-                    'threshold': pb['threshold'],
-                    'action': pb['action'],
-                    'target': pb['target'],
-                    'timestamp': datetime.now().isoformat(),
-                    'auto': pb.get('auto', False),
-                    'status': 'resolved' if pb.get('auto') else 'open',
-                    'yaml': pb.get('yaml', '')
-                }
-                cur = _db_exec(
-                    "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (anomaly.get('organization_id'), run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
-                )
-                run_entry['id'] = cur.lastrowid
-                run_entry['organization_id'] = anomaly.get('organization_id')
-                playbook_runs.append(run_entry)
-                seen.add((pb['id'], anomaly.get('id')))
-                if pb.get('auto'):
-                    notification_queue.put({
-                        'type': 'playbook_trigger',
-                        'playbook': pb['name'],
-                        'details': run_entry
-                    })
+        for pb in _matching_playbooks(anomaly):
+            _record_playbook_run(anomaly, pb, seen=seen)
 
 
 def _workspace_playbooks(organization_id):
