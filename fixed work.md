@@ -170,6 +170,10 @@ Safety boundary:
 - Approval-contract actions remain approval-gated and are recorded as waiting for approval.
 - Existing bounded execution safeguards are reused; no broader host-impacting adapters were added.
 
+Relevant commit:
+
+- `10c3b7c` Add controlled validation event center
+
 Verification:
 
 ```bash
