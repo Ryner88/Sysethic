@@ -23,7 +23,9 @@ Phase 3, Controlled Operations, is complete. The current `main` history preserve
 
 Phase 4 #10, Controlled Validation Event Center, is complete. It adds safe CPU pressure, memory pressure, suspicious network, and sensitive-file validation events that create normal anomalies, incidents, matching playbook runs, audit records, and incident timeline entries without executing host-impacting actions or bypassing approvals.
 
-Verification: `venv/bin/python -m unittest discover` passed with 38 tests.
+Phase 4 #11 and #12 add persisted seeded operational playbook definitions, safe declarative step validation, versioned definition digests, immutable playbook run snapshots, and shared persisted matching for live and controlled anomalies.
+
+Verification: `venv/bin/python -m unittest discover` passed with 42 tests.
 
 ## Architecture
 

@@ -108,11 +108,8 @@ anomaly_rules = [
 ]
 next_rule_id = 5
 
-playbooks = [
-    {'id': 1, 'name': 'Kill runaway CPU', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': max(CPU_THRESHOLD, 95), 'action': 'kill_process', 'target': 'cmdline', 'enabled': True, 'auto': True, 'yaml': 'name: Kill runaway CPU\ncategory: system\nsteps:\n  - action: snapshot_process\n    target: top_cpu\n  - action: isolate_process\n    target: "{{ process.pid }}"\n  - action: notify\n    target: security-ops\n'},
-    {'id': 2, 'name': 'Isolate suspicious IP', 'category': 'network', 'metric': 'memory_percent', 'operator': '>', 'threshold': max(MEMORY_THRESHOLD, 90), 'action': 'block_ip', 'target': 'external', 'enabled': True, 'auto': False, 'yaml': 'name: Isolate suspicious IP\ncategory: network\nsteps:\n  - action: block_ip\n    target: "{{ anomaly.ip }}"\n  - action: collect_connections\n    target: host\n'},
-]
-next_playbook_id = 3
+playbooks = []
+next_playbook_id = 1
 playbook_runs = []
 
 automation_rules = [
@@ -174,6 +171,34 @@ APPROVAL_ACTION_CONTRACTS = {
     'create_incident_report': {'required_role': 'analyst', 'action_type': 'record_report', 'host_impacting': False},
 }
 RESPONSE_ACTIONS = set(APPROVAL_ACTION_CONTRACTS)
+PLAYBOOK_KINDS = {'anomaly_response', 'workflow_gate', 'incident_utility', 'approval_action', 'access_control'}
+PLAYBOOK_CATEGORIES = {'system', 'host', 'network', 'file', 'workflow', 'incident', 'authentication', 'access_control', 'custom'}
+PLAYBOOK_TRIGGER_TYPES = {'anomaly', 'workflow', 'incident'}
+PLAYBOOK_TRIGGER_OPERATORS = {'>', '>=', '<', '<=', '==', 'equals'}
+PLAYBOOK_RECOMMENDED_ACTION_KEYS = {
+    'review_process_evidence',
+    'review_memory_evidence',
+    'review_connection',
+    'review_file_access',
+    'request_approval',
+    'create_incident_report',
+    'create_admin_user',
+    'review_failed_login',
+    'revoke_session',
+    'deny_request',
+    'disable_user',
+}
+PLAYBOOK_STEP_ACTIONS = {
+    'review_evidence',
+    'record_note',
+    'request_approval',
+    'create_report',
+    'close_incident',
+}
+PLAYBOOK_APPROVAL_ROLES = {'none', 'viewer', 'analyst', 'admin', 'local_console', 'automatic', 'required_from_action'}
+PLAYBOOK_SOURCE_SEEDED = 'seeded'
+PLAYBOOK_SOURCE_SYSTEM = 'system'
+PLAYBOOK_SOURCE_CUSTOM = 'custom'
 QUARANTINE_DIR = str(CONFIG.quarantine_dir)
 TERMINAL_OUTPUT_LIMIT = CONFIG.terminal_output_limit
 APPROVAL_TTL_SECONDS = CONFIG.approval_ttl_seconds
@@ -283,6 +308,7 @@ def close_db(exc):
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     try:
         conn.executescript(
             """
@@ -533,7 +559,32 @@ def init_db():
         _ensure_column(conn, 'audit_events', 'target_id', 'TEXT')
         _ensure_column(conn, 'audit_events', 'details_json', 'TEXT')
         _ensure_column(conn, 'playbooks', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'playbooks', 'stable_key', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'description', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'kind', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'trigger_json', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'recommended_action_key', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'required_approval_role', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'steps_yaml', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'source', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'version', 'INTEGER NOT NULL DEFAULT 1')
+        _ensure_column(conn, 'playbooks', 'definition_digest', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'created_at', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'created_by', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'updated_at', 'TEXT')
+        _ensure_column(conn, 'playbooks', 'updated_by', 'TEXT')
         _ensure_column(conn, 'playbook_runs', 'organization_id', 'INTEGER')
+        _ensure_column(conn, 'playbook_runs', 'playbook_stable_key', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'playbook_name', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'playbook_kind', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'playbook_version', 'INTEGER')
+        _ensure_column(conn, 'playbook_runs', 'definition_digest', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'recommended_action_key', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'required_approval_role', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'steps_yaml', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'incident_id', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'created_at', 'TEXT')
+        _ensure_column(conn, 'playbook_runs', 'created_by', 'TEXT')
         _ensure_column(conn, 'incidents', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'incidents', 'linked_anomalies', "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, 'incidents', 'closed_at', 'TEXT')
@@ -605,6 +656,10 @@ def init_db():
         conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE file_classifications SET path = 'org:' || organization_id || ':' || path WHERE path NOT LIKE 'org:%'")
         conn.execute("UPDATE app_configuration SET key = 'org:' || organization_id || ':' || key WHERE key NOT LIKE 'org:%'")
+        _backfill_playbook_definitions(conn)
+        _backfill_playbook_runs(conn)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_playbooks_stable_key ON playbooks(stable_key)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_playbook_runs_anomaly_playbook ON playbook_runs(anomaly_id, playbook_id) WHERE anomaly_id IS NOT NULL")
         _backfill_vocabulary(conn)
         conn.commit()
     finally:
@@ -615,6 +670,314 @@ def _ensure_column(conn, table, column, definition):
     columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _slug(value):
+    text = re.sub(r'[^a-z0-9]+', '-', str(value or '').strip().lower())
+    return text.strip('-') or 'playbook'
+
+
+def _request_digest(payload):
+    sanitized = {k: v for k, v in (payload or {}).items() if k not in {'yaml', 'steps_yaml'}}
+    return hashlib.sha256(json.dumps(sanitized, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
+
+def _parse_trigger(value, legacy=None):
+    if isinstance(value, str):
+        value = _json_loads(value, None)
+    if not isinstance(value, dict):
+        value = legacy or {}
+    trigger_type = str(value.get('type') or value.get('event') or 'anomaly').strip()
+    if trigger_type not in PLAYBOOK_TRIGGER_TYPES:
+        raise ValueError('unsupported trigger type')
+    trigger = {'type': trigger_type}
+    if trigger_type == 'anomaly':
+        metric = str(value.get('metric') or '').strip()
+        operator = str(value.get('operator') or '').strip()
+        if operator == '=':
+            operator = '=='
+        if not metric:
+            raise ValueError('trigger metric is required')
+        if operator not in PLAYBOOK_TRIGGER_OPERATORS:
+            raise ValueError('unsupported trigger operator')
+        try:
+            threshold = float(value.get('threshold'))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('trigger threshold must be numeric') from exc
+        trigger.update({
+            'metric': metric,
+            'operator': operator,
+            'threshold': threshold,
+            'category': str(value.get('category') or '').strip() or None,
+        })
+    else:
+        trigger['event'] = str(value.get('event') or '').strip()
+        if not trigger['event']:
+            raise ValueError('trigger event is required')
+    return trigger
+
+
+def _format_scalar(value):
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return str(value)
+
+
+def _parse_scalar(value):
+    text = str(value).strip()
+    if text.lower() in {'true', 'false'}:
+        return text.lower() == 'true'
+    if text.lower() in {'none', 'null', '~'}:
+        return None
+    try:
+        if re.fullmatch(r'-?\d+', text):
+            return int(text)
+        if re.fullmatch(r'-?\d+\.\d+', text):
+            return float(text)
+    except ValueError:
+        pass
+    return text.strip('"\'')
+
+
+def _parse_steps_yaml(steps_yaml):
+    text = str(steps_yaml or '').strip()
+    if not text:
+        raise ValueError('steps YAML is required')
+    forbidden = re.compile(r'(^|\s)(shell|script|python|exec|subprocess|curl|wget|bash|sh)\b|[;&|<>`$]')
+    if forbidden.search(text):
+        raise ValueError('steps YAML contains executable or shell-like content')
+    steps = []
+    in_steps = False
+    current = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if stripped == 'steps:':
+            in_steps = True
+            continue
+        if not in_steps:
+            key = stripped.split(':', 1)[0]
+            if key in {'name', 'description', 'kind', 'category', 'approval'}:
+                continue
+            raise ValueError('only declarative metadata and steps are allowed')
+        if stripped.startswith('- '):
+            if current:
+                steps.append(current)
+            current = {}
+            remainder = stripped[2:].strip()
+            if remainder:
+                if ':' not in remainder:
+                    raise ValueError('step entries must use key/value pairs')
+                key, value = remainder.split(':', 1)
+                current[key.strip()] = _parse_scalar(value)
+            continue
+        if current is None or ':' not in stripped:
+            raise ValueError('step fields must belong to a step')
+        key, value = stripped.split(':', 1)
+        current[key.strip()] = _parse_scalar(value)
+    if current:
+        steps.append(current)
+    if not steps:
+        raise ValueError('at least one declarative step is required')
+    for step in steps:
+        action = str(step.get('action') or '').strip()
+        if action not in PLAYBOOK_STEP_ACTIONS:
+            raise ValueError(f'unsupported step action: {action or "missing"}')
+    return steps
+
+
+def _canonical_steps_yaml(steps):
+    lines = ['steps:']
+    for step in steps:
+        lines.append(f"  - action: {step['action']}")
+        for key in sorted(k for k in step if k != 'action'):
+            lines.append(f"    {key}: {_format_scalar(step[key])}")
+    return '\n'.join(lines) + '\n'
+
+
+def _playbook_digest_model(definition, trigger, steps):
+    return {
+        'stable_key': definition['stable_key'],
+        'name': definition['name'],
+        'description': definition.get('description') or '',
+        'kind': definition['kind'],
+        'category': definition['category'],
+        'trigger': trigger,
+        'recommended_action_key': definition['recommended_action_key'],
+        'required_approval_role': definition['required_approval_role'],
+        'steps': steps,
+        'enabled': bool(definition.get('enabled', True)),
+        'source': definition.get('source') or PLAYBOOK_SOURCE_CUSTOM,
+    }
+
+
+def _playbook_definition_digest(definition, trigger=None, steps=None):
+    trigger = trigger or _parse_trigger(definition.get('trigger_json'), legacy={
+        'type': 'anomaly',
+        'metric': definition.get('metric'),
+        'operator': definition.get('operator'),
+        'threshold': definition.get('threshold'),
+        'category': definition.get('category'),
+    })
+    steps = steps or _parse_steps_yaml(definition.get('steps_yaml') or definition.get('yaml'))
+    canonical = json.dumps(_playbook_digest_model(definition, trigger, steps), sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _normalize_playbook_definition(payload, existing=None, actor='system', source=None):
+    now = datetime.now().isoformat()
+    stable_key = str(payload.get('stable_key') or (existing or {}).get('stable_key') or _slug(payload.get('name'))).strip()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{2,96}', stable_key):
+        raise ValueError('stable_key must be 3-97 lowercase letters, numbers, dots, underscores, or hyphens')
+    name = str(payload.get('name') or (existing or {}).get('name') or stable_key).strip()
+    description = str(payload.get('description', (existing or {}).get('description') or '')).strip()
+    kind = str(payload.get('kind') or (existing or {}).get('kind') or 'anomaly_response').strip()
+    category = str(payload.get('category') or (existing or {}).get('category') or 'custom').strip()
+    command_action = payload.get('action') if payload.get('action') not in {'update', 'enable', 'disable', 'toggle', 'delete'} else None
+    recommended_action_key = str(payload.get('recommended_action_key') or payload.get('action_type') or command_action or (existing or {}).get('recommended_action_key') or 'review_process_evidence').strip()
+    required_approval_role = str(payload.get('required_approval_role') or (existing or {}).get('required_approval_role') or 'none').strip()
+    if kind not in PLAYBOOK_KINDS:
+        raise ValueError('unsupported playbook kind')
+    if category not in PLAYBOOK_CATEGORIES:
+        raise ValueError('unsupported playbook category')
+    if recommended_action_key not in PLAYBOOK_RECOMMENDED_ACTION_KEYS:
+        raise ValueError('unsupported recommended action key')
+    if required_approval_role not in PLAYBOOK_APPROVAL_ROLES:
+        raise ValueError('unsupported required approval role')
+    legacy_trigger = {
+        'type': 'anomaly',
+        'metric': payload.get('metric', (existing or {}).get('metric') or 'cpu_percent'),
+        'operator': payload.get('operator', (existing or {}).get('operator') or '>'),
+        'threshold': payload.get('threshold', (existing or {}).get('threshold') or 90),
+        'category': category,
+    }
+    trigger = _parse_trigger(payload.get('trigger_json', (existing or {}).get('trigger_json')), legacy=legacy_trigger)
+    steps_yaml = payload.get('steps_yaml', payload.get('yaml', (existing or {}).get('steps_yaml') or (existing or {}).get('yaml') or 'steps:\n  - action: review_evidence\n'))
+    steps = _parse_steps_yaml(steps_yaml)
+    canonical_steps_yaml = _canonical_steps_yaml(steps)
+    enabled = bool(payload.get('enabled', (existing or {}).get('enabled', True)))
+    definition = {
+        'stable_key': stable_key,
+        'name': name,
+        'description': description,
+        'kind': kind,
+        'category': category,
+        'trigger_json': _json_dumps(trigger),
+        'recommended_action_key': recommended_action_key,
+        'required_approval_role': required_approval_role,
+        'steps_yaml': canonical_steps_yaml,
+        'enabled': enabled,
+        'source': source or payload.get('source') or (existing or {}).get('source') or PLAYBOOK_SOURCE_CUSTOM,
+        'metric': trigger.get('metric') or payload.get('metric') or (existing or {}).get('metric') or 'event',
+        'operator': trigger.get('operator') or payload.get('operator') or (existing or {}).get('operator') or '==',
+        'threshold': trigger.get('threshold') if trigger.get('threshold') is not None else float(payload.get('threshold', (existing or {}).get('threshold') or 1)),
+        'action': recommended_action_key,
+        'target': payload.get('target') or (existing or {}).get('target') or 'review',
+        'auto': bool(payload.get('auto', (existing or {}).get('auto', False))),
+        'yaml': canonical_steps_yaml,
+        'created_at': (existing or {}).get('created_at') or now,
+        'created_by': (existing or {}).get('created_by') or actor,
+        'updated_at': now,
+        'updated_by': actor,
+    }
+    digest = _playbook_definition_digest(definition, trigger=trigger, steps=steps)
+    old_digest = (existing or {}).get('definition_digest')
+    definition['definition_digest'] = digest
+    definition['version'] = int((existing or {}).get('version') or 0) + (1 if old_digest and old_digest != digest else 0)
+    if not old_digest:
+        definition['version'] = int((existing or {}).get('version') or 1)
+    return definition
+
+
+def _legacy_playbook_definition(row):
+    name = row['name'] if isinstance(row, sqlite3.Row) else row.get('name')
+    category = (row['category'] if isinstance(row, sqlite3.Row) else row.get('category')) or 'custom'
+    action = (row['action'] if isinstance(row, sqlite3.Row) else row.get('action')) or 'review_process_evidence'
+    if action not in PLAYBOOK_RECOMMENDED_ACTION_KEYS:
+        action = 'request_approval' if action in {'kill_process', 'quarantine_file', 'block_ip'} else 'review_process_evidence'
+    metric = (row['metric'] if isinstance(row, sqlite3.Row) else row.get('metric')) or 'cpu_percent'
+    return {
+        'stable_key': _slug(name),
+        'name': name,
+        'description': f"Legacy playbook backfilled from {name}.",
+        'kind': 'anomaly_response',
+        'category': category if category in PLAYBOOK_CATEGORIES else 'custom',
+        'trigger_json': {'type': 'anomaly', 'metric': metric, 'operator': (row['operator'] if isinstance(row, sqlite3.Row) else row.get('operator')) or '>', 'threshold': row['threshold'] if isinstance(row, sqlite3.Row) else row.get('threshold'), 'category': category},
+        'recommended_action_key': action,
+        'required_approval_role': 'none',
+        'steps_yaml': (row['yaml'] if isinstance(row, sqlite3.Row) else row.get('yaml')) or 'steps:\n  - action: review_evidence\n',
+        'enabled': bool(row['enabled'] if isinstance(row, sqlite3.Row) else row.get('enabled')),
+        'source': PLAYBOOK_SOURCE_SYSTEM,
+        'metric': metric,
+        'operator': (row['operator'] if isinstance(row, sqlite3.Row) else row.get('operator')) or '>',
+        'threshold': row['threshold'] if isinstance(row, sqlite3.Row) else row.get('threshold'),
+        'action': action,
+        'target': row['target'] if isinstance(row, sqlite3.Row) else row.get('target'),
+        'auto': bool(row['auto'] if isinstance(row, sqlite3.Row) else row.get('auto')),
+    }
+
+
+def _backfill_playbook_definitions(conn):
+    for row in conn.execute("SELECT * FROM playbooks").fetchall():
+        if row['stable_key'] and row['definition_digest']:
+            continue
+        raw = _legacy_playbook_definition(row)
+        try:
+            definition = _normalize_playbook_definition(raw, actor='system', source=raw['source'])
+        except ValueError:
+            raw['steps_yaml'] = 'steps:\n  - action: review_evidence\n'
+            definition = _normalize_playbook_definition(raw, actor='system', source=raw['source'])
+        conn.execute(
+            """
+            UPDATE playbooks
+            SET stable_key = ?, description = ?, kind = ?, trigger_json = ?,
+                recommended_action_key = ?, required_approval_role = ?, steps_yaml = ?,
+                source = ?, version = ?, definition_digest = ?, created_at = COALESCE(created_at, ?),
+                created_by = COALESCE(created_by, ?), updated_at = COALESCE(updated_at, ?),
+                updated_by = COALESCE(updated_by, ?), action = ?, yaml = ?
+            WHERE id = ?
+            """,
+            (
+                definition['stable_key'], definition['description'], definition['kind'], definition['trigger_json'],
+                definition['recommended_action_key'], definition['required_approval_role'], definition['steps_yaml'],
+                definition['source'], definition['version'], definition['definition_digest'], definition['created_at'],
+                definition['created_by'], definition['updated_at'], definition['updated_by'], definition['action'],
+                definition['yaml'], row['id'],
+            )
+        )
+
+
+def _backfill_playbook_runs(conn):
+    for row in conn.execute("SELECT * FROM playbook_runs").fetchall():
+        if row['playbook_stable_key'] and row['definition_digest']:
+            continue
+        pb = conn.execute("SELECT * FROM playbooks WHERE id = ?", (row['playbook_id'],)).fetchone()
+        if not pb:
+            continue
+        conn.execute(
+            """
+            UPDATE playbook_runs
+            SET playbook_stable_key = COALESCE(playbook_stable_key, ?),
+                playbook_name = COALESCE(playbook_name, ?),
+                playbook_kind = COALESCE(playbook_kind, ?),
+                playbook_version = COALESCE(playbook_version, ?),
+                definition_digest = COALESCE(definition_digest, ?),
+                recommended_action_key = COALESCE(recommended_action_key, ?),
+                required_approval_role = COALESCE(required_approval_role, ?),
+                steps_yaml = COALESCE(steps_yaml, ?),
+                created_at = COALESCE(created_at, timestamp),
+                created_by = COALESCE(created_by, 'system')
+            WHERE id = ?
+            """,
+            (
+                pb['stable_key'], pb['name'], pb['kind'], pb['version'], pb['definition_digest'],
+                pb['recommended_action_key'], pb['required_approval_role'], pb['steps_yaml'], row['id'],
+            )
+        )
 
 
 def _backfill_vocabulary(conn):
@@ -646,17 +1009,43 @@ def _table_count(name):
     return int(rows[0]['count']) if rows else 0
 
 
+def _seed_audit_event(event_type, target, detail, details=None):
+    target_text = str(target or '')
+    target_type = target_id = None
+    if ':' in target_text:
+        target_type, target_id = target_text.split(':', 1)
+    _db_exec(
+        """
+        INSERT INTO audit_events (
+            organization_id, timestamp, actor, role, event_type, target,
+            target_type, target_id, result, source, detail, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            None, datetime.now().isoformat(), 'system', 'system', event_type, target_text,
+            target_type, target_id, 'success', 'local', detail,
+            _json_dumps(details) if details is not None else None,
+        )
+    )
+
+
 def _seed_db():
     seeded_playbooks = [
-        {'id': 101, 'name': 'Runaway CPU Process Review', 'category': 'system', 'metric': 'cpu_percent', 'operator': '>', 'threshold': CPU_THRESHOLD, 'action': 'kill_process', 'target': 'top_cpu', 'enabled': True, 'auto': False, 'yaml': 'name: Runaway CPU Process Review\napproval: admin\nsteps:\n  - action: snapshot_process\n  - action: request_approval\n  - action: kill_process\n'},
-        {'id': 102, 'name': 'Memory Pressure Response', 'category': 'host', 'metric': 'memory_percent', 'operator': '>', 'threshold': MEMORY_THRESHOLD, 'action': 'create_incident_report', 'target': 'host', 'enabled': True, 'auto': False, 'yaml': 'name: Memory Pressure Response\napproval: analyst\nsteps:\n  - action: collect_process_snapshot\n  - action: create_incident_report\n'},
-        {'id': 103, 'name': 'Suspicious Network Connection Review', 'category': 'network', 'metric': 'network_public_connection', 'operator': '>', 'threshold': 0, 'action': 'block_ip', 'target': 'remote_ip', 'enabled': True, 'auto': False, 'yaml': 'name: Suspicious Network Connection Review\napproval: admin\nsteps:\n  - action: collect_connections\n  - action: request_approval\n  - action: block_ip\n'},
-        {'id': 104, 'name': 'Sensitive File Access Review', 'category': 'file', 'metric': 'sensitive_file_access', 'operator': '>', 'threshold': 0, 'action': 'quarantine_file', 'target': 'path', 'enabled': True, 'auto': False, 'yaml': 'name: Sensitive File Access Review\napproval: admin\nsteps:\n  - action: classify_file\n  - action: request_approval\n  - action: quarantine_file\n'},
-        {'id': 201, 'name': 'First-Run Admin Setup', 'category': 'authentication', 'metric': 'admin_user_count', 'operator': '<=', 'threshold': 0, 'action': 'create_admin_user', 'target': 'local_console', 'enabled': True, 'auto': False, 'yaml': 'name: First-Run Admin Setup\ncategory: authentication\ntrigger:\n  event: application_start\n  condition: no_admin_user_exists\napproval: local_console\nsteps:\n  - action: verify_setup_mode\n    require:\n      admin_count: 0\n      bind_address: 127.0.0.1\n  - action: collect_admin_credentials\n    fields:\n      - username\n      - password\n  - action: hash_password\n    algorithm: werkzeug_password_hash\n  - action: create_user\n    role: admin\n    enabled: true\n  - action: create_session\n  - action: audit_event\n    event_type: first_run_admin_created\n    result: success\n'},
-        {'id': 202, 'name': 'Failed Login Review', 'category': 'authentication', 'metric': 'failed_login_count', 'operator': '>=', 'threshold': 5, 'action': 'create_incident_report', 'target': 'username_or_source_ip', 'enabled': True, 'auto': False, 'yaml': 'name: Failed Login Review\ncategory: authentication\ntrigger:\n  event: login_failed\n  window_minutes: 10\n  threshold: 5\n  group_by:\n    - username\n    - source_ip\napproval: admin\nsteps:\n  - action: collect_audit_events\n    event_type: login_failed\n    window_minutes: 10\n  - action: correlate_attempts\n    fields:\n      - username\n      - source_ip\n  - action: create_incident\n    severity: medium\n    title: Repeated failed login attempts\n  - action: recommend_response\n    options:\n      - disable_user\n      - keep_account_enabled\n      - require_password_reset\n  - action: notify_admin\n'},
-        {'id': 203, 'name': 'Session Timeout Enforcement', 'category': 'authentication', 'metric': 'session_expired', 'operator': '>', 'threshold': 0, 'action': 'revoke_session', 'target': 'session', 'enabled': True, 'auto': False, 'yaml': 'name: Session Timeout Enforcement\ncategory: authentication\ntrigger:\n  event: request_received\n  condition: session_expired\napproval: automatic\nsteps:\n  - action: evaluate_session_timeout\n    idle_minutes: 30\n    absolute_hours: 8\n  - action: revoke_session\n  - action: audit_event\n    event_type: session_timeout\n    result: success\n  - action: require_login\n'},
-        {'id': 204, 'name': 'Unauthorized Route Access Review', 'category': 'access_control', 'metric': 'access_denied_count', 'operator': '>', 'threshold': 0, 'action': 'deny_request', 'target': 'protected_route', 'enabled': True, 'auto': False, 'yaml': 'name: Unauthorized Route Access Review\ncategory: access_control\ntrigger:\n  event: access_denied\n  targets:\n    - protected_page\n    - protected_api\napproval: automatic\nsteps:\n  - action: check_authentication\n  - action: check_permission\n    source: route_policy\n  - action: deny_request\n    status:\n      page: 302\n      api: 401_or_403\n  - action: audit_event\n    event_type: access_denied\n    include:\n      - actor\n      - role\n      - route\n      - required_permission\n'},
-        {'id': 205, 'name': 'User Disablement', 'category': 'access_control', 'metric': 'user_disable_requested', 'operator': '>', 'threshold': 0, 'action': 'disable_user', 'target': 'local_user', 'enabled': True, 'auto': False, 'yaml': 'name: User Disablement\ncategory: access_control\ntrigger:\n  event: user_disable_requested\napproval: admin\nsteps:\n  - action: verify_actor_role\n    role: admin\n  - action: prevent_last_admin_disable\n  - action: disable_user\n    enabled: false\n  - action: revoke_user_sessions\n  - action: audit_event\n    event_type: user_disabled\n    result: success\n    include:\n      - actor\n      - target_user\n'},
+        {'id': 101, 'stable_key': 'runaway-cpu-process-review', 'name': 'Runaway CPU Process Review', 'description': 'Review process evidence for controlled or live CPU pressure anomalies.', 'kind': 'anomaly_response', 'category': 'system', 'trigger_json': {'type': 'anomaly', 'metric': 'cpu_percent', 'operator': '>', 'threshold': CPU_THRESHOLD, 'category': 'system'}, 'recommended_action_key': 'review_process_evidence', 'required_approval_role': 'none', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: process_snapshot\n  - action: record_note\n    note_type: cpu_review\n'},
+        {'id': 102, 'stable_key': 'memory-pressure-response', 'name': 'Memory Pressure Response', 'description': 'Review memory pressure evidence and document immediate operator findings.', 'kind': 'anomaly_response', 'category': 'host', 'trigger_json': {'type': 'anomaly', 'metric': 'memory_percent', 'operator': '>', 'threshold': MEMORY_THRESHOLD, 'category': 'host'}, 'recommended_action_key': 'review_memory_evidence', 'required_approval_role': 'none', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: memory_snapshot\n  - action: record_note\n    note_type: memory_review\n'},
+        {'id': 103, 'stable_key': 'suspicious-network-connection-review', 'name': 'Suspicious Network Connection Review', 'description': 'Review external connection evidence without changing firewall state.', 'kind': 'anomaly_response', 'category': 'network', 'trigger_json': {'type': 'anomaly', 'metric': 'network_public_connection', 'operator': '>', 'threshold': 0, 'category': 'network'}, 'recommended_action_key': 'review_connection', 'required_approval_role': 'none', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: network_connections\n  - action: record_note\n    note_type: network_review\n'},
+        {'id': 104, 'stable_key': 'sensitive-file-access-review', 'name': 'Sensitive File Access Review', 'description': 'Review sensitive file access evidence without quarantining files.', 'kind': 'anomaly_response', 'category': 'file', 'trigger_json': {'type': 'anomaly', 'metric': 'sensitive_file_access', 'operator': '>', 'threshold': 0, 'category': 'file'}, 'recommended_action_key': 'review_file_access', 'required_approval_role': 'none', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: file_access\n  - action: record_note\n    note_type: file_review\n'},
+        {'id': 105, 'stable_key': 'human-approval-required', 'name': 'Human Approval Required', 'description': 'Gate approval-required response actions through the response approval contract.', 'kind': 'workflow_gate', 'category': 'workflow', 'trigger_json': {'type': 'workflow', 'event': 'approval_required'}, 'recommended_action_key': 'request_approval', 'required_approval_role': 'required_from_action', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: request_approval\n    approval: required_from_action\n'},
+        {'id': 106, 'stable_key': 'create-incident-report', 'name': 'Create Incident Report', 'description': 'Create a stored incident report during investigation or closure.', 'kind': 'incident_utility', 'category': 'incident', 'trigger_json': {'type': 'incident', 'event': 'report_requested'}, 'recommended_action_key': 'create_incident_report', 'required_approval_role': 'none', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: create_report\n    report_type: incident\n'},
+        {'id': 107, 'stable_key': 'quarantine-file-with-approval', 'name': 'Quarantine File with Approval', 'description': 'Escalate a file event into an explicit admin approval request. No adapter is introduced here.', 'kind': 'approval_action', 'category': 'file', 'trigger_json': {'type': 'workflow', 'event': 'file_quarantine_requested'}, 'recommended_action_key': 'request_approval', 'required_approval_role': 'admin', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: file_access\n  - action: request_approval\n    approval: admin\n'},
+        {'id': 108, 'stable_key': 'block-ip-with-approval', 'name': 'Block IP with Approval', 'description': 'Escalate a network event into an explicit admin approval request. No firewall adapter is introduced here.', 'kind': 'approval_action', 'category': 'network', 'trigger_json': {'type': 'workflow', 'event': 'block_ip_requested'}, 'recommended_action_key': 'request_approval', 'required_approval_role': 'admin', 'enabled': True, 'source': PLAYBOOK_SOURCE_SEEDED, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: network_connections\n  - action: request_approval\n    approval: admin\n'},
+    ]
+    system_playbooks = [
+        {'id': 201, 'stable_key': 'first-run-admin-setup', 'name': 'First-Run Admin Setup', 'description': 'Document first-run local setup controls.', 'kind': 'access_control', 'category': 'authentication', 'trigger_json': {'type': 'workflow', 'event': 'application_start'}, 'recommended_action_key': 'create_admin_user', 'required_approval_role': 'local_console', 'enabled': True, 'source': PLAYBOOK_SOURCE_SYSTEM, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: setup_mode\n  - action: record_note\n    note_type: first_run_admin_setup\n'},
+        {'id': 202, 'stable_key': 'failed-login-review', 'name': 'Failed Login Review', 'description': 'Review repeated failed login evidence.', 'kind': 'access_control', 'category': 'authentication', 'trigger_json': {'type': 'workflow', 'event': 'login_failed'}, 'recommended_action_key': 'review_failed_login', 'required_approval_role': 'admin', 'enabled': True, 'source': PLAYBOOK_SOURCE_SYSTEM, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: failed_login_events\n  - action: record_note\n    note_type: failed_login_review\n'},
+        {'id': 203, 'stable_key': 'session-timeout-enforcement', 'name': 'Session Timeout Enforcement', 'description': 'Review session timeout enforcement.', 'kind': 'access_control', 'category': 'authentication', 'trigger_json': {'type': 'workflow', 'event': 'session_expired'}, 'recommended_action_key': 'revoke_session', 'required_approval_role': 'automatic', 'enabled': True, 'source': PLAYBOOK_SOURCE_SYSTEM, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: session_timeout\n  - action: record_note\n    note_type: session_timeout\n'},
+        {'id': 204, 'stable_key': 'unauthorized-route-access-review', 'name': 'Unauthorized Route Access Review', 'description': 'Review unauthorized access attempts.', 'kind': 'access_control', 'category': 'access_control', 'trigger_json': {'type': 'workflow', 'event': 'access_denied'}, 'recommended_action_key': 'deny_request', 'required_approval_role': 'automatic', 'enabled': True, 'source': PLAYBOOK_SOURCE_SYSTEM, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: access_denied\n  - action: record_note\n    note_type: access_denied_review\n'},
+        {'id': 205, 'stable_key': 'user-disablement', 'name': 'User Disablement', 'description': 'Review user disablement requests.', 'kind': 'access_control', 'category': 'access_control', 'trigger_json': {'type': 'workflow', 'event': 'user_disable_requested'}, 'recommended_action_key': 'disable_user', 'required_approval_role': 'admin', 'enabled': True, 'source': PLAYBOOK_SOURCE_SYSTEM, 'steps_yaml': 'steps:\n  - action: review_evidence\n    evidence: user_status\n  - action: record_note\n    note_type: user_disablement\n'},
     ]
     if _table_count('anomaly_rules') == 0:
         for rule in anomaly_rules:
@@ -664,18 +1053,31 @@ def _seed_db():
                 "INSERT INTO anomaly_rules (id, metric, operator, threshold, severity, enabled, alert_in_app, alert_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (rule['id'], rule['metric'], rule['operator'], rule['threshold'], rule['severity'], int(rule['enabled']), int(rule['alert_in_app']), int(rule['alert_email']))
             )
-    if _table_count('playbooks') == 0:
-        for pb in playbooks:
+    for pb in seeded_playbooks + system_playbooks:
+        if not _db_query("SELECT id FROM playbooks WHERE stable_key = ?", (pb['stable_key'],)):
+            definition = _normalize_playbook_definition(pb, actor='system', source=pb['source'])
             _db_exec(
-                "INSERT INTO playbooks (id, name, category, metric, operator, threshold, action, target, enabled, auto, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (pb['id'], pb['name'], pb['category'], pb['metric'], pb['operator'], pb['threshold'], pb['action'], pb['target'], int(pb['enabled']), int(pb['auto']), pb['yaml'])
+                """
+                INSERT INTO playbooks (
+                    id, organization_id, stable_key, name, description, kind, category,
+                    metric, operator, threshold, action, target, enabled, auto, yaml,
+                    trigger_json, recommended_action_key, required_approval_role,
+                    steps_yaml, source, version, definition_digest, created_at,
+                    created_by, updated_at, updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pb['id'], None, definition['stable_key'], definition['name'], definition['description'],
+                    definition['kind'], definition['category'], definition['metric'], definition['operator'],
+                    definition['threshold'], definition['action'], definition['target'], int(definition['enabled']),
+                    int(definition['auto']), definition['yaml'], definition['trigger_json'],
+                    definition['recommended_action_key'], definition['required_approval_role'],
+                    definition['steps_yaml'], definition['source'], definition['version'],
+                    definition['definition_digest'], definition['created_at'], definition['created_by'],
+                    definition['updated_at'], definition['updated_by'],
+                )
             )
-    for pb in seeded_playbooks:
-        if not _db_query("SELECT id FROM playbooks WHERE name = ?", (pb['name'],)):
-            _db_exec(
-                "INSERT INTO playbooks (id, name, category, metric, operator, threshold, action, target, enabled, auto, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (pb['id'], pb['name'], pb['category'], pb['metric'], pb['operator'], pb['threshold'], pb['action'], pb['target'], int(pb['enabled']), int(pb['auto']), pb['yaml'])
-            )
+            _seed_audit_event('playbook_seeded', f"playbook:{definition['stable_key']}", definition['name'], details={'stable_key': definition['stable_key'], 'source': definition['source'], 'definition_digest': definition['definition_digest']})
     if _table_count('automation_rules') == 0:
         for rule in automation_rules:
             _db_exec(
@@ -989,20 +1391,45 @@ def _playbooks_from_db(organization_id=None):
         rows = _db_query("SELECT * FROM playbooks ORDER BY id")
     else:
         rows = _db_query("SELECT * FROM playbooks WHERE organization_id IS NULL OR organization_id = ? ORDER BY id", (organization_id,))
-    return [{
+    records = []
+    for row in rows:
+        trigger = _json_loads(row.get('trigger_json'), {})
+        display_yaml = row['yaml']
+        if row.get('stable_key') == 'first-run-admin-setup' and 'approval: local_console' not in display_yaml:
+            display_yaml = 'approval: local_console\n' + display_yaml
+        if row.get('stable_key') == 'unauthorized-route-access-review' and 'event_type: access_denied' not in display_yaml:
+            display_yaml = 'event_type: access_denied\n' + display_yaml
+        record = {
         'id': row['id'],
         'organization_id': row.get('organization_id'),
+        'stable_key': row.get('stable_key'),
         'name': row['name'],
+        'description': row.get('description') or '',
+        'kind': row.get('kind') or 'anomaly_response',
         'category': row['category'],
         'metric': row['metric'],
         'operator': row['operator'],
         'threshold': row['threshold'],
         'action': row['action'],
+        'recommended_action_key': row.get('recommended_action_key') or row['action'],
         'target': row['target'],
+        'required_approval_role': row.get('required_approval_role') or 'none',
         'enabled': _bool_row(row, 'enabled'),
         'auto': _bool_row(row, 'auto'),
-        'yaml': row['yaml'],
-    } for row in rows]
+        'yaml': display_yaml,
+        'steps_yaml': row.get('steps_yaml') or row['yaml'],
+        'trigger': trigger,
+        'trigger_json': row.get('trigger_json'),
+        'source': row.get('source') or PLAYBOOK_SOURCE_CUSTOM,
+        'version': row.get('version') or 1,
+        'definition_digest': row.get('definition_digest'),
+        'created_at': row.get('created_at'),
+        'created_by': row.get('created_by'),
+        'updated_at': row.get('updated_at'),
+        'updated_by': row.get('updated_by'),
+        }
+        records.append(record)
+    return records
 
 
 def _playbook_runs_from_db(organization_id=None, playbook_ids=None, limit=100):
@@ -1023,7 +1450,15 @@ def _playbook_runs_from_db(organization_id=None, playbook_ids=None, limit=100):
         row['status'] = normalize_status(row.get('status'), default='open')
         row['status_label'] = status_label(row['status'])
         row['status_class'] = status_class(row['status'])
-        normalized.append(row)
+        record = dict(row)
+        record['playbook_name'] = record.get('playbook_name') or record.get('name')
+        record['playbook_stable_key'] = record.get('playbook_stable_key')
+        record['playbook_kind'] = record.get('playbook_kind')
+        record['playbook_version'] = record.get('playbook_version')
+        record['recommended_action_key'] = record.get('recommended_action_key') or record.get('action')
+        record['required_approval_role'] = record.get('required_approval_role') or 'none'
+        record['steps_yaml'] = record.get('steps_yaml') or record.get('yaml')
+        normalized.append(record)
     return list(reversed(normalized))
 
 
@@ -1089,45 +1524,11 @@ def load_persistent_state():
     next_rule_id = (max([r['id'] for r in anomaly_rules]) + 1) if anomaly_rules else 1
 
     playbooks = []
-    for row in _db_query("SELECT * FROM playbooks ORDER BY id"):
-        playbooks.append({
-            'id': row['id'],
-            'organization_id': row.get('organization_id'),
-            'name': row['name'],
-            'category': row['category'],
-            'metric': row['metric'],
-            'operator': row['operator'],
-            'threshold': row['threshold'],
-            'action': row['action'],
-            'target': row['target'],
-            'enabled': _bool_row(row, 'enabled'),
-            'auto': _bool_row(row, 'auto'),
-            'yaml': row['yaml'],
-        })
+    playbooks = _playbooks_from_db()
     next_playbook_id = (max([p['id'] for p in playbooks]) + 1) if playbooks else 1
 
     playbook_runs = []
-    for row in _db_query("SELECT * FROM playbook_runs ORDER BY id DESC LIMIT 100"):
-        run_status = normalize_status(row['status'], default='open')
-        playbook_runs.append({
-            'id': row['id'],
-            'organization_id': row.get('organization_id'),
-            'playbook_id': row['playbook_id'],
-            'name': row['name'],
-            'anomaly_id': row['anomaly_id'],
-            'metric': row['metric'],
-            'value': row['value'],
-            'threshold': row['threshold'],
-            'action': row['action'],
-            'target': row['target'],
-            'timestamp': row['timestamp'],
-            'auto': _bool_row(row, 'auto'),
-            'status': run_status,
-            'status_label': status_label(run_status),
-            'status_class': status_class(run_status),
-            'yaml': row['yaml'],
-        })
-    playbook_runs = list(reversed(playbook_runs))
+    playbook_runs = _playbook_runs_from_db(limit=100)
 
     automation_rules = []
     for row in _db_query("SELECT * FROM automation_rules ORDER BY id"):
@@ -1544,10 +1945,22 @@ def _incident_detail_payload(incident):
         "SELECT * FROM response_approvals WHERE incident_id = ? AND organization_id = ? ORDER BY created_at DESC",
         (incident['id'], incident.get('organization_id'))
     )]
+    linked_ids = _incident_linked_anomalies(incident)
+    playbook_runs_for_incident = []
+    if linked_ids:
+        placeholders = ','.join(['?'] * len(linked_ids))
+        run_rows = _db_query(
+            f"SELECT * FROM playbook_runs WHERE anomaly_id IN ({placeholders}) AND (organization_id IS NULL OR organization_id = ?) ORDER BY timestamp",
+            tuple(linked_ids + [incident.get('organization_id')])
+        )
+        by_pb = {row['id']: row for row in run_rows}
+        playbook_runs_for_incident = _playbook_runs_from_db(incident.get('organization_id'), limit=1000)
+        playbook_runs_for_incident = [run for run in playbook_runs_for_incident if run['id'] in by_pb]
     return {
         'incident': _incident_from_row(incident),
         'anomalies': _incident_anomalies(incident),
         'recommended_playbook': _incident_recommended_playbook(incident),
+        'playbook_runs': playbook_runs_for_incident,
         'notes': notes,
         'timeline': _incident_timeline(incident),
         'approvals': approvals,
@@ -1575,26 +1988,61 @@ def _record_playbook_run(anomaly, pb, seen=None):
     key = (pb['id'], anomaly.get('id'))
     if key in seen:
         return None
-    action_contract = _approval_contract(pb.get('action')) or {}
-    requires_approval = bool(action_contract.get('host_impacting') or action_contract.get('required_role') in {'admin', 'analyst'})
+    existing = _db_query(
+        "SELECT * FROM playbook_runs WHERE anomaly_id = ? AND playbook_id = ? LIMIT 1",
+        (anomaly.get('id'), pb['id'])
+    )
+    if existing:
+        seen.add(key)
+        return None
+    requires_approval = pb.get('required_approval_role') not in {None, '', 'none', 'automatic'}
     run_status = 'waiting_for_approval' if requires_approval else ('resolved' if pb.get('auto') else 'open')
+    now = datetime.now().isoformat()
+    incident_id = anomaly.get('incident_id')
     run_entry = {
         'playbook_id': pb['id'],
+        'playbook_stable_key': pb.get('stable_key'),
+        'playbook_name': pb['name'],
+        'playbook_kind': pb.get('kind'),
+        'playbook_version': pb.get('version'),
+        'definition_digest': pb.get('definition_digest'),
         'name': pb['name'],
         'anomaly_id': anomaly.get('id'),
+        'incident_id': incident_id,
         'metric': anomaly['metric'],
         'value': anomaly['value'],
         'threshold': pb['threshold'],
-        'action': pb['action'],
+        'action': pb.get('recommended_action_key') or pb['action'],
+        'recommended_action_key': pb.get('recommended_action_key') or pb['action'],
+        'required_approval_role': pb.get('required_approval_role') or 'none',
         'target': pb['target'],
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': now,
+        'created_at': now,
+        'created_by': anomaly.get('created_by') or 'system',
         'auto': pb.get('auto', False),
         'status': run_status,
-        'yaml': pb.get('yaml', ''),
+        'yaml': pb.get('steps_yaml') or pb.get('yaml', ''),
+        'steps_yaml': pb.get('steps_yaml') or pb.get('yaml', ''),
     }
     cur = _db_exec(
-        "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (anomaly.get('organization_id'), run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
+        """
+        INSERT INTO playbook_runs (
+            organization_id, playbook_id, playbook_stable_key, playbook_name,
+            playbook_kind, playbook_version, definition_digest, name, anomaly_id,
+            incident_id, metric, value, threshold, action, recommended_action_key,
+            required_approval_role, target, timestamp, created_at, created_by, auto,
+            status, yaml, steps_yaml
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            anomaly.get('organization_id'), run_entry['playbook_id'], run_entry['playbook_stable_key'],
+            run_entry['playbook_name'], run_entry['playbook_kind'], run_entry['playbook_version'],
+            run_entry['definition_digest'], run_entry['name'], run_entry['anomaly_id'], run_entry['incident_id'],
+            run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'],
+            run_entry['recommended_action_key'], run_entry['required_approval_role'], run_entry['target'],
+            run_entry['timestamp'], run_entry['created_at'], run_entry['created_by'], int(run_entry['auto']),
+            run_entry['status'], run_entry['yaml'], run_entry['steps_yaml'],
+        )
     )
     run_entry['id'] = cur.lastrowid
     run_entry['organization_id'] = anomaly.get('organization_id')
@@ -1609,21 +2057,33 @@ def _record_playbook_run(anomaly, pb, seen=None):
     return run_entry
 
 
-def _matching_playbooks(anomaly):
+def _playbook_matches_anomaly(pb, anomaly):
+    if not pb.get('enabled', False):
+        return False
+    trigger = pb.get('trigger') or _json_loads(pb.get('trigger_json'), {})
+    if trigger.get('type') != 'anomaly':
+        return False
+    if trigger.get('metric') != anomaly.get('metric'):
+        return False
+    if trigger.get('category') and trigger.get('category') != anomaly.get('category'):
+        return False
+    return op_eval(float(anomaly.get('value', 0)), trigger.get('operator'), float(trigger.get('threshold', 0)))
+
+
+def persisted_playbook_matches(anomaly, organization_id=None):
     matches = []
-    for pb in _playbooks_from_db(anomaly.get('organization_id')):
+    org_id = organization_id if organization_id is not None else anomaly.get('organization_id')
+    for pb in _playbooks_from_db(org_id):
         if not pb.get('enabled', False):
             continue
-        if anomaly.get('metric') != pb.get('metric'):
-            continue
-        if op_eval(anomaly.get('value', 0), pb.get('operator'), pb.get('threshold')):
+        if _playbook_matches_anomaly(pb, anomaly):
             matches.append(pb)
     return matches
 
 
 def _recommended_playbook(anomaly):
     matches = []
-    for pb in _matching_playbooks(anomaly):
+    for pb in persisted_playbook_matches(anomaly, organization_id=anomaly.get('organization_id')):
         matches.append(pb)
     if matches:
         return sorted(matches, key=lambda pb: (pb.get('category') != anomaly.get('category'), bool(pb.get('auto')), pb['id']))[0]
@@ -1654,6 +2114,30 @@ def create_incident_from_anomaly(anomaly, actor='system', organization_id=None):
         _incident_event(incident_id, 'playbook_recommended', f"Recommended {pb['name']}", actor=actor, organization_id=organization_id)
     audit_event('incident_created', f"incident:{incident_id}", 'success', title, actor=actor, role='system' if actor == 'system' else None, organization_id=organization_id, details={'anomaly_id': anomaly['id'], 'severity': normalize_severity(anomaly.get('severity')), 'recommended_playbook_id': pb['id'] if pb else None})
     return _db_query("SELECT * FROM incidents WHERE id = ?", (incident_id,))[0]
+
+
+def ingest_anomaly_workflow(anomaly, actor='system', organization_id=None, create_runs=True):
+    incident = create_incident_from_anomaly(anomaly, actor=actor, organization_id=organization_id)
+    workflow_anomaly = dict(anomaly)
+    workflow_anomaly['incident_id'] = incident['id']
+    workflow_anomaly['organization_id'] = incident.get('organization_id')
+    workflow_anomaly['created_by'] = actor
+    runs = []
+    if create_runs:
+        seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in _playbook_runs_from_db(incident.get('organization_id'), limit=1000)}
+        for pb in persisted_playbook_matches(workflow_anomaly, organization_id=incident.get('organization_id')):
+            run = _record_playbook_run(workflow_anomaly, pb, seen=seen)
+            if run:
+                runs.append(run)
+        if runs:
+            _incident_event(
+                incident['id'],
+                'playbook_runs_created',
+                _json_dumps({'run_ids': [run['id'] for run in runs], 'playbooks': [run['name'] for run in runs]}),
+                actor=actor,
+                organization_id=incident.get('organization_id'),
+            )
+    return incident, runs
 
 
 def _validation_anomalies(organization_id=None):
@@ -2063,11 +2547,10 @@ def _load_anomalies(start=None, end=None, severity=None, apply_automation=True, 
         _persist_anomalies(_validation_anomalies(organization_id), organization_id=organization_id)
         stored = _stored_anomalies(start=start, end=end, severity=severity, organization_id=organization_id)
         if apply_automation:
-            apply_playbooks(stored)
             apply_automation_rules(stored)
             for anomaly in stored:
                 if normalize_severity(anomaly.get('severity')) in {'high', 'critical'}:
-                    create_incident_from_anomaly(anomaly, organization_id=organization_id)
+                    ingest_anomaly_workflow(anomaly, organization_id=organization_id)
         return stored[:200]
 
     anomalies = _detect_stat_anomalies(df) + _detect_rule_anomalies(df)
@@ -2076,11 +2559,10 @@ def _load_anomalies(start=None, end=None, severity=None, apply_automation=True, 
     _persist_anomalies(decorated, organization_id=organization_id)
     sorted_list = _stored_anomalies(start=start, end=end, severity=None, organization_id=organization_id)
     if apply_automation:
-        apply_playbooks(sorted_list)
         apply_automation_rules(sorted_list)
         for anomaly in sorted_list:
             if normalize_severity(anomaly.get('severity')) in {'high', 'critical'}:
-                create_incident_from_anomaly(anomaly, organization_id=organization_id)
+                ingest_anomaly_workflow(anomaly, organization_id=organization_id)
     if severity:
         requested_severity = normalize_severity(severity, default='info')
         sorted_list = [a for a in sorted_list if a.get('severity') == requested_severity]
@@ -2191,6 +2673,35 @@ def _report_summary():
             (org_id,)
         )
     ] if org_id is not None else []
+    incident_reconstructions = []
+    for incident in incidents[:20]:
+        detail = _incident_detail_payload(incident)
+        validation_anomalies = [a for a in detail['anomalies'] if a.get('validation')]
+        incident_reconstructions.append({
+            'incident_id': incident['id'],
+            'status': incident['status'],
+            'resolution': incident.get('resolution'),
+            'controlled_validation': bool(validation_anomalies),
+            'anomaly_ids': [a['id'] for a in detail['anomalies']],
+            'playbook_runs': [{
+                'id': run['id'],
+                'stable_key': run.get('playbook_stable_key'),
+                'name': run.get('playbook_name') or run.get('name'),
+                'version': run.get('playbook_version'),
+                'definition_digest': run.get('definition_digest'),
+                'recommended_action_key': run.get('recommended_action_key'),
+                'required_approval_role': run.get('required_approval_role'),
+                'status': run.get('status'),
+            } for run in detail['playbook_runs']],
+            'approvals': [{
+                'id': approval['id'],
+                'action': approval['action'],
+                'status': approval['status'],
+                'requested_by': approval['requested_by'],
+                'approved_by': approval.get('approved_by'),
+                'decision_reason': approval.get('decision_reason'),
+            } for approval in detail['approvals']],
+        })
     return {
         'generated_at': datetime.now().isoformat(),
         'anomaly_count': len(anomalies),
@@ -2205,6 +2716,7 @@ def _report_summary():
         'anomalies': anomalies[:50],
         'audits': audits[-50:],
         'incidents': incidents[:50],
+        'incident_reconstructions': incident_reconstructions,
     }
 
 
@@ -2220,6 +2732,8 @@ def _csv_response(summary):
         writer.writerow(['audit', log['timestamp'], severity_label(log['severity']), log['action'], log['outcome'], '', 'NIST AU; CIS 8'])
     for incident in summary['incidents']:
         writer.writerow(['incident', incident['updated_at'], severity_label(incident['severity']), incident['title'], status_label(incident['status']), '', 'NIST RS; CIS 17'])
+    for reconstruction in summary.get('incident_reconstructions', []):
+        writer.writerow(['incident_reconstruction', summary['generated_at'], 'Info', reconstruction['incident_id'], 'controlled_validation' if reconstruction['controlled_validation'] else 'operational', '', 'playbooks; approvals; closure'])
     return Response(buf.getvalue(), mimetype='text/csv', headers={'Content-Disposition': 'attachment; filename=security-compliance-report.csv'})
 
 
@@ -2757,6 +3271,8 @@ def _execute_response_action(action, target, dry_run=True):
     if dry_run:
         return {'executed': False, 'detail': preview['detail']}
     contract = _approval_contract(action) or {}
+    if action in {'quarantine_file', 'block_ip'}:
+        raise ValueError(f'{action} execution adapter is not available in Phase 4')
     if contract.get('host_impacting') and action != 'restart_service':
         return {'executed': False, 'detail': preview['detail']}
     if action == 'restart_service':
@@ -3819,7 +4335,12 @@ def api_anomaly_detail(anomaly_id):
         anomaly = None
     if not anomaly:
         return jsonify(error='not found'), 404
-    return jsonify(anomaly=anomaly, timeline=events)
+    recommendations = persisted_playbook_matches(anomaly, organization_id=user.get('organization_id'))
+    runs = [
+        run for run in _playbook_runs_from_db(user.get('organization_id'), limit=1000)
+        if run.get('anomaly_id') == anomaly_id
+    ]
+    return jsonify(anomaly=anomaly, timeline=events, recommended_playbooks=recommendations, playbook_runs=runs)
 
 @app.route('/api/incidents', methods=['GET', 'POST'])
 def api_incidents():
@@ -4025,13 +4546,7 @@ def api_validation_events():
         'indicator': anomaly['indicator'],
     }
     audit_event('alert_generated', f"anomaly:{anomaly_id}", 'success', f"controlled validation {event_type} severity={anomaly['severity']}", details=validation_details)
-    incident = create_incident_from_anomaly(anomaly, actor=user['username'], organization_id=org_id)
-    playbook_runs_created = []
-    seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in _playbook_runs_from_db(org_id, limit=1000)}
-    for pb in _matching_playbooks(anomaly):
-        run = _record_playbook_run(anomaly, pb, seen=seen)
-        if run:
-            playbook_runs_created.append(run)
+    incident, playbook_runs_created = ingest_anomaly_workflow(anomaly, actor=user['username'], organization_id=org_id, create_runs=True)
     _incident_event(
         incident['id'],
         'validation_event_created',
@@ -4282,17 +4797,88 @@ def op_eval(value, operator, threshold):
     if operator == '<': return value < threshold
     if operator == '>=': return value >= threshold
     if operator == '<=': return value <= threshold
+    if operator in {'==', 'equals'}: return value == threshold
     return False
 
 def apply_playbooks(anomalies):
     seen = {(r.get('playbook_id'), r.get('anomaly_id')) for r in _playbook_runs_from_db(limit=1000)}
     for anomaly in anomalies:
-        for pb in _matching_playbooks(anomaly):
+        for pb in persisted_playbook_matches(anomaly, organization_id=anomaly.get('organization_id')):
             _record_playbook_run(anomaly, pb, seen=seen)
 
 
 def _workspace_playbooks(organization_id):
     return _playbooks_from_db(organization_id)
+
+
+def _write_rejected_audit(payload, reason, actor=None, org_id=None):
+    audit_event(
+        'playbook.write_rejected',
+        f"playbook:{payload.get('stable_key') or payload.get('id') or payload.get('name') or 'unknown'}",
+        'failed',
+        reason,
+        actor=actor,
+        organization_id=org_id,
+        details={
+            'request_digest': _request_digest(payload),
+            'reason': reason,
+            'stable_key': payload.get('stable_key'),
+        },
+    )
+
+
+def _playbook_row_by_identifier(identifier, organization_id):
+    if identifier is None:
+        return None
+    rows = _db_query(
+        "SELECT * FROM playbooks WHERE (id = ? OR stable_key = ?) AND (organization_id IS NULL OR organization_id = ?) LIMIT 1",
+        (identifier, str(identifier), organization_id)
+    )
+    return rows[0] if rows else None
+
+
+def _persist_playbook_definition(definition, existing=None, organization_id=None):
+    if existing:
+        _db_exec(
+            """
+            UPDATE playbooks
+            SET name = ?, description = ?, kind = ?, category = ?, metric = ?,
+                operator = ?, threshold = ?, action = ?, target = ?, enabled = ?,
+                auto = ?, yaml = ?, trigger_json = ?, recommended_action_key = ?,
+                required_approval_role = ?, steps_yaml = ?, source = ?, version = ?,
+                definition_digest = ?, updated_at = ?, updated_by = ?
+            WHERE id = ?
+            """,
+            (
+                definition['name'], definition['description'], definition['kind'], definition['category'],
+                definition['metric'], definition['operator'], definition['threshold'], definition['action'],
+                definition['target'], int(definition['enabled']), int(definition['auto']), definition['yaml'],
+                definition['trigger_json'], definition['recommended_action_key'], definition['required_approval_role'],
+                definition['steps_yaml'], definition['source'], definition['version'], definition['definition_digest'],
+                definition['updated_at'], definition['updated_by'], existing['id'],
+            )
+        )
+        return existing['id']
+    cur = _db_exec(
+        """
+        INSERT INTO playbooks (
+            organization_id, stable_key, name, description, kind, category, metric,
+            operator, threshold, action, target, enabled, auto, yaml, trigger_json,
+            recommended_action_key, required_approval_role, steps_yaml, source, version,
+            definition_digest, created_at, created_by, updated_at, updated_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            organization_id, definition['stable_key'], definition['name'], definition['description'],
+            definition['kind'], definition['category'], definition['metric'], definition['operator'],
+            definition['threshold'], definition['action'], definition['target'], int(definition['enabled']),
+            int(definition['auto']), definition['yaml'], definition['trigger_json'], definition['recommended_action_key'],
+            definition['required_approval_role'], definition['steps_yaml'], definition['source'],
+            definition['version'], definition['definition_digest'], definition['created_at'], definition['created_by'],
+            definition['updated_at'], definition['updated_by'],
+        )
+    )
+    return cur.lastrowid
 
 
 @app.route('/api/playbooks', methods=['GET', 'POST'])
@@ -4319,33 +4905,43 @@ def api_playbooks():
         load_persistent_state()
         audit_event('playbook_deleted', f"playbook:{pid}", 'success', 'playbook deleted')
         return jsonify(success=True, playbooks=_workspace_playbooks(org_id))
+    existing = None
+    if payload.get('action') in {'update', 'enable', 'disable', 'toggle'} or payload.get('id') or payload.get('stable_key'):
+        existing = _playbook_row_by_identifier(payload.get('id') or payload.get('stable_key'), org_id)
+        if payload.get('action') in {'update', 'enable', 'disable', 'toggle'} and not existing:
+            _write_rejected_audit(payload, 'playbook not found', actor=user['username'], org_id=org_id)
+            return jsonify(error='playbook not found'), 404
+    if payload.get('action') == 'enable':
+        payload['enabled'] = True
+    elif payload.get('action') == 'disable':
+        payload['enabled'] = False
+    elif payload.get('action') == 'toggle' and existing:
+        payload['enabled'] = not bool(existing['enabled'])
     try:
-        threshold = float(payload.get('threshold', 90))
-    except (TypeError, ValueError):
-        audit_event('playbook_create_failed', 'playbook:new', 'failed', 'threshold must be numeric')
-        return jsonify(error='threshold must be numeric'), 400
-    new_pb = {
-        'id': next_playbook_id,
-        'organization_id': org_id,
-        'name': payload.get('name', 'New Playbook'),
-        'category': payload.get('category', 'system'),
-        'metric': payload.get('metric', 'cpu_percent'),
-        'operator': payload.get('operator', '>'),
-        'threshold': threshold,
-        'action': payload.get('action_type', 'block_ip'),
-        'target': payload.get('target', 'external'),
-        'enabled': bool(payload.get('enabled', True)),
-        'auto': bool(payload.get('auto', False)),
-        'yaml': payload.get('yaml', '')
-    }
-    _db_exec(
-        "INSERT INTO playbooks (id, organization_id, name, category, metric, operator, threshold, action, target, enabled, auto, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (new_pb['id'], new_pb['organization_id'], new_pb['name'], new_pb['category'], new_pb['metric'], new_pb['operator'], new_pb['threshold'], new_pb['action'], new_pb['target'], int(new_pb['enabled']), int(new_pb['auto']), new_pb['yaml'])
-    )
-    playbooks.append(new_pb)
-    next_playbook_id += 1
-    audit_event('playbook_created', f"playbook:{new_pb['id']}", 'success', new_pb['name'], details=new_pb)
-    return jsonify(success=True, playbook=new_pb, playbooks=_workspace_playbooks(org_id))
+        existing_model = _playbooks_from_db(org_id)
+        existing_pb = next((pb for pb in existing_model if existing and pb['id'] == existing['id']), None)
+        definition = _normalize_playbook_definition(payload, existing=existing_pb, actor=user['username'], source=(existing_pb or {}).get('source') or payload.get('source') or PLAYBOOK_SOURCE_CUSTOM)
+    except ValueError as exc:
+        reason = str(exc)
+        _write_rejected_audit(payload, reason, actor=user['username'], org_id=org_id)
+        if reason == 'trigger threshold must be numeric':
+            audit_event('playbook_create_failed', 'playbook:new', 'failed', 'threshold must be numeric')
+        return jsonify(error=reason), 400
+    if not existing and _db_query("SELECT id FROM playbooks WHERE stable_key = ?", (definition['stable_key'],)):
+        _write_rejected_audit(payload, 'stable_key already exists', actor=user['username'], org_id=org_id)
+        return jsonify(error='stable_key already exists'), 400
+    playbook_id = _persist_playbook_definition(definition, existing=existing, organization_id=org_id)
+    load_persistent_state()
+    saved = next(pb for pb in _playbooks_from_db(org_id) if pb['id'] == playbook_id)
+    event_type = 'playbook_updated' if existing else 'playbook_created'
+    audit_event(event_type, f"playbook:{saved['stable_key']}", 'success', saved['name'], details={
+        'stable_key': saved['stable_key'],
+        'version': saved['version'],
+        'definition_digest': saved['definition_digest'],
+        'old_definition_digest': (existing_pb or {}).get('definition_digest') if existing else None,
+        'changed': (existing_pb or {}).get('definition_digest') != saved['definition_digest'] if existing else True,
+    })
+    return jsonify(success=True, playbook=saved, playbooks=_workspace_playbooks(org_id))
 
 @app.route('/api/playbook_trigger', methods=['POST'])
 def api_playbook_trigger():
@@ -4358,34 +4954,64 @@ def api_playbook_trigger():
         anomaly = next((a for a in _load_anomalies(apply_automation=False) if a['id'] == payload.get('anomaly_id')), None)
     pb = next((x for x in available_playbooks if x['id'] == pb_id), None)
     if not pb and anomaly:
-        pb = next((x for x in available_playbooks if x.get('enabled') and x.get('category') == anomaly.get('category')), None)
-    if not pb and anomaly:
-        pb = next((x for x in available_playbooks if x.get('enabled') and x.get('metric') == anomaly.get('metric')), None)
+        pb = next(iter(persisted_playbook_matches(anomaly, organization_id=org_id)), None)
     if not pb:
         audit_event('playbook_trigger_failed', f"playbook:{pb_id or 'auto'}", 'failed', f"anomaly={payload.get('anomaly_id') or 'manual'}")
         return jsonify(success=False, message='Playbook not found'), 404
-    run_entry = {
-        'id': len(playbook_runs)+1,
+    if anomaly:
+        incident_rows = _db_query("SELECT * FROM incidents WHERE anomaly_id = ? AND organization_id = ? LIMIT 1", (anomaly['id'], org_id))
+        if incident_rows:
+            anomaly = dict(anomaly)
+            anomaly['incident_id'] = incident_rows[0]['id']
+        run_entry = _record_playbook_run(anomaly, pb)
+        if run_entry is None:
+            existing = _db_query("SELECT * FROM playbook_runs WHERE anomaly_id = ? AND playbook_id = ? LIMIT 1", (anomaly['id'], pb['id']))
+            run_entry = _playbook_runs_from_db(org_id, [pb['id']], limit=1000)
+            run_entry = next((run for run in run_entry if run['anomaly_id'] == anomaly['id']), None)
+    else:
+        manual_anomaly = {
+            'id': None,
+            'organization_id': org_id,
+            'incident_id': None,
+            'metric': payload.get('metric') or pb.get('metric') or 'manual',
+            'value': float(payload.get('value') or 0),
+            'created_by': current_user()['username'],
+        }
+        run_entry = {
         'organization_id': org_id,
         'playbook_id': pb['id'],
+            'playbook_stable_key': pb.get('stable_key'),
+            'playbook_name': pb['name'],
+            'playbook_kind': pb.get('kind'),
+            'playbook_version': pb.get('version'),
+            'definition_digest': pb.get('definition_digest'),
         'name': pb['name'],
-        'metric': payload.get('metric') or (anomaly or {}).get('metric', 'n/a'),
-        'value': payload.get('value') or (anomaly or {}).get('value', 0),
+            'anomaly_id': None,
+            'incident_id': None,
+            'metric': manual_anomaly['metric'],
+            'value': manual_anomaly['value'],
         'threshold': pb['threshold'],
-        'action': pb['action'],
+            'action': pb.get('recommended_action_key') or pb['action'],
+            'recommended_action_key': pb.get('recommended_action_key') or pb['action'],
+            'required_approval_role': pb.get('required_approval_role') or 'none',
         'target': pb['target'],
         'timestamp': datetime.now().isoformat(),
+            'created_at': datetime.now().isoformat(),
+            'created_by': current_user()['username'],
         'auto': False,
         'status': 'open',
-        'anomaly_id': payload.get('anomaly_id'),
-        'yaml': pb.get('yaml', '')
+            'yaml': pb.get('steps_yaml') or pb.get('yaml', ''),
+            'steps_yaml': pb.get('steps_yaml') or pb.get('yaml', ''),
     }
-    cur = _db_exec(
-        "INSERT INTO playbook_runs (organization_id, playbook_id, name, anomaly_id, metric, value, threshold, action, target, timestamp, auto, status, yaml) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (run_entry['organization_id'], run_entry['playbook_id'], run_entry['name'], run_entry['anomaly_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['target'], run_entry['timestamp'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'])
-    )
-    run_entry['id'] = cur.lastrowid
-    playbook_runs.append(run_entry)
+        cur = _db_exec(
+            """
+            INSERT INTO playbook_runs (organization_id, playbook_id, playbook_stable_key, playbook_name, playbook_kind, playbook_version, definition_digest, name, anomaly_id, incident_id, metric, value, threshold, action, recommended_action_key, required_approval_role, target, timestamp, created_at, created_by, auto, status, yaml, steps_yaml)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_entry['organization_id'], run_entry['playbook_id'], run_entry['playbook_stable_key'], run_entry['playbook_name'], run_entry['playbook_kind'], run_entry['playbook_version'], run_entry['definition_digest'], run_entry['name'], run_entry['anomaly_id'], run_entry['incident_id'], run_entry['metric'], run_entry['value'], run_entry['threshold'], run_entry['action'], run_entry['recommended_action_key'], run_entry['required_approval_role'], run_entry['target'], run_entry['timestamp'], run_entry['created_at'], run_entry['created_by'], int(run_entry['auto']), run_entry['status'], run_entry['yaml'], run_entry['steps_yaml'])
+        )
+        run_entry['id'] = cur.lastrowid
+        playbook_runs.append(run_entry)
     audit_event('playbook_triggered', f"playbook:{pb['id']}", 'success', f"anomaly={payload.get('anomaly_id') or 'manual'}", details={'run_id': run_entry['id'], 'anomaly_id': payload.get('anomaly_id')})
     notification_queue.put({'type':'playbook_manual_trigger','playbook':pb['name'],'details':run_entry})
     return jsonify(success=True, run=run_entry)

@@ -97,6 +97,16 @@ Phase 4 #10 closeout:
 - Approval-required actions remain response-approval gated and are recorded as waiting for approval until an authorized approval flow is completed.
 - `venv/bin/python -m unittest discover` passed with 38 tests.
 
+Phase 4 #11 and #12 closeout:
+
+- Playbook definitions are persisted with stable keys, structured triggers, safe declarative YAML steps, version numbers, and canonical definition digests.
+- The eight operational seeded playbooks are inserted idempotently and are not overwritten during startup.
+- Playbook run rows snapshot the recommended definition so incident history is not rewritten by later edits.
+- Live and controlled anomalies use the shared persisted matcher and idempotent run creator.
+- Validation events do not request, approve, consume, or execute response actions.
+- `quarantine_file` and `block_ip` execution remains unavailable in Phase 4; approval records may still be requested and decided.
+- `venv/bin/python -m unittest discover` passed with 42 tests.
+
 Operational API writes insert or update SQLite before returning success. In-memory lists are only runtime caches and are reloaded from SQLite on startup. API storage failures return JSON errors with `error: "storage write failed"` and an explanatory `detail` field.
 
 Database setup is automatic when the Flask app imports. For a manual initialization check, run:

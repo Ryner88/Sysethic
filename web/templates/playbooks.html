@@ -15,15 +15,15 @@
         <label>Metric <select id="pbMetric" class="btn" style="width:100%;"><option value="cpu_percent">CPU %</option><option value="memory_percent">Memory %</option></select></label>
         <label>Operator <select id="pbOperator" class="btn" style="width:100%;"><option value=">">&gt;</option><option value=">=">&gt;=</option><option value="<">&lt;</option><option value="<=">&lt;=</option></select></label>
         <label>Threshold <input id="pbThreshold" class="btn" type="number" style="width:100%;" value="90" /></label>
-        <label>Action <select id="pbAction" class="btn" style="width:100%;"><option value="kill_process">Kill process</option><option value="isolate_network">Isolate network segment</option><option value="block_ip">Block IP</option></select></label>
+        <label>Action <select id="pbAction" class="btn" style="width:100%;"><option value="review_process_evidence">Review process evidence</option><option value="review_memory_evidence">Review memory evidence</option><option value="review_connection">Review connection</option><option value="review_file_access">Review file access</option><option value="request_approval">Request approval</option><option value="create_incident_report">Create incident report</option></select></label>
         <label>Target <input id="pbTarget" class="btn" type="text" style="width:100%;" value="*" /></label>
         <label>YAML Steps <textarea id="pbYaml" class="btn yaml-editor" style="width:100%;height:150px;">{% raw %}name: New Playbook
 category: system
 steps:
-  - action: isolate_process
-    target: "{{ process.pid }}"
-  - action: notify
-    target: security-ops{% endraw %}</textarea></label>
+  - action: review_evidence
+    evidence: process_snapshot
+  - action: record_note
+    note_type: review{% endraw %}</textarea></label>
         <label><input id="pbAuto" type="checkbox" checked /> Auto-trigger</label>
         <button id="pbAddBtn" class="btn" style="margin-top:8px;">Add Playbook</button>
       </div>
@@ -36,7 +36,7 @@ steps:
     </div>
   </section>
 
-  <section class="grid" style="margin-top:12px;"><div class="card" style="grid-column: span 4;"><div class="label">Existing Playbooks</div><table class="table" id="playbooksTable"><thead><tr><th>Name</th><th>Category</th><th>Condition</th><th>Action</th><th>Auto</th><th>Enabled</th><th>Ops</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="grid" style="margin-top:12px;"><div class="card" style="grid-column: span 4;"><div class="label">Existing Playbooks</div><table class="table" id="playbooksTable"><thead><tr><th>Name</th><th>Kind</th><th>Condition</th><th>Action</th><th>Version</th><th>Enabled</th><th>Ops</th></tr></thead><tbody></tbody></table></div></section>
 </div>
 {% endblock %}
 
@@ -49,8 +49,8 @@ function refreshPlaybooks(){
     body.innerHTML = '';
     data.playbooks.forEach(pb=>{
       const tr=document.createElement('tr');
-      const ops = CAN_MUTATE_PLAYBOOKS ? `<button class='btn btn-small' data-id='${pb.id}'>Delete</button>` : '';
-      tr.innerHTML = `<td>${pb.name}<pre class="yaml-view compact">${pb.yaml || ''}</pre></td><td>${pb.category || 'system'}</td><td>${pb.metric} ${pb.operator} ${pb.threshold}</td><td>${pb.action} (${pb.target})</td><td>${pb.auto}</td><td>${pb.enabled}</td><td>${ops}</td>`;
+      const ops = CAN_MUTATE_PLAYBOOKS ? `<button class='btn btn-small' data-toggle='${pb.id}'>${pb.enabled ? 'Disable' : 'Enable'}</button> <button class='btn btn-small' data-id='${pb.id}'>Delete</button>` : '';
+      tr.innerHTML = `<td>${pb.name}<div class="help">${pb.stable_key || ''}</div><pre class="yaml-view compact">${pb.steps_yaml || pb.yaml || ''}</pre></td><td>${pb.kind || ''}<div class="help">${pb.category || 'system'}</div></td><td>${pb.metric} ${pb.operator} ${pb.threshold}</td><td>${pb.recommended_action_key || pb.action}<div class="help">approval: ${pb.required_approval_role || 'none'}</div></td><td>${pb.version || 1}<div class="help">${(pb.definition_digest || '').slice(0,12)}</div></td><td>${pb.enabled}</td><td>${ops}</td>`;
       body.appendChild(tr);
     });
     body.querySelectorAll('button[data-id]').forEach(btn=>{
@@ -59,12 +59,18 @@ function refreshPlaybooks(){
           .then(_=>refreshPlaybooks());
       });
     });
+    body.querySelectorAll('button[data-toggle]').forEach(btn=>{
+      btn.addEventListener('click', ()=> {
+        fetch('/api/playbooks', {method:'POST', headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'toggle',id:btn.dataset.toggle})})
+          .then(_=>refreshPlaybooks());
+      });
+    });
 
     const runs = document.getElementById('playbookRuns');
     runs.innerHTML = '';
     (data.runs || []).slice(-8).reverse().forEach(r=>{
       const d=document.createElement('div');
-      d.innerHTML = `${r.timestamp} ${r.name} -> ${r.action} ${SysEthicVocabulary.statusBadge(r.status)}`;
+      d.innerHTML = `${r.timestamp} ${r.playbook_name || r.name} v${r.playbook_version || ''} -> ${r.recommended_action_key || r.action} ${SysEthicVocabulary.statusBadge(r.status)}`;
       runs.appendChild(d);
     });
   });
@@ -83,6 +89,7 @@ window.addEventListener('DOMContentLoaded', ()=>{
       operator: document.getElementById('pbOperator').value,
       threshold: Number(document.getElementById('pbThreshold').value),
       action_type: document.getElementById('pbAction').value,
+      recommended_action_key: document.getElementById('pbAction').value,
       target: document.getElementById('pbTarget').value || 'all',
       enabled: true,
       auto: document.getElementById('pbAuto').checked,

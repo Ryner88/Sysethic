@@ -182,3 +182,35 @@ venv/bin/python -m unittest tests.test_response_approval_contract
 venv/bin/python -m unittest tests.test_security_workflows
 venv/bin/python -m unittest discover
 ```
+
+Result: Ran 38 tests in 126.587s - OK
+
+### Phase 4 #11: Seeded Operational Playbooks
+
+Implemented persisted operational playbook definitions with stable keys, structured triggers, recommended action keys, required approval roles, canonical declarative YAML steps, versions, definition digests, source labels, and actor/timestamp metadata. Added eight idempotent `source = seeded` operational definitions and retained authentication/access-control definitions as `source = system` compatibility playbooks.
+
+Safety boundary:
+
+- Playbook YAML is declarative and allowlisted.
+- Playbooks recommend and coordinate action requests; they do not execute host commands.
+- Invalid writes are rejected with sanitized audit records.
+
+### Phase 4 #12: Shared Validation-to-Playbook Integration
+
+Replaced the #10 transitional validation mapping with shared persisted matching and idempotent playbook run creation. Live and controlled anomalies use the same matcher, playbook runs snapshot definition metadata, and anomaly/incident/report payloads expose recommendation provenance without rewriting history after definition edits.
+
+Safety boundary:
+
+- Validation events stop at ingestion, incident creation, recommendation, and run creation.
+- Validation events do not request, approve, consume, or execute response actions.
+- `quarantine_file` and `block_ip` execution remains unavailable in Phase 4.
+
+Verification:
+
+```bash
+venv/bin/python -m unittest tests.test_seeded_operational_playbooks
+venv/bin/python -m unittest tests.test_validation_event_center
+venv/bin/python -m unittest discover
+```
+
+Result: Ran 42 tests in 118.072s - OK

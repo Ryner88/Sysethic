@@ -109,24 +109,35 @@ classDiagram
 
     class Playbook {
         +int id
+        +string stable_key
         +string name
+        +string description
+        +string kind
         +string category
-        +string metric
-        +string operator
-        +float threshold
-        +string action
-        +string target
-        +bool auto
-        +string yaml
+        +json trigger_json
+        +string recommended_action_key
+        +string required_approval_role
+        +string steps_yaml
+        +bool enabled
+        +string source
+        +int version
+        +string definition_digest
     }
 
     class PlaybookRun {
         +int id
-        +datetime timestamp
-        +string name
-        +string action
-        +string target
+        +string playbook_stable_key
+        +string playbook_name
+        +string playbook_kind
+        +int playbook_version
+        +string definition_digest
+        +string recommended_action_key
+        +string required_approval_role
+        +string steps_yaml
+        +string anomaly_id
+        +string incident_id
         +string status
+        +datetime created_at
     }
 
     class ResponseApproval {
@@ -155,9 +166,9 @@ classDiagram
     AutomationRule --> Anomaly : matches
     ValidationEvent --> Anomaly : creates controlled input
     ValidationEvent --> Incident : opens workflow
-    Playbook --> Anomaly : responds to
-    Playbook --> PlaybookRun : creates
-    Playbook --> ResponseApproval : requests risky action
+    Playbook --> Anomaly : matches by persisted trigger
+    Playbook --> PlaybookRun : creates immutable snapshot
+    Playbook --> ResponseApproval : may coordinate explicit request
     ResponseApproval --> PlaybookRun : gates bounded execution
     ReportSummary --> Anomaly : summarizes
 ```
@@ -427,11 +438,11 @@ flowchart TB
 flowchart TB
     PlaybooksPage[playbooks.html]
     PlaybooksPage --> PlaybookApi["/api/playbooks"]
-    PlaybookApi --> PlaybookStore[(In-memory playbooks)]
+    PlaybookApi --> PlaybookStore[(SQLite playbook definitions)]
     PlaybooksPage --> CreatePlaybook[Create playbook form]
     CreatePlaybook --> PlaybookApi
     PlaybookStore --> PlaybookTable[Playbook table]
-    PlaybookStore --> YamlSteps[YAML step preview]
+    PlaybookStore --> SafeYaml[Validated declarative YAML]
 ```
 
 ### Automation Page
@@ -602,16 +613,16 @@ sequenceDiagram
     participant UI as Anomalies Page
     participant API as /api/playbook_trigger
     participant Anoms as Anomaly Loader
-    participant Store as Playbook Store
-    participant Runs as Run History
+    participant Store as Persisted Playbook Definitions
+    participant Runs as Immutable Run Snapshots
 
     User->>UI: Click Respond
     UI->>API: POST anomaly_id
     API->>Anoms: Find anomaly
-    API->>Store: Find enabled matching playbook
-    Store-->>API: Return playbook
-    API->>Runs: Record response run
-    API-->>UI: Return run status and YAML
+    API->>Store: Query enabled trigger matches
+    Store-->>API: Return definition
+    API->>Runs: Record idempotent snapshot
+    API-->>UI: Return run status and steps snapshot
 ```
 
 ### Approved Bounded Execution Workflow

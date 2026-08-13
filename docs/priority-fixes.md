@@ -514,6 +514,8 @@ Why priority: operational systems need repeatable validation without requiring u
 
 ### 11. Add Seeded Operational Playbooks
 
+Status: Complete.
+
 Goal: ship useful starter playbooks that map to real incident types.
 
 Start with:
@@ -534,9 +536,21 @@ Acceptance criteria:
 - Playbook changes are persistent and audited.
 - A matching anomaly recommends the correct playbook.
 
+Implementation:
+
+- Eight `source = seeded` operational playbook definitions are inserted idempotently with stable keys, descriptions, kinds, structured triggers, recommended action keys, required approval roles, canonical YAML steps, versions, and definition digests.
+- Startup preserves administrator edits and only inserts missing seed definitions.
+- Create, update, enable, and disable writes validate trigger JSON and allowlisted declarative YAML before persistence.
+- Invalid writes return `400` and write sanitized `playbook.write_rejected` audit events with request digests, not raw YAML.
+- Persisted matching returns enabled definitions from `trigger_json`; #11 does not execute actions.
+
+Verification: `venv/bin/python -m unittest tests.test_seeded_operational_playbooks` passed.
+
 Why priority: playbooks are central to SAAOE's operational identity.
 
 ### 12. Connect Validation Events to Playbooks
+
+Status: Complete.
 
 Goal: controlled validation events should trigger the same detection and recommendation path used by real telemetry.
 
@@ -556,6 +570,17 @@ Acceptance criteria:
 - The recommended playbook is visible from the incident and anomaly views.
 - Approval-required actions cannot bypass the approval workflow.
 - The full path is visible in reports and audit logs.
+
+Implementation:
+
+- Live and controlled anomalies use the shared persisted matcher.
+- Playbook run creation is idempotent by anomaly and playbook definition and snapshots stable key, name, kind, version, digest, action, approval role, and YAML steps.
+- Validation events stop at ingestion, incident creation, recommendation, and run creation; they never request, approve, consume, or execute response actions.
+- Anomaly and incident detail payloads expose persisted recommendations and immutable run snapshots.
+- Report summaries include scoped incident reconstruction with controlled-validation provenance, playbook runs, approvals, and closure state.
+- `quarantine_file` and `block_ip` execution remains unavailable in Phase 4.
+
+Verification: `venv/bin/python -m unittest tests.test_validation_event_center` passed.
 
 Why priority: this proves the operational workflow before real response actions are used on a user machine.
 
