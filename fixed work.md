@@ -195,6 +195,10 @@ Safety boundary:
 - Playbooks recommend and coordinate action requests; they do not execute host commands.
 - Invalid writes are rejected with sanitized audit records.
 
+Relevant commit:
+
+- `89eb5e1` Add persisted operational playbook workflow
+
 ### Phase 4 #12: Shared Validation-to-Playbook Integration
 
 Replaced the #10 transitional validation mapping with shared persisted matching and idempotent playbook run creation. Live and controlled anomalies use the same matcher, playbook runs snapshot definition metadata, and anomaly/incident/report payloads expose recommendation provenance without rewriting history after definition edits.
