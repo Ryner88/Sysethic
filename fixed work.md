@@ -218,3 +218,27 @@ venv/bin/python -m unittest discover
 ```
 
 Result: Ran 42 tests in 118.072s - OK
+
+### Phase 5 #13: Installation and Startup Packaging
+
+Implemented local packaging and lifecycle operations around one shared Python CLI.
+
+Added:
+
+- `scripts/setup_saaoe.py` standard-library bootstrapper.
+- `web/saaoe_cli.py` with `setup`, `bootstrap-admin`, `start`, `stop`, `status`, `health`, and `run --foreground`.
+- Minimal `/healthz` and `create_app(config_overrides=None)` entry point.
+- Waitress production serving for foreground and background starts.
+- PID-reuse-safe runtime metadata under `instance/runtime/`.
+- Shell and PowerShell wrapper delegation.
+- `packaging/systemd/saaoe.service.example`.
+- `.github/workflows/tests.yml`.
+- `tests/test_installation_startup.py`.
+- Expanded `docs/operational-startup.md`.
+
+Safety boundary:
+
+- Packaging does not enable public exposure.
+- Packaging does not add MSI/DMG installers or container orchestration.
+- `quarantine_file` and `block_ip` execution remain unavailable and fail closed.
+- Health output is intentionally minimal and does not expose secrets, paths, usernames, environment values, or telemetry details.

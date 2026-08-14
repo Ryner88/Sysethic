@@ -42,6 +42,7 @@ except Exception:
 # Paths and operational configuration
 CONFIG = load_config()
 BASE_DIR = str(PROJECT_ROOT)
+SAAOE_VERSION = 'phase5.13'
 SAAOE_ENV = CONFIG.mode
 SAAOE_DEBUG = CONFIG.debug
 SECRET_KEY = CONFIG.secret_key
@@ -3545,6 +3546,7 @@ def require_authentication():
     endpoint = request.endpoint or ''
     if endpoint in PUBLIC_ENDPOINTS:
         return None
+    healthcheck_probe = request.headers.get('X-SAAOE-Healthcheck') == '1'
 
     if not active_admin_exists():
         if endpoint == 'setup':
@@ -3555,7 +3557,8 @@ def require_authentication():
 
     user = current_user()
     if not user:
-        audit_event('access_denied', endpoint or request.path, 'denied', 'authentication required', actor='anonymous', role='anonymous')
+        if not healthcheck_probe:
+            audit_event('access_denied', endpoint or request.path, 'denied', 'authentication required', actor='anonymous', role='anonymous')
         return _auth_failed(401, 'authentication required')
 
     last_seen_at = session.get('last_seen_at')
@@ -5327,9 +5330,18 @@ def api_audit_stats():
     today = len(df[df['timestamp'].dt.date == pd.Timestamp.now().date()])
     return jsonify(stats={'total': total, 'today': today})
 
+def health_payload():
+    return {
+        'ok': True,
+        'service': 'saaoe',
+        'version': SAAOE_VERSION,
+    }
+
+
 @app.route('/health')
+@app.route('/healthz')
 def health():
-    return jsonify({'ok': True})
+    return jsonify(health_payload())
 
 @app.route('/assets')
 def assets_page():
@@ -5406,6 +5418,15 @@ def api_net_graph():
         links.append({'source': proc_id, 'target': ext_id, 'score': threat['confidence'] / 100 if threat['matched'] else 0.0})
 
     return jsonify(graph={'nodes':nodes,'links':links})
+
+def create_app(config_overrides=None):
+    if config_overrides:
+        app.config.update(config_overrides)
+    init_db()
+    _seed_db()
+    load_persistent_state()
+    return app
+
 
 if __name__ == '__main__':
     if CONFIG.terminal_ws_enabled:
