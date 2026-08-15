@@ -22,6 +22,7 @@ import socketserver
 import struct
 import subprocess
 import uuid
+from dataclasses import dataclass
 from functools import wraps
 
 import psutil
@@ -169,14 +170,112 @@ INCIDENT_STATUSES = STATUSES
 APPROVAL_STATUSES = {'pending', 'approved', 'rejected', 'cancelled', 'expired', 'consumed'}
 APPROVAL_DECISION_STATUSES = {'approved', 'rejected', 'cancelled', 'expired'}
 APPROVAL_TERMINAL_STATUSES = {'rejected', 'cancelled', 'expired', 'consumed'}
-APPROVAL_ACTION_CONTRACTS = {
-    'kill_process': {'required_role': 'admin', 'action_type': 'host_process', 'host_impacting': True},
-    'quarantine_file': {'required_role': 'admin', 'action_type': 'host_file', 'host_impacting': True},
-    'block_ip': {'required_role': 'admin', 'action_type': 'network_firewall', 'host_impacting': True},
-    'restart_service': {'required_role': 'admin', 'action_type': 'service_control', 'host_impacting': True},
-    'create_incident_report': {'required_role': 'analyst', 'action_type': 'record_report', 'host_impacting': False},
+
+
+@dataclass(frozen=True)
+class ResponseActionMetadata:
+    stable_key: str
+    safety_class: str
+    input_validator: object
+    request_roles: tuple
+    required_approval_role: str
+    execution_roles: tuple
+    supported_platforms: tuple
+    enabled: bool
+    executor: object
+    action_type: str
+    host_impacting: bool
+
+    def approval_contract(self):
+        return {
+            'required_role': self.required_approval_role,
+            'action_type': self.action_type,
+            'host_impacting': self.host_impacting,
+            'enabled': self.enabled,
+            'safety_class': self.safety_class,
+            'request_roles': self.request_roles,
+            'execution_roles': self.execution_roles,
+            'supported_platforms': self.supported_platforms,
+        }
+
+
+def _unsupported_executor(*_args, **_kwargs):
+    raise ValueError('response action execution adapter is not available')
+
+
+def _incident_report_executor(_target):
+    return {'executed': True, 'detail': 'Incident report action recorded.'}
+
+
+RESPONSE_ACTION_REGISTRY = {
+    'kill_process': ResponseActionMetadata(
+        stable_key='kill_process',
+        safety_class='destructive_host_process',
+        input_validator='_validate_kill_process_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=False,
+        executor='_execute_kill_process',
+        action_type='host_process',
+        host_impacting=True,
+    ),
+    'quarantine_file': ResponseActionMetadata(
+        stable_key='quarantine_file',
+        safety_class='destructive_host_file',
+        input_validator='_validate_quarantine_file_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=False,
+        executor=_unsupported_executor,
+        action_type='host_file',
+        host_impacting=True,
+    ),
+    'block_ip': ResponseActionMetadata(
+        stable_key='block_ip',
+        safety_class='destructive_network_firewall',
+        input_validator='_validate_block_ip_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=False,
+        executor=_unsupported_executor,
+        action_type='network_firewall',
+        host_impacting=True,
+    ),
+    'restart_service': ResponseActionMetadata(
+        stable_key='restart_service',
+        safety_class='bounded_service_control',
+        input_validator='_validate_restart_service_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux',),
+        enabled=True,
+        executor='_restart_approved_service',
+        action_type='service_control',
+        host_impacting=True,
+    ),
+    'create_incident_report': ResponseActionMetadata(
+        stable_key='create_incident_report',
+        safety_class='record_only',
+        input_validator='_validate_incident_report_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='analyst',
+        execution_roles=('analyst', 'admin'),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=True,
+        executor=_incident_report_executor,
+        action_type='record_report',
+        host_impacting=False,
+    ),
 }
-RESPONSE_ACTIONS = set(APPROVAL_ACTION_CONTRACTS)
+APPROVAL_ACTION_CONTRACTS = {key: metadata.approval_contract() for key, metadata in RESPONSE_ACTION_REGISTRY.items()}
+RESPONSE_ACTIONS = set(RESPONSE_ACTION_REGISTRY)
 PLAYBOOK_KINDS = {'anomaly_response', 'workflow_gate', 'incident_utility', 'approval_action', 'access_control'}
 PLAYBOOK_CATEGORIES = {'system', 'host', 'network', 'file', 'workflow', 'incident', 'authentication', 'access_control', 'custom'}
 PLAYBOOK_TRIGGER_TYPES = {'anomaly', 'workflow', 'incident'}
@@ -1180,7 +1279,7 @@ def approval_preview(payload):
     if not contract:
         raise ValueError('unsupported response action')
     canonical_target = _approval_canonical_target(normalized['action'], normalized['target'])
-    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'] and normalized['action'] != 'restart_service')
+    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'] and not contract.get('enabled'))
     if normalized['action'] == 'kill_process':
         effect = f"Would validate termination of PID {canonical_target}."
     elif normalized['action'] == 'quarantine_file':
@@ -1217,8 +1316,36 @@ def _approval_error(message, status_code=409, approval=None):
     return {'ok': False, 'error': message, 'status_code': status_code, 'approval': approval}
 
 
+def _response_action_metadata(action):
+    return RESPONSE_ACTION_REGISTRY.get(action)
+
+
+def response_action_registry_manifest():
+    return {
+        key: {
+            'stable_key': metadata.stable_key,
+            'safety_class': metadata.safety_class,
+            'input_validator': metadata.input_validator if isinstance(metadata.input_validator, str) else metadata.input_validator.__name__,
+            'request_roles': list(metadata.request_roles),
+            'required_approval_role': metadata.required_approval_role,
+            'execution_roles': list(metadata.execution_roles),
+            'supported_platforms': list(metadata.supported_platforms),
+            'enabled': metadata.enabled,
+            'executor': metadata.executor if isinstance(metadata.executor, str) else metadata.executor.__name__,
+            'action_type': metadata.action_type,
+            'host_impacting': metadata.host_impacting,
+        }
+        for key, metadata in RESPONSE_ACTION_REGISTRY.items()
+    }
+
+
+def _response_action_executor(metadata):
+    return globals().get(metadata.executor) if isinstance(metadata.executor, str) else metadata.executor
+
+
 def _approval_contract(action):
-    return APPROVAL_ACTION_CONTRACTS.get(action)
+    metadata = _response_action_metadata(action)
+    return metadata.approval_contract() if metadata else None
 
 
 def _mark_approval_expired(conn, approval, now):
@@ -3299,32 +3426,15 @@ def _execute_response_action(action, target, dry_run=True):
     preview = approval_preview({'action': action, 'target': target, 'dry_run': dry_run})
     if dry_run:
         return {'executed': False, 'detail': preview['detail']}
-    contract = _approval_contract(action) or {}
+    metadata = _response_action_metadata(action)
+    contract = metadata.approval_contract() if metadata else {}
     if action in {'quarantine_file', 'block_ip'}:
         raise ValueError(f'{action} execution adapter is not available in Phase 4')
-    if contract.get('host_impacting') and action != 'restart_service':
+    if contract.get('host_impacting') and not contract.get('enabled'):
         return {'executed': False, 'detail': preview['detail']}
-    if action == 'restart_service':
-        return _restart_approved_service(target)
-    if action == 'kill_process':
-        pid = int(target)
-        if pid == os.getpid():
-            raise ValueError('refusing to terminate the SAAOE process')
-        proc = psutil.Process(pid)
-        proc.terminate()
-        return {'executed': True, 'detail': f"Terminate signal sent to PID {pid} ({proc.name()})"}
-    if action == 'quarantine_file':
-        path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
-        if not path.startswith(BASE_DIR + os.sep):
-            raise ValueError('quarantine target must be inside the SAAOE project directory')
-        os.makedirs(QUARANTINE_DIR, exist_ok=True)
-        dest = os.path.join(QUARANTINE_DIR, f"{uuid.uuid4().hex}_{os.path.basename(path)}")
-        shutil.move(path, dest)
-        return {'executed': True, 'detail': f"Moved {os.path.relpath(path, BASE_DIR)} to {os.path.relpath(dest, BASE_DIR)}"}
-    if action == 'create_incident_report':
-        return {'executed': True, 'detail': 'Incident report action recorded.'}
-    if action == 'block_ip':
-        raise ValueError('firewall adapter is not configured; action failed closed')
+    executor = _response_action_executor(metadata) if metadata else None
+    if executor:
+        return executor(target)
     raise ValueError('unsupported response action')
 
 
