@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import statistics
 import json
+import math
 import socket
 import base64
 import csv
@@ -126,6 +127,19 @@ automation_rules = [
 ]
 next_automation_rule_id = 3
 automation_history = []
+
+ANOMALY_RULE_FIELDS = {'metric', 'operator', 'threshold', 'severity', 'enabled', 'alert_in_app', 'alert_email'}
+ANOMALY_RULE_METRICS = {'cpu_percent', 'memory_percent', 'disk_percent', 'network_bytes_per_second'}
+ANOMALY_RULE_OPERATORS = {'>', '>=', '<', '<='}
+
+AUTOMATION_RULE_FIELDS = {'name', 'field', 'operator', 'value', 'run_action', 'enabled'}
+RULE_DELETE_FIELDS = {'action', 'id'}
+AUTOMATION_RULE_MATCH_FIELDS = {'severity', 'risk_score', 'metric', 'category', 'confidence', 'indicator_type'}
+AUTOMATION_RULE_TEXT_FIELDS = {'severity', 'metric', 'category', 'indicator_type'}
+AUTOMATION_RULE_NUMERIC_FIELDS = {'risk_score', 'confidence'}
+AUTOMATION_RULE_TEXT_OPERATORS = {'equals'}
+AUTOMATION_RULE_NUMERIC_OPERATORS = {'>', '>=', '<', '<=', 'equals'}
+AUTOMATION_RULE_ACTIONS = {'Isolate Process', 'Block IP', 'Capture Forensics Bundle', 'Notify Analyst'}
 
 THREAT_INTEL_PATH = str(CONFIG.threat_intel_path)
 
@@ -1249,6 +1263,133 @@ def _clean_optional_text(value):
         return None
     text = str(value).strip()
     return text or None
+
+
+def _reject_rule_write(event_type, target, reason, details=None, status=400):
+    audit_event(event_type, target, 'failed', reason, details=details)
+    return jsonify(error=reason), status
+
+
+def _payload_unknown_fields(payload, allowed_fields):
+    return sorted(set(payload) - set(allowed_fields))
+
+
+def _positive_int(value):
+    if isinstance(value, bool):
+        raise ValueError('id must be a positive integer')
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('id must be a positive integer') from None
+    if parsed <= 0 or str(value).strip() != str(parsed):
+        raise ValueError('id must be a positive integer')
+    return parsed
+
+
+def _finite_number(value, field_name):
+    if isinstance(value, bool):
+        raise ValueError(f'{field_name} must be a finite number')
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} must be a finite number') from None
+    if not math.isfinite(number):
+        raise ValueError(f'{field_name} must be a finite number')
+    return number
+
+
+def _strict_bool(value, field_name):
+    if not isinstance(value, bool):
+        raise ValueError(f'{field_name} must be true or false')
+    return value
+
+
+def _required_text(payload, field_name, *, max_length=120):
+    value = payload.get(field_name)
+    if not isinstance(value, str):
+        raise ValueError(f'{field_name} is required')
+    text = value.strip()
+    if not text:
+        raise ValueError(f'{field_name} is required')
+    if len(text) > max_length:
+        raise ValueError(f'{field_name} is too long')
+    return text
+
+
+def _validate_automation_rule_payload(payload):
+    unknown_fields = _payload_unknown_fields(payload, AUTOMATION_RULE_FIELDS)
+    if unknown_fields:
+        raise ValueError(f"unknown automation rule fields: {', '.join(unknown_fields)}")
+
+    field = payload.get('field')
+    if field not in AUTOMATION_RULE_MATCH_FIELDS:
+        raise ValueError('unsupported automation rule field')
+
+    operator = payload.get('operator')
+    allowed_operators = AUTOMATION_RULE_TEXT_OPERATORS if field in AUTOMATION_RULE_TEXT_FIELDS else AUTOMATION_RULE_NUMERIC_OPERATORS
+    if operator not in allowed_operators:
+        raise ValueError('unsupported automation rule operator')
+
+    raw_value = payload.get('value')
+    if field in AUTOMATION_RULE_NUMERIC_FIELDS:
+        value = f"{_finite_number(raw_value, 'value'):g}"
+    else:
+        value = _required_text(payload, 'value', max_length=120)
+
+    run_action = payload.get('run_action')
+    if run_action not in AUTOMATION_RULE_ACTIONS:
+        raise ValueError('unsupported automation rule action')
+
+    enabled = payload.get('enabled', True)
+    if 'enabled' in payload:
+        enabled = _strict_bool(enabled, 'enabled')
+
+    return {
+        'name': _required_text(payload, 'name', max_length=120),
+        'field': field,
+        'operator': operator,
+        'value': value,
+        'action': run_action,
+        'enabled': enabled,
+    }
+
+
+def _validate_anomaly_rule_payload(payload):
+    unknown_fields = _payload_unknown_fields(payload, ANOMALY_RULE_FIELDS)
+    if unknown_fields:
+        raise ValueError(f"unknown anomaly rule fields: {', '.join(unknown_fields)}")
+
+    metric = payload.get('metric')
+    if metric not in ANOMALY_RULE_METRICS:
+        raise ValueError('unsupported anomaly rule metric')
+
+    operator = payload.get('operator')
+    if operator not in ANOMALY_RULE_OPERATORS:
+        raise ValueError('unsupported anomaly rule operator')
+
+    severity = payload.get('severity')
+    if severity not in SEVERITIES:
+        raise ValueError('unsupported anomaly rule severity')
+
+    enabled = payload.get('enabled', True)
+    alert_in_app = payload.get('alert_in_app', True)
+    alert_email = payload.get('alert_email', False)
+    if 'enabled' in payload:
+        enabled = _strict_bool(enabled, 'enabled')
+    if 'alert_in_app' in payload:
+        alert_in_app = _strict_bool(alert_in_app, 'alert_in_app')
+    if 'alert_email' in payload:
+        alert_email = _strict_bool(alert_email, 'alert_email')
+
+    return {
+        'metric': metric,
+        'operator': operator,
+        'threshold': _finite_number(payload.get('threshold'), 'threshold'),
+        'severity': severity,
+        'enabled': enabled,
+        'alert_in_app': alert_in_app,
+        'alert_email': alert_email,
+    }
 
 
 def _public_error_detail(exc, fallback):
@@ -5378,9 +5519,17 @@ def api_automation_rules():
             rules=_automation_rules_from_db(),
             history=_automation_history_from_db()
         )
-    payload = request.json or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _reject_rule_write('automation_rule_create_failed', 'automation_rule:new', 'request body must be a JSON object')
     if payload.get('action') == 'delete':
-        rid = int(payload.get('id', 0))
+        unknown_fields = _payload_unknown_fields(payload, RULE_DELETE_FIELDS)
+        if unknown_fields:
+            return _reject_rule_write('automation_rule_delete_failed', 'automation_rule:unknown', f"unknown automation rule delete fields: {', '.join(unknown_fields)}")
+        try:
+            rid = _positive_int(payload.get('id'))
+        except ValueError as exc:
+            return _reject_rule_write('automation_rule_delete_failed', 'automation_rule:unknown', exc.args[0])
         if not _db_query("SELECT id FROM automation_rules WHERE id = ?", (rid,)):
             audit_event('automation_rule_delete_failed', f"automation_rule:{rid}", 'failed', 'automation rule not found')
             return jsonify(error='automation rule not found'), 404
@@ -5388,14 +5537,15 @@ def api_automation_rules():
         load_persistent_state()
         audit_event('automation_rule_deleted', f"automation_rule:{rid}", 'success', 'automation rule deleted')
         return jsonify(success=True, rules=_automation_rules_from_db())
+    if 'action' in payload:
+        return _reject_rule_write('automation_rule_create_failed', 'automation_rule:new', 'unsupported automation rule command')
+    try:
+        validated = _validate_automation_rule_payload(payload)
+    except ValueError as exc:
+        return _reject_rule_write('automation_rule_create_failed', 'automation_rule:new', exc.args[0])
     rule = {
         'id': next_automation_rule_id,
-        'name': payload.get('name', 'New automation rule'),
-        'field': payload.get('field', 'severity'),
-        'operator': payload.get('operator', 'equals'),
-        'value': payload.get('value', 'critical'),
-        'action': payload.get('run_action', 'Isolate Process'),
-        'enabled': bool(payload.get('enabled', True)),
+        **validated,
     }
     _db_exec(
         "INSERT INTO automation_rules (id, name, field, operator, value, action, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -5423,9 +5573,17 @@ def api_anomaly_rules():
     if request.method == 'GET':
         return jsonify(rules=_anomaly_rules_from_db())
 
-    payload = request.json or {}
-    if 'action' in payload and payload['action'] == 'delete':
-        rid = int(payload.get('id', 0))
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _reject_rule_write('anomaly_rule_create_failed', 'anomaly_rule:new', 'request body must be a JSON object')
+    if payload.get('action') == 'delete':
+        unknown_fields = _payload_unknown_fields(payload, RULE_DELETE_FIELDS)
+        if unknown_fields:
+            return _reject_rule_write('anomaly_rule_delete_failed', 'anomaly_rule:unknown', f"unknown anomaly rule delete fields: {', '.join(unknown_fields)}")
+        try:
+            rid = _positive_int(payload.get('id'))
+        except ValueError as exc:
+            return _reject_rule_write('anomaly_rule_delete_failed', 'anomaly_rule:unknown', exc.args[0])
         if not _db_query("SELECT id FROM anomaly_rules WHERE id = ?", (rid,)):
             audit_event('anomaly_rule_delete_failed', f"anomaly_rule:{rid}", 'failed', 'anomaly rule not found')
             return jsonify(error='anomaly rule not found'), 404
@@ -5433,21 +5591,16 @@ def api_anomaly_rules():
         load_persistent_state()
         audit_event('anomaly_rule_deleted', f"anomaly_rule:{rid}", 'success', 'anomaly rule deleted')
         return jsonify(success=True, rules=_anomaly_rules_from_db())
+    if 'action' in payload:
+        return _reject_rule_write('anomaly_rule_create_failed', 'anomaly_rule:new', 'unsupported anomaly rule command')
 
     try:
-        threshold = float(payload.get('threshold', 90))
-    except (TypeError, ValueError):
-        audit_event('anomaly_rule_create_failed', 'anomaly_rule:new', 'failed', 'threshold must be numeric')
-        return jsonify(error='threshold must be numeric'), 400
+        validated = _validate_anomaly_rule_payload(payload)
+    except ValueError as exc:
+        return _reject_rule_write('anomaly_rule_create_failed', 'anomaly_rule:new', exc.args[0])
     rule = {
         'id': next_rule_id,
-        'metric': payload.get('metric', 'cpu_percent'),
-        'operator': payload.get('operator', '>'),
-        'threshold': threshold,
-        'severity': normalize_severity(payload.get('severity', 'high'), default='info'),
-        'enabled': bool(payload.get('enabled', True)),
-        'alert_in_app': bool(payload.get('alert_in_app', True)),
-        'alert_email': bool(payload.get('alert_email', False))
+        **validated,
     }
     _db_exec(
         "INSERT INTO anomaly_rules (id, metric, operator, threshold, severity, enabled, alert_in_app, alert_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
