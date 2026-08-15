@@ -620,6 +620,8 @@ Implementation:
 - Added Waitress foreground serving, systemd example packaging, wrapper delegation, CI, and startup tests.
 - Preserved Phase 3-4 response safety: `quarantine_file` and `block_ip` remain unavailable and fail closed.
 
+Status: Complete. Merged to `main` in PR #2 as `75805a6`.
+
 Why priority: a real user should not need to understand the codebase to operate the tool.
 
 ### 14. Add Tests for Security-Critical Behavior
@@ -643,5 +645,15 @@ Acceptance criteria:
 - Tests run from a documented command.
 - CI or precommit workflow runs the test suite.
 - New response actions require tests before being enabled.
+
+Implementation:
+
+- Consolidated response-action registry metadata and added executable contract cases.
+- Enforced request roles, approval floors, execution roles, disabled-action state, and supported platforms before adapter calls or approval consumption.
+- Added transactional, idempotent playbook migration backfill for registry approval floors while preserving historical run snapshots.
+- Added exact public-endpoint inventory tests, anonymous protected-route coverage, invalid rule-body/input coverage, rejected-write auditing, exception sanitization, redirect hardening, and CodeQL regression tests.
+- Updated CI action versions and preserved the documented `python -m unittest discover` command.
+
+Status: Complete. Merged to `main` in PR #3 as `87c4270`.
 
 Why priority: once SAAOE controls local machine actions, tests become a safety requirement.

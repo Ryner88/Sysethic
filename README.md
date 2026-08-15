@@ -29,6 +29,8 @@ Verification: `venv/bin/python -m unittest discover` passed with 42 tests.
 
 Phase 5 #13 adds local installation/startup packaging: `scripts/setup_saaoe.py`, the shared `web.saaoe_cli` operations interface, `/healthz`, Waitress foreground serving, PID-validated lifecycle commands, wrappers, CI, and the expanded [Operational Startup](docs/operational-startup.md) guide. It does not enable `quarantine_file` or `block_ip`.
 
+Phase 5 #14 adds security-critical test coverage and enforcement around response-action registry metadata, role and platform gates, approval floors, route authentication inventory, strict rule validation, exception sanitization, and CodeQL remediation. `quarantine_file` and `block_ip` remain registered but disabled and fail closed.
+
 ## Architecture
 
 See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams. See [Priority Fixes](docs/priority-fixes.md), [Future Feature Implementation](docs/future-feature-implementation.md), and [Method, Function, List Meaning, and Design](docs/method-function-list-meaning-and-design.md) for roadmap and implementation reference docs.

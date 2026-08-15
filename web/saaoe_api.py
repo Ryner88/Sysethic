@@ -1448,6 +1448,30 @@ def _public_error_detail(exc, fallback):
     return fallback
 
 
+LOGIN_REDIRECT_PATH_ENDPOINTS = {
+    '/': 'dashboard',
+    '/dashboard': 'dashboard',
+    '/processes': 'processes',
+    '/analytics': 'analytics',
+    '/visualization-lab': 'visualization_lab',
+    '/security': 'security',
+    '/audit-logs': 'audit_logs',
+    '/ethics': 'ethics',
+    '/files': 'files',
+    '/terminal': 'terminal_page',
+    '/reports': 'reports_page',
+    '/automation': 'automation_page',
+    '/incidents': 'incidents_page',
+    '/approvals': 'approvals_page',
+    '/validation': 'validation_page',
+    '/users': 'users_page',
+    '/anomalies': 'anomalies_page',
+    '/assets': 'assets_page',
+    '/threat-trends': 'threat_trends_page',
+    '/playbooks': 'playbooks_page',
+}
+
+
 def _safe_local_redirect_target(value, fallback=None):
     fallback = fallback or url_for('dashboard')
     target = str(value or '').strip()
@@ -1460,7 +1484,10 @@ def _safe_local_redirect_target(value, fallback=None):
     parts = urlsplit(target)
     if parts.scheme or parts.netloc:
         return fallback
-    return target
+    endpoint = LOGIN_REDIRECT_PATH_ENDPOINTS.get(parts.path)
+    if not endpoint:
+        return fallback
+    return url_for(endpoint)
 
 
 def _approval_payload(action, target, incident_id=None, anomaly_id=None, dry_run=True):

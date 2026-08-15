@@ -242,3 +242,24 @@ Safety boundary:
 - Packaging does not add MSI/DMG installers or container orchestration.
 - `quarantine_file` and `block_ip` execution remain unavailable and fail closed.
 - Health output is intentionally minimal and does not expose secrets, paths, usernames, environment values, or telemetry details.
+
+### Phase 5 #14: Security-Critical Test Coverage
+
+Implemented the security coverage milestone around the response-action registry, route authentication inventory, rule validation, exception sanitization, and CodeQL remediation.
+
+Added:
+
+- Registry metadata and executable contract cases for enabled response actions.
+- Request-role, approval-role, execution-role, platform, disabled-action, and adapter-call enforcement.
+- Playbook migration backfill that reapplies registry approval floors transactionally and idempotently while preserving historical run snapshots.
+- Authentication inventory tests with an exact public-endpoint allowlist.
+- Rule validation tests for malformed request bodies, unsupported fields/operators/actions, invalid severities, non-finite thresholds, malformed delete IDs, rejected-write auditing, and positive valid anomaly-rule creation.
+- Regression coverage for debug-mode startup, local redirect validation, JSON-shaped exception sanitization, and raw exception suppression.
+- CI updates using current checkout, setup-python, and CodeQL actions across Linux, macOS, and Windows.
+
+Closeout:
+
+- PR #2 merged Phase 5 #13 as `75805a6`.
+- PR #3 merged Phase 5 #14 as `87c4270` from head `0398b03`.
+- `quarantine_file` and `block_ip` remain registered but disabled and fail closed.
+- Public exposure, MSI/DMG installers, and container orchestration remain out of scope for Phase 5.

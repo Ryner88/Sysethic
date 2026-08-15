@@ -89,11 +89,11 @@ class SecurityRemediationTests(unittest.TestCase):
         self.client.get('/logout')
         response = self.client.post(
             '/login',
-            query_string={'next': '/incidents?id=INC-1'},
+            query_string={'next': '/incidents'},
             data={'username': 'admin', 'password': 'longpassword1'},
         )
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.location, '/incidents?id=INC-1')
+        self.assertEqual(response.location, '/incidents')
 
     def test_sqlite_exception_does_not_expose_raw_exception_text(self):
         sentinel = 'SENTINEL_SECRET_DB_EXCEPTION'
