@@ -678,3 +678,42 @@ sequenceDiagram
         API-->>UI: Display refusal
     end
 ```
+
+### Phase 5 Local Packaging Workflow
+
+```mermaid
+flowchart TD
+    Operator["Operator or system service"] --> CLI["web.saaoe_cli"]
+    Wrapper["Shell or PowerShell wrapper"] --> CLI
+    Setup["scripts/setup_saaoe.py"] --> CLI
+    CLI --> Factory["create_app(config_overrides=None)"]
+    CLI --> Runtime["instance/runtime PID and logs"]
+    CLI --> Config[".env and pinned requirements"]
+    Factory --> App["Flask app on 127.0.0.1"]
+    App --> Health["/healthz minimal public health"]
+    App --> State["SQLite, logs, and config paths"]
+    App --> Safety["Telemetry, RBAC, approvals, audit, and action adapters"]
+    Safety --> Disabled["quarantine_file and block_ip remain disabled"]
+```
+
+```mermaid
+sequenceDiagram
+    participant Operator
+    participant CLI as web.saaoe_cli
+    participant Proc as Recorded SAAOE Process
+    participant Health as /healthz
+    participant Runtime as instance/runtime
+
+    Operator->>CLI: start
+    CLI->>CLI: Run dependency/config/database/admin/port preflight
+    CLI->>Proc: Launch run --foreground under Waitress
+    CLI->>Runtime: Store PID, creation time, command identity
+    CLI->>Health: Poll until ready
+    Health-->>CLI: service=saaoe
+    CLI-->>Operator: started
+    Operator->>CLI: stop
+    CLI->>Runtime: Read metadata
+    CLI->>Proc: Validate PID, creation time, and command identity
+    CLI->>Proc: Graceful terminate, then verified forced termination if needed
+    CLI->>Runtime: Remove metadata
+```

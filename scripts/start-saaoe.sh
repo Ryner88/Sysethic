@@ -3,9 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [ ! -f .env ]; then
-  cp .env.example .env
-  echo "Created .env from .env.example. Edit SAAOE_SECRET_KEY before operational use."
+if [ "$#" -eq 0 ]; then
+  set -- start
 fi
 
-exec venv/bin/python web/saaoe_api.py
+exec venv/bin/python -m web.saaoe_cli "$@"

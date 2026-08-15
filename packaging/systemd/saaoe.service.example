@@ -1,0 +1,26 @@
+[Unit]
+Description=SAAOE local operations dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=saaoe
+Group=saaoe
+WorkingDirectory=/opt/saaoe
+EnvironmentFile=/opt/saaoe/.env
+ExecStart=/opt/saaoe/venv/bin/python -m web.saaoe_cli run --foreground
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/saaoe/data /opt/saaoe/logs /opt/saaoe/instance /opt/saaoe/quarantine
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

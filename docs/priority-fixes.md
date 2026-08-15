@@ -607,6 +607,15 @@ Acceptance criteria:
 - Setup instructions explain local-only access and first-run admin creation.
 - Start/stop commands are documented for each supported operating system.
 
+Implementation:
+
+- Added `scripts/setup_saaoe.py` as a standard-library bootstrapper that creates `venv/`, installs pinned requirements, and delegates to the shared operations CLI.
+- Added `web.saaoe_cli` with `setup`, `bootstrap-admin`, `start`, `stop`, `status`, `health`, and `run --foreground`.
+- Added PID, process creation time, and command identity validation before lifecycle stop can terminate a process.
+- Added a minimal `/healthz` endpoint and CLI health checks for configuration, schema, telemetry sampler, protected page/API behavior, application identity, and live reachability.
+- Added Waitress foreground serving, systemd example packaging, wrapper delegation, CI, and startup tests.
+- Preserved Phase 3-4 response safety: `quarantine_file` and `block_ip` remain unavailable and fail closed.
+
 Why priority: a real user should not need to understand the codebase to operate the tool.
 
 ### 14. Add Tests for Security-Critical Behavior

@@ -42,6 +42,7 @@ except Exception:
 # Paths and operational configuration
 CONFIG = load_config()
 BASE_DIR = str(PROJECT_ROOT)
+SAAOE_VERSION = 'phase5.13'
 SAAOE_ENV = CONFIG.mode
 SAAOE_DEBUG = CONFIG.debug
 SECRET_KEY = CONFIG.secret_key
@@ -68,6 +69,11 @@ SESSION_TIMEOUT_SECONDS = CONFIG.session_seconds
 # --- Ring buffers ---
 MAX_SAMPLES = 240          # ~4 minutes @ 1s
 SAMPLE_INTERVAL = 1.0      # seconds
+SAMPLER_THREAD = None
+SAMPLER_STARTED_AT = 0.0
+SAMPLER_LAST_SUCCESS_AT = 0.0
+SAMPLER_HEALTH_MAX_AGE_SECONDS = 5.0
+SAMPLER_STARTUP_GRACE_SECONDS = 5.0
 
 cpu_series  = deque(maxlen=MAX_SAMPLES)
 mem_series  = deque(maxlen=MAX_SAMPLES)
@@ -2196,6 +2202,7 @@ load_persistent_state()
 # --- Background sampler ---
 
 def sampler():
+    global SAMPLER_LAST_SUCCESS_AT
     last_disk = psutil.disk_io_counters()
     last_net  = psutil.net_io_counters()
     last_time = time.time()
@@ -2227,6 +2234,7 @@ def sampler():
         cpu_series.append(float(cpu));   mem_series.append(float(mem));   usage_ts.append(now_dt)
         read_series.append(float(read_mbs)); write_series.append(float(write_mbs)); disk_ts.append(now_dt)
         rx_series.append(float(rx_mbs));     tx_series.append(float(tx_mbs));       net_ts.append(now_dt)
+        SAMPLER_LAST_SUCCESS_AT = now
 
         # Check for anomalies
         if len(cpu_series) > 10:  # need some data
@@ -2257,7 +2265,28 @@ def sampler():
         last_time = now
         time.sleep(SAMPLE_INTERVAL)
 
-threading.Thread(target=sampler, daemon=True).start()
+
+def start_sampler():
+    global SAMPLER_STARTED_AT, SAMPLER_THREAD
+    if SAMPLER_THREAD and SAMPLER_THREAD.is_alive():
+        return SAMPLER_THREAD
+    SAMPLER_STARTED_AT = time.time()
+    SAMPLER_THREAD = threading.Thread(target=sampler, daemon=True)
+    SAMPLER_THREAD.start()
+    return SAMPLER_THREAD
+
+
+def sampler_is_healthy(max_age_seconds=SAMPLER_HEALTH_MAX_AGE_SECONDS, startup_grace_seconds=SAMPLER_STARTUP_GRACE_SECONDS):
+    thread_alive = bool(SAMPLER_THREAD and SAMPLER_THREAD.is_alive())
+    if not thread_alive:
+        return False
+    now = time.time()
+    if SAMPLER_LAST_SUCCESS_AT <= 0:
+        return SAMPLER_STARTED_AT > 0 and (now - SAMPLER_STARTED_AT) <= startup_grace_seconds
+    return (now - SAMPLER_LAST_SUCCESS_AT) <= max_age_seconds
+
+
+start_sampler()
 
 # --- Lightweight caches for expensive endpoints ---
 _PROCS_CACHE = {"data": None, "ts": 0.0}
@@ -3545,6 +3574,7 @@ def require_authentication():
     endpoint = request.endpoint or ''
     if endpoint in PUBLIC_ENDPOINTS:
         return None
+    healthcheck_probe = request.environ.get('saaoe.healthcheck') == '1'
 
     if not active_admin_exists():
         if endpoint == 'setup':
@@ -3555,7 +3585,8 @@ def require_authentication():
 
     user = current_user()
     if not user:
-        audit_event('access_denied', endpoint or request.path, 'denied', 'authentication required', actor='anonymous', role='anonymous')
+        if not healthcheck_probe:
+            audit_event('access_denied', endpoint or request.path, 'denied', 'authentication required', actor='anonymous', role='anonymous')
         return _auth_failed(401, 'authentication required')
 
     last_seen_at = session.get('last_seen_at')
@@ -5327,9 +5358,19 @@ def api_audit_stats():
     today = len(df[df['timestamp'].dt.date == pd.Timestamp.now().date()])
     return jsonify(stats={'total': total, 'today': today})
 
+def health_payload():
+    return {
+        'ok': sampler_is_healthy(),
+        'service': 'saaoe',
+        'version': SAAOE_VERSION,
+    }
+
+
 @app.route('/health')
+@app.route('/healthz')
 def health():
-    return jsonify({'ok': True})
+    payload = health_payload()
+    return jsonify(payload), 200 if payload['ok'] else 503
 
 @app.route('/assets')
 def assets_page():
@@ -5406,6 +5447,15 @@ def api_net_graph():
         links.append({'source': proc_id, 'target': ext_id, 'score': threat['confidence'] / 100 if threat['matched'] else 0.0})
 
     return jsonify(graph={'nodes':nodes,'links':links})
+
+def create_app(config_overrides=None):
+    if config_overrides:
+        app.config.update(config_overrides)
+    init_db()
+    _seed_db()
+    load_persistent_state()
+    return app
+
 
 if __name__ == '__main__':
     if CONFIG.terminal_ws_enabled:

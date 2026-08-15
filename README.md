@@ -27,6 +27,8 @@ Phase 4 #11 and #12 add persisted seeded operational playbook definitions, safe 
 
 Verification: `venv/bin/python -m unittest discover` passed with 42 tests.
 
+Phase 5 #13 adds local installation/startup packaging: `scripts/setup_saaoe.py`, the shared `web.saaoe_cli` operations interface, `/healthz`, Waitress foreground serving, PID-validated lifecycle commands, wrappers, CI, and the expanded [Operational Startup](docs/operational-startup.md) guide. It does not enable `quarantine_file` or `block_ip`.
+
 ## Architecture
 
 See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, state, and deployment diagrams. See [Priority Fixes](docs/priority-fixes.md), [Future Feature Implementation](docs/future-feature-implementation.md), and [Method, Function, List Meaning, and Design](docs/method-function-list-meaning-and-design.md) for roadmap and implementation reference docs.
@@ -56,32 +58,38 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
 
 ## Installation
 
-1. Install dependencies:
+1. Run setup:
    ```bash
-   pip install -r requirements.txt
+   python3 scripts/setup_saaoe.py
    ```
+
+   Python 3.11 or newer is required.
 
 2. Optional: start the process monitor to collect local logs:
    ```bash
    python src/process_monitor.py &
    ```
 
-3. Configure an operational secret key:
+3. Create the first administrator if setup could not prompt interactively and no user exists yet:
 
    ```bash
-   cp .env.example .env
+   venv/bin/python -m web.saaoe_cli bootstrap-admin
    ```
 
-   For local development, the app can start without `SAAOE_SECRET_KEY` and will generate an ephemeral development key. For operational or production use, edit `.env`, set `SAAOE_MODE=production`, and set `SAAOE_SECRET_KEY` to a long random value of at least 32 characters.
+   This command is refused after the initial administrator has been created.
 
-4. Run the web dashboard:
+4. Start the local service:
    ```bash
-   python web/saaoe_api.py
+   venv/bin/python -m web.saaoe_cli start
    ```
 
 5. Open http://127.0.0.1:5001 in your browser.
 
-6. Complete first-run setup by creating the first workspace owner.
+6. Check status and health:
+   ```bash
+   venv/bin/python -m web.saaoe_cli status
+   venv/bin/python -m web.saaoe_cli health
+   ```
 
 ## Usage
 
@@ -104,12 +112,14 @@ Common configuration variables:
 - `SAAOE_SESSION_COOKIE_SECURE`: marks session cookies HTTPS-only. Defaults to `true` outside local development.
 - `SAAOE_CPU_THRESHOLD`, `SAAOE_MEMORY_THRESHOLD`, `SAAOE_DISK_THRESHOLD`, `SAAOE_NETWORK_THRESHOLD`: telemetry thresholds used by seeded rules and live scoring.
 
-See [Operational Startup](docs/operational-startup.md) for the local startup checklist, health check, and operational defaults.
+See [Operational Startup](docs/operational-startup.md) for setup idempotency, first-run admin bootstrap, local-only security defaults, service-manager guidance, backup, troubleshooting, and upgrade instructions.
 
 ## Tests
 
 Run the full regression suite:
 
 ```bash
-venv/bin/python -m unittest discover -s tests
+python -m unittest discover
 ```
+
+Use the Python interpreter from the setup-created virtual environment; without activation, run `venv/bin/python -m unittest discover`.

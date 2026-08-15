@@ -51,6 +51,11 @@ class TerminalHardeningTests(unittest.TestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
 
+    def _add_platform_command(self, directory, name, posix_content, windows_content):
+        if os.name == 'nt':
+            return self._add_command(directory, f'{name}.cmd', windows_content)
+        return self._add_command(directory, name, posix_content)
+
     def test_terminal_is_admin_only_and_permission_cannot_be_delegated(self):
         response = self.client.post('/api/users', json={
             'username': 'member',
@@ -121,9 +126,19 @@ class TerminalHardeningTests(unittest.TestCase):
 
     def test_terminal_timeout_and_output_truncation_are_enforced_and_audited(self):
         with tempfile.TemporaryDirectory() as bin_dir:
-            self._add_command(bin_dir, 'slowcmd', '#!/bin/sh\nsleep 2\necho done\n')
-            self._add_command(bin_dir, 'bigcmd', '#!/bin/sh\nprintf "abcdefghij%.0s" $(seq 1 200)\n')
-            os.environ['PATH'] = f"{bin_dir}:{self.original_path}"
+            self._add_platform_command(
+                bin_dir,
+                'slowcmd',
+                '#!/bin/sh\nsleep 2\necho done\n',
+                '@echo off\npython -c "import time; time.sleep(2); print(\'done\')"\n',
+            )
+            self._add_platform_command(
+                bin_dir,
+                'bigcmd',
+                '#!/bin/sh\nprintf "abcdefghij%.0s" $(seq 1 200)\n',
+                '@echo off\npython -c "print(\'abcdefghij\' * 200, end=\'\')"\n',
+            )
+            os.environ['PATH'] = os.pathsep.join([bin_dir, self.original_path])
             self.appmod.DIAGNOSTIC_COMMANDS = {
                 **self.original_commands,
                 'slowcmd': {()},
