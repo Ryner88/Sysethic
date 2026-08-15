@@ -5362,7 +5362,8 @@ def health_payload():
 @app.route('/health')
 @app.route('/healthz')
 def health():
-    return jsonify(health_payload())
+    payload = health_payload()
+    return jsonify(payload), 200 if payload['ok'] else 503
 
 @app.route('/assets')
 def assets_page():

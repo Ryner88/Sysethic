@@ -277,7 +277,7 @@ def _http_health(host, port):
     try:
         with urllib.request.urlopen(url, timeout=3) as response:
             payload = json.loads(response.read().decode('utf-8'))
-        return response.status == 200 and payload.get('service') == 'saaoe', url
+        return response.status == 200 and payload.get('service') == 'saaoe' and payload.get('ok') is True, url
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         return False, f'{url}: {exc}'
 
@@ -357,7 +357,10 @@ def start(args):
         kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs['start_new_session'] = True
-    proc = subprocess.Popen([sys.executable, '-m', 'web.saaoe_cli', 'run', '--foreground'], **kwargs)
+    try:
+        proc = subprocess.Popen([sys.executable, '-m', 'web.saaoe_cli', 'run', '--foreground'], **kwargs)
+    finally:
+        log_handle.close()
     PID_FILE.write_text(json.dumps({'pid': proc.pid, 'create_time': psutil.Process(proc.pid).create_time(), 'cmd': ['web.saaoe_cli', 'run', '--foreground']}), encoding='utf-8')
     deadline = time.time() + HEALTH_TIMEOUT_SECONDS
     while time.time() < deadline:

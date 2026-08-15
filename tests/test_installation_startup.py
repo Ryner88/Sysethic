@@ -100,6 +100,25 @@ class InstallationStartupTests(unittest.TestCase):
         self.assertEqual(self.cli._health_url('127.0.0.1', 5001), 'http://127.0.0.1:5001/healthz')
         self.assertEqual(self.cli._health_url('::1', 5001), 'http://[::1]:5001/healthz')
 
+    def test_http_health_requires_payload_ok(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": false, "service": "saaoe", "version": "phase5.13"}'
+
+        with patch('web.saaoe_cli.urllib.request.urlopen', return_value=Response()):
+            ok, detail = self.cli._http_health('127.0.0.1', 5001)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, 'http://127.0.0.1:5001/healthz')
+
     def test_health_exit_codes(self):
         args = type('Args', (), {'local': True, 'json': False})()
         with patch('web.saaoe_cli.run_health', return_value={'healthy': True, 'status': 'healthy', 'checks': []}), \
@@ -118,15 +137,22 @@ class InstallationStartupTests(unittest.TestCase):
     def test_sampler_liveness_and_staleness_drive_health(self):
         time.sleep(1.2)
         self.assertTrue(self.appmod.sampler_is_healthy())
-        original_last = self.appmod.SAMPLER_LAST_SUCCESS_AT
-        self.appmod.SAMPLER_LAST_SUCCESS_AT = time.time() - 100
-        try:
+        with patch.object(self.appmod, 'SAMPLER_THREAD', None), \
+                patch.object(self.appmod, 'SAMPLER_LAST_SUCCESS_AT', time.time() - 100):
             self.assertFalse(self.appmod.sampler_is_healthy())
             payload = self.cli.run_health(local=True)
             sampler = next(check for check in payload['checks'] if check['name'] == 'telemetry sampler')
             self.assertFalse(sampler['ok'])
-        finally:
-            self.appmod.SAMPLER_LAST_SUCCESS_AT = original_last
+
+    def test_healthz_returns_503_when_sampler_is_unhealthy(self):
+        with patch('web.saaoe_api.sampler_is_healthy', return_value=False):
+            response = self.client.get('/healthz')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json['service'], 'saaoe')
+        self.assertFalse(response.json['ok'])
+        self.assertEqual(response.json['version'], self.appmod.SAAOE_VERSION)
+        self.assertEqual(set(response.json), {'ok', 'service', 'version'})
 
     def test_spoofed_healthcheck_header_cannot_bypass_audit(self):
         self.appmod.create_user('admin', 'longpassword1', 'admin')
@@ -235,6 +261,42 @@ class InstallationStartupTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(self.cli.start(type('Args', (), {})()), 1)
             popen.assert_not_called()
+
+    def test_start_rejects_unhealthy_live_sampler(self):
+        class Proc:
+            pid = os.getpid()
+
+            def __init__(self):
+                self.polls = 0
+
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else 1
+
+        config = type('Config', (), {'host': '127.0.0.1', 'port': 5001, 'protected_bind': True})()
+        preflight = {'healthy': True, 'status': 'healthy', 'checks': []}
+        with tempfile.TemporaryDirectory() as runtime:
+            pid_file = Path(runtime) / 'saaoe.pid.json'
+            log_file = Path(runtime) / 'saaoe.log'
+            proc = Proc()
+            with patch.object(self.cli, 'RUNTIME_DIR', Path(runtime)), \
+                    patch.object(self.cli, 'PID_FILE', pid_file), \
+                    patch.object(self.cli, 'LOG_FILE', log_file), \
+                    patch.object(self.cli, 'HEALTH_TIMEOUT_SECONDS', 1), \
+                    patch('web.saaoe_cli.load_config', return_value=config), \
+                    patch('web.saaoe_cli._port_available', return_value=True), \
+                    patch('web.saaoe_cli.run_health', return_value=preflight), \
+                    patch('web.saaoe_cli.subprocess.Popen', return_value=proc), \
+                    patch('web.saaoe_cli.psutil.Process') as process, \
+                    patch('web.saaoe_cli._http_health', return_value=(False, 'sampler unhealthy')), \
+                    patch('web.saaoe_cli.stop') as stop, \
+                    patch('web.saaoe_cli.time.sleep'), \
+                    redirect_stdout(io.StringIO()) as output:
+                process.return_value.create_time.return_value = 1.0
+                self.assertEqual(self.cli.start(type('Args', (), {})()), 1)
+
+            stop.assert_called_once()
+            self.assertIn('startup health failed', output.getvalue())
 
     def test_successful_verified_stop_removes_pid_file(self):
         class Proc:
