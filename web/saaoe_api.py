@@ -208,6 +208,13 @@ def _incident_report_executor(_target):
     return {'executed': True, 'detail': 'Incident report action recorded.'}
 
 
+class ResponseActionExecutionError(RuntimeError):
+    def __init__(self, detail, result=None):
+        super().__init__(detail)
+        self.detail = detail
+        self.result = result or {'executed': False, 'detail': detail}
+
+
 RESPONSE_ACTION_REGISTRY = {
     'kill_process': ResponseActionMetadata(
         stable_key='kill_process',
@@ -1244,37 +1251,38 @@ def _clean_optional_text(value):
     return text or None
 
 
-PUBLIC_VALIDATION_ERRORS = {
-    'unsupported response action',
-    'target is required',
-    'kill process target must be a PID',
-    'kill process target must be a positive PID',
-    'quarantine target must be inside the SAAOE project directory',
-    'restart service target is not a valid service allowlist key',
-    'incident report target is required',
-    'unsupported playbook kind',
-    'unsupported playbook category',
-    'unsupported recommended action key',
-    'unsupported required approval role',
-    'unsupported trigger type',
-    'trigger metric is required',
-    'unsupported trigger operator',
-    'trigger threshold must be numeric',
-    'trigger event is required',
-    'steps YAML is required',
-    'steps YAML contains executable or shell-like content',
-    'only declarative metadata and steps are allowed',
-    'step entries must use key/value pairs',
-    'step fields must belong to a step',
-    'at least one declarative step is required',
-    'stable_key must be 3-97 lowercase letters, numbers, dots, underscores, or hyphens',
-}
-
-
 def _public_error_detail(exc, fallback):
-    message = str(exc)
-    if message in PUBLIC_VALIDATION_ERRORS or message.startswith('unsupported step action: ') or message.startswith('restart service target is not approved.'):
+    message = exc.args[0] if isinstance(exc, ValueError) and exc.args and isinstance(exc.args[0], str) else None
+    public_messages = {
+        'unsupported response action',
+        'target is required',
+        'kill process target must be a PID',
+        'kill process target must be a positive PID',
+        'quarantine target must be inside the SAAOE project directory',
+        'restart service target is not a valid service allowlist key',
+        'incident report target is required',
+        'unsupported playbook kind',
+        'unsupported playbook category',
+        'unsupported recommended action key',
+        'unsupported required approval role',
+        'unsupported trigger type',
+        'trigger metric is required',
+        'unsupported trigger operator',
+        'trigger threshold must be numeric',
+        'trigger event is required',
+        'steps YAML is required',
+        'steps YAML contains executable or shell-like content',
+        'only declarative metadata and steps are allowed',
+        'step entries must use key/value pairs',
+        'step fields must belong to a step',
+        'at least one declarative step is required',
+        'stable_key must be 3-97 lowercase letters, numbers, dots, underscores, or hyphens',
+    }
+    if message in public_messages or (message and message.startswith('unsupported step action: ')):
         return message
+    if message and message.startswith('restart service target is not approved.'):
+        allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
+        return f"restart service target is not approved. Allowed: {allowed}"
     app.logger.error('%s correlation_id=%s exception_type=%s', fallback, uuid.uuid4().hex, type(exc).__name__)
     return fallback
 
@@ -3135,8 +3143,8 @@ def _validate_terminal_command(command):
         return None, 'Shell syntax and expansion characters are blocked in browser diagnostics.'
     try:
         parts = shlex.split(command)
-    except ValueError as exc:
-        return None, str(exc)
+    except ValueError:
+        return None, 'Command could not be parsed.'
     if not parts:
         return None, 'Enter a diagnostic command.'
     if os.path.basename(parts[0]) != parts[0]:
@@ -3214,7 +3222,7 @@ def _run_terminal_command(command, incident_id=None):
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details=audit_details)
         return {'success': False, 'error': 'command timed out', 'output': ''}, 408
     except OSError as exc:
-        audit_details.update({'error_type': type(exc).__name__, 'error': str(exc)})
+        audit_details.update({'error_type': type(exc).__name__})
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'execution failed', details=audit_details)
         return {'success': False, 'error': 'command execution failed', 'output': ''}, 500
 
@@ -3295,7 +3303,7 @@ def _approval_diagnostics(approval):
     except ValueError as exc:
         expected_preview = None
         expected_preview_digest = None
-        preview_error = str(exc)
+        preview_error = _public_error_detail(exc, 'response action validation failed')
     audit_events = _approval_audit_events(approval)
     timeline_events = _approval_timeline_events(approval)
     reconstruction = []
@@ -3523,13 +3531,14 @@ def _restart_approved_service(target):
     try:
         returncode, output = _run_fixed_service_argv(restart_argv, SERVICE_RESTART_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
-        result.update({'error': 'service restart timed out', 'output': exc.stdout or ''})
+        result.update({'error': 'service restart timed out'})
         return _recover_service_restart(result, rollback_argv)
     except OSError as exc:
-        result.update({'error': f'service restart execution failed: {exc}'})
+        result.update({'error': 'service restart execution failed'})
+        app.logger.error('service restart execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
         return _recover_service_restart(result, rollback_argv)
     if returncode != 0:
-        result.update({'error': f'service restart failed with exit={returncode}', 'returncode': returncode, 'output': output})
+        result.update({'error': f'service restart failed with exit={returncode}', 'returncode': returncode})
         return _recover_service_restart(result, rollback_argv)
     result.update({
         'executed': True,
@@ -3546,21 +3555,21 @@ def _recover_service_restart(result, rollback_argv):
         rollback_code, rollback_output = _run_fixed_service_argv(rollback_argv, SERVICE_RESTART_TIMEOUT_SECONDS)
         result.update({
             'rollback_returncode': rollback_code,
-            'rollback_output': rollback_output,
             'rollback_succeeded': rollback_code == 0,
         })
     except Exception as exc:
         result.update({
-            'rollback_error': str(exc),
+            'rollback_error': 'service recovery execution failed',
             'rollback_succeeded': False,
         })
+        app.logger.error('service recovery execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
     detail = result.get('error') or 'service restart failed'
     if result.get('rollback_succeeded'):
         detail = f"{detail}; recovery start completed"
     else:
         detail = f"{detail}; recovery start failed"
     result['detail'] = detail
-    raise RuntimeError(_json_dumps(result))
+    raise ResponseActionExecutionError(detail, result)
 
 
 def _execute_kill_process(target):
@@ -5075,24 +5084,23 @@ def api_response_approval_detail(approval_id):
             audit_event('response_action_succeeded', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
             audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
             return jsonify(success=True, result=result, approval=executed_approval)
+        except ResponseActionExecutionError as exc:
+            failure_result = exc.result
+            failure_detail = exc.detail
         except Exception as exc:
-            failure_result = _json_loads(str(exc), None)
-            if isinstance(failure_result, dict) and failure_result.get('detail'):
-                failure_detail = failure_result['detail']
-            else:
-                failure_result = None
-                failure_detail = 'response action execution failed'
-                app.logger.error('response action execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
-            _db_exec(
-                "UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
-                (now, now, failure_detail, approval_id)
-            )
-            failed_approval = _approval_row(approval_id)
-            _approval_incident_event(failed_approval, 'response_failed', failure_detail, actor=user['username'], result='failed')
-            failed_details = _approval_structured_details(failed_approval, error=failure_detail, result='failed', execution_result=failure_result)
-            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
-            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
-            return jsonify(error=failure_detail, result=failure_result, approval=failed_approval), 400
+            failure_result = None
+            failure_detail = 'response action execution failed'
+            app.logger.error('response action execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
+        _db_exec(
+            "UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
+            (now, now, failure_detail, approval_id)
+        )
+        failed_approval = _approval_row(approval_id)
+        _approval_incident_event(failed_approval, 'response_failed', failure_detail, actor=user['username'], result='failed')
+        failed_details = _approval_structured_details(failed_approval, error=failure_detail, result='failed', execution_result=failure_result)
+        audit_event('response_action_failed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
+        audit_event('response_action_executed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
+        return jsonify(error=failure_detail, result=failure_result, approval=failed_approval), 400
     audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', f"unsupported command={command}")
     return jsonify(error='unsupported command'), 400
 

@@ -167,6 +167,41 @@ class SecurityRemediationTests(unittest.TestCase):
         self.assertEqual(response.json['error'], 'response action execution failed')
         self.assert_no_sentinel_in_response_or_audit(response, sentinel)
 
+    def test_json_shaped_executor_exception_is_not_treated_as_result_payload(self):
+        sentinel = 'SENTINEL_SECRET_JSON_EXCEPTION'
+        self.login('analyst', 'longpassword2')
+        request = self.client.post('/api/response_approvals', json={
+            'action': 'create_incident_report',
+            'target': 'INC-json-executor',
+            'dry_run': False,
+            'reason': 'json executor exception should fail safely',
+        })
+        self.assertEqual(request.status_code, 200)
+        approval_id = request.json['approval']['id']
+
+        self.login('admin', 'longpassword1')
+        approved = self.client.post(
+            f'/api/response_approvals/{approval_id}',
+            json={'command': 'approve', 'reason': 'approve json executor failure test'},
+        )
+        self.assertEqual(approved.status_code, 200)
+
+        original = self.appmod.RESPONSE_ACTION_REGISTRY['create_incident_report']
+
+        def bad_executor(_target):
+            raise RuntimeError(f'{{"detail":"{sentinel}","output":"{sentinel}"}}')
+
+        self.appmod.RESPONSE_ACTION_REGISTRY['create_incident_report'] = replace(original, executor=bad_executor)
+        try:
+            response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
+        finally:
+            self.appmod.RESPONSE_ACTION_REGISTRY['create_incident_report'] = original
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json['error'], 'response action execution failed')
+        self.assertIsNone(response.json['result'])
+        self.assert_no_sentinel_in_response_or_audit(response, sentinel)
+
     def test_playbook_validator_exception_is_sanitized_in_http_and_audit(self):
         sentinel = 'SENTINEL_SECRET_PLAYBOOK_EXCEPTION'
         self.login('admin', 'longpassword1')
