@@ -170,7 +170,8 @@ class DurableStorageTests(unittest.TestCase):
         self.appmod.DB_PATH = os.path.join('/tmp', 'missing-saaoe-dir', 'saaoe.sqlite3')
         response = self.client.post('/api/configuration', json={'key': 'x', 'value': 'y'})
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json['error'], 'storage write failed')
+        self.assertEqual(response.json['error'], 'storage operation failed')
+        self.assertNotIn('missing-saaoe-dir', response.get_data(as_text=True))
 
 
 if __name__ == '__main__':

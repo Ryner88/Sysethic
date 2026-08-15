@@ -24,6 +24,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from functools import wraps
+from urllib.parse import urlsplit
 
 import psutil
 from flask import Flask, jsonify, render_template, Response, stream_with_context, request, redirect, session, url_for, g, has_request_context
@@ -398,9 +399,10 @@ def _db_query(sql, params=()):
 
 @app.errorhandler(sqlite3.Error)
 def storage_error(exc):
+    app.logger.error('storage operation failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
     if _is_api_request():
-        return jsonify(error='storage write failed', detail=str(exc)), 500
-    return render_template('login.html', error=f"Storage error: {exc}", username=''), 500
+        return jsonify(error='storage operation failed'), 500
+    return render_template('login.html', error='Storage operation failed.', username=''), 500
 
 
 @app.teardown_appcontext
@@ -1240,6 +1242,56 @@ def _clean_optional_text(value):
         return None
     text = str(value).strip()
     return text or None
+
+
+PUBLIC_VALIDATION_ERRORS = {
+    'unsupported response action',
+    'target is required',
+    'kill process target must be a PID',
+    'kill process target must be a positive PID',
+    'quarantine target must be inside the SAAOE project directory',
+    'restart service target is not a valid service allowlist key',
+    'incident report target is required',
+    'unsupported playbook kind',
+    'unsupported playbook category',
+    'unsupported recommended action key',
+    'unsupported required approval role',
+    'unsupported trigger type',
+    'trigger metric is required',
+    'unsupported trigger operator',
+    'trigger threshold must be numeric',
+    'trigger event is required',
+    'steps YAML is required',
+    'steps YAML contains executable or shell-like content',
+    'only declarative metadata and steps are allowed',
+    'step entries must use key/value pairs',
+    'step fields must belong to a step',
+    'at least one declarative step is required',
+    'stable_key must be 3-97 lowercase letters, numbers, dots, underscores, or hyphens',
+}
+
+
+def _public_error_detail(exc, fallback):
+    message = str(exc)
+    if message in PUBLIC_VALIDATION_ERRORS or message.startswith('unsupported step action: ') or message.startswith('restart service target is not approved.'):
+        return message
+    app.logger.error('%s correlation_id=%s exception_type=%s', fallback, uuid.uuid4().hex, type(exc).__name__)
+    return fallback
+
+
+def _safe_local_redirect_target(value, fallback=None):
+    fallback = fallback or url_for('dashboard')
+    target = str(value or '').strip()
+    if not target:
+        return fallback
+    if any(ord(ch) < 32 for ch in target):
+        return fallback
+    if '\\' in target or not target.startswith('/') or target.startswith('//'):
+        return fallback
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return fallback
+    return target
 
 
 def _approval_payload(action, target, incident_id=None, anomaly_id=None, dry_run=True):
@@ -3337,7 +3389,7 @@ def authorizeApprovedAction(approval_id, payload, actor=None, consume=True):
             _validate_response_action_metadata(metadata)
         except ValueError as exc:
             conn.rollback()
-            return _approval_error(str(exc), 400, approval)
+            return _approval_error(_public_error_detail(exc, 'response action registry validation failed'), 400, approval)
         if approval.get('status') == 'approved' and _approval_expired(approval, now_dt):
             _mark_approval_expired(conn, approval, now)
             conn.commit()
@@ -3923,9 +3975,7 @@ def login():
             start_user_session(user)
             _db_exec("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user['id']))
             audit_event('login', f"user:{username}", 'success', 'interactive login', actor=username, role=user['role'])
-            next_url = request.args.get('next') or url_for('dashboard')
-            if not next_url.startswith('/'):
-                next_url = url_for('dashboard')
+            next_url = _safe_local_redirect_target(request.args.get('next'))
             return redirect(next_url)
         audit_event('login', f"user:{username or 'unknown'}", 'failed', 'invalid credentials', actor=username or 'anonymous', role='anonymous')
         error = 'Invalid username or password.'
@@ -4860,8 +4910,9 @@ def api_response_approvals():
     try:
         preview = _preview_authorized_action(action, target, dry_run=dry_run)
     except Exception as exc:
-        audit_event('response_approval_failed', f"response_action:{action}", 'failed', str(exc))
-        return jsonify(error=str(exc)), 400
+        reason = _public_error_detail(exc, 'response action validation failed')
+        audit_event('response_approval_failed', f"response_action:{action}", 'failed', reason)
+        return jsonify(error=reason), 400
     incident_id = _clean_optional_text(payload.get('incident_id'))
     anomaly_id = _clean_optional_text(payload.get('anomaly_id'))
     if incident_id:
@@ -5026,7 +5077,12 @@ def api_response_approval_detail(approval_id):
             return jsonify(success=True, result=result, approval=executed_approval)
         except Exception as exc:
             failure_result = _json_loads(str(exc), None)
-            failure_detail = failure_result.get('detail') if isinstance(failure_result, dict) else str(exc)
+            if isinstance(failure_result, dict) and failure_result.get('detail'):
+                failure_detail = failure_result['detail']
+            else:
+                failure_result = None
+                failure_detail = 'response action execution failed'
+                app.logger.error('response action execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
             _db_exec(
                 "UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
                 (now, now, failure_detail, approval_id)
@@ -5169,8 +5225,8 @@ def api_playbooks():
         existing_model = _playbooks_from_db(org_id)
         existing_pb = next((pb for pb in existing_model if existing and pb['id'] == existing['id']), None)
         definition = _normalize_playbook_definition(payload, existing=existing_pb, actor=user['username'], source=(existing_pb or {}).get('source') or payload.get('source') or PLAYBOOK_SOURCE_CUSTOM)
-    except ValueError as exc:
-        reason = str(exc)
+    except Exception as exc:
+        reason = _public_error_detail(exc, 'playbook validation failed')
         _write_rejected_audit(payload, reason, actor=user['username'], org_id=org_id)
         if reason == 'trigger threshold must be numeric':
             audit_event('playbook_create_failed', 'playbook:new', 'failed', 'threshold must be numeric')
