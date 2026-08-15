@@ -73,8 +73,8 @@ class ConfigTests(unittest.TestCase):
             })
 
             self.assertEqual(config.port, 5099)
-            self.assertEqual(config.database_path, base / 'db' / 'custom.db')
-            self.assertEqual(config.log_path, base / 'logs' / 'custom.csv')
+            self.assertEqual(config.database_path.resolve(), (base / 'db' / 'custom.db').resolve())
+            self.assertEqual(config.log_path.resolve(), (base / 'logs' / 'custom.csv').resolve())
             self.assertEqual(config.cpu_threshold, 72)
             self.assertEqual(config.memory_threshold, 73)
             self.assertEqual(config.disk_threshold, 91)
