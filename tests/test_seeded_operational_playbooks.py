@@ -128,5 +128,129 @@ class SeededOperationalPlaybooksTests(unittest.TestCase):
         self.assertEqual(stored_run['definition_digest'], old_digest)
 
 
+class PlaybookMigrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ['SAAOE_ENV'] = 'development'
+        os.environ['SAAOE_SECRET_KEY'] = 'test-secret'
+        cls.appmod = importlib.import_module('web.saaoe_api')
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(delete=False)
+        self.tmp.close()
+        os.unlink(self.tmp.name)
+        self.original_db_path = self.appmod.DB_PATH
+        self.appmod.DB_PATH = self.tmp.name
+        self.appmod.init_db()
+        self.appmod._seed_db()
+        self.appmod.load_persistent_state()
+
+    def tearDown(self):
+        self.appmod.DB_PATH = self.original_db_path
+        try:
+            os.unlink(self.tmp.name)
+        except FileNotFoundError:
+            pass
+
+    def test_registry_floor_migration_updates_completed_playbook_idempotently(self):
+        pb = self.appmod._db_query("SELECT * FROM playbooks WHERE stable_key = ?", ('create-incident-report',))[0]
+        weakened = dict(pb)
+        weakened.update({
+            'kind': 'anomaly_response',
+            'category': 'system',
+            'metric': 'cpu_percent',
+            'operator': '>',
+            'threshold': 80,
+            'trigger_json': self.appmod._json_dumps({
+                'type': 'anomaly',
+                'metric': 'cpu_percent',
+                'operator': '>',
+                'threshold': 80,
+                'category': 'system',
+            }),
+            'required_approval_role': 'none',
+            'steps_yaml': 'steps:\n  - action: create_report\n    report_type: incident\n',
+            'yaml': 'steps:\n  - action: create_report\n    report_type: incident\n',
+            'version': 3,
+            'updated_at': '2026-01-01T00:00:00',
+            'updated_by': 'legacy',
+        })
+        old_digest = self.appmod._playbook_definition_digest(weakened)
+        self.appmod._db_exec(
+            """
+            UPDATE playbooks
+            SET kind = ?, category = ?, metric = ?, operator = ?, threshold = ?,
+                trigger_json = ?, required_approval_role = ?, steps_yaml = ?, yaml = ?,
+                version = ?, definition_digest = ?, updated_at = ?, updated_by = ?
+            WHERE id = ?
+            """,
+            (
+                weakened['kind'], weakened['category'], weakened['metric'], weakened['operator'],
+                weakened['threshold'], weakened['trigger_json'], weakened['required_approval_role'],
+                weakened['steps_yaml'], weakened['yaml'], weakened['version'], old_digest,
+                weakened['updated_at'], weakened['updated_by'], pb['id'],
+            )
+        )
+        self.appmod._db_exec(
+            """
+            INSERT INTO playbook_runs (
+                playbook_id, playbook_stable_key, playbook_name, playbook_kind,
+                playbook_version, definition_digest, name, anomaly_id, metric,
+                value, threshold, action, recommended_action_key, required_approval_role,
+                target, timestamp, created_at, created_by, auto, status, yaml, steps_yaml
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pb['id'], 'create-incident-report', pb['name'], 'anomaly_response',
+                3, old_digest, pb['name'], 'A-historical', 'cpu_percent',
+                91.0, 80.0, 'create_incident_report', 'create_incident_report', 'none',
+                pb['target'], '2026-01-01T00:00:00', '2026-01-01T00:00:00',
+                'system', 0, 'open', weakened['yaml'], weakened['steps_yaml'],
+            )
+        )
+
+        self.appmod.init_db()
+        upgraded = self.appmod._db_query("SELECT * FROM playbooks WHERE id = ?", (pb['id'],))[0]
+        self.assertEqual(upgraded['required_approval_role'], 'analyst')
+        self.assertEqual(upgraded['version'], 4)
+        self.assertNotEqual(upgraded['definition_digest'], old_digest)
+        self.assertEqual(upgraded['updated_by'], 'system')
+
+        historical = self.appmod._db_query("SELECT * FROM playbook_runs WHERE anomaly_id = ?", ('A-historical',))[0]
+        self.assertEqual(historical['definition_digest'], old_digest)
+        self.assertEqual(historical['required_approval_role'], 'none')
+        self.assertEqual(historical['playbook_version'], 3)
+
+        digest_after_first = upgraded['definition_digest']
+        updated_at_after_first = upgraded['updated_at']
+        self.appmod.init_db()
+        after_second = self.appmod._db_query("SELECT * FROM playbooks WHERE id = ?", (pb['id'],))[0]
+        self.assertEqual(after_second['required_approval_role'], 'analyst')
+        self.assertEqual(after_second['version'], 4)
+        self.assertEqual(after_second['definition_digest'], digest_after_first)
+        self.assertEqual(after_second['updated_at'], updated_at_after_first)
+
+        anomaly = {
+            'id': 'A-upgraded-floor',
+            'organization_id': None,
+            'timestamp': '2026-01-01T00:00:00',
+            'metric': 'cpu_percent',
+            'value': 95.0,
+            'threshold': 80.0,
+            'severity': 'high',
+            'category': 'system',
+            'confidence': 0.9,
+            'risk_score': 85,
+            'created_at': '2026-01-01T00:00:00',
+            'updated_at': '2026-01-01T00:00:00',
+        }
+        with self.appmod.app.test_request_context('/'):
+            _incident, runs = self.appmod.ingest_anomaly_workflow(anomaly, actor='system', organization_id=None, create_runs=True)
+        upgraded_run = next(run for run in runs if run['playbook_stable_key'] == 'create-incident-report')
+        self.assertEqual(upgraded_run['required_approval_role'], 'analyst')
+        self.assertEqual(upgraded_run['status'], 'waiting_for_approval')
+        self.assertEqual(upgraded_run['definition_digest'], digest_after_first)
+
+
 if __name__ == '__main__':
     unittest.main()

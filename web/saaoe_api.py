@@ -1076,9 +1076,46 @@ def _legacy_playbook_definition(row):
     }
 
 
+def _write_playbook_definition(conn, row_id, definition, *, preserve_update_metadata=False):
+    update_clause = (
+        "updated_at = COALESCE(updated_at, ?), updated_by = COALESCE(updated_by, ?)"
+        if preserve_update_metadata
+        else "updated_at = ?, updated_by = ?"
+    )
+    conn.execute(
+        f"""
+        UPDATE playbooks
+        SET stable_key = ?, description = ?, kind = ?, trigger_json = ?,
+            recommended_action_key = ?, required_approval_role = ?, steps_yaml = ?,
+            source = ?, version = ?, definition_digest = ?, created_at = COALESCE(created_at, ?),
+            created_by = COALESCE(created_by, ?), {update_clause}, action = ?, yaml = ?
+        WHERE id = ?
+        """,
+        (
+            definition['stable_key'], definition['description'], definition['kind'], definition['trigger_json'],
+            definition['recommended_action_key'], definition['required_approval_role'], definition['steps_yaml'],
+            definition['source'], definition['version'], definition['definition_digest'], definition['created_at'],
+            definition['created_by'], definition['updated_at'], definition['updated_by'], definition['action'],
+            definition['yaml'], row_id,
+        )
+    )
+
+
 def _backfill_playbook_definitions(conn):
     for row in conn.execute("SELECT * FROM playbooks").fetchall():
         if row['stable_key'] and row['definition_digest']:
+            required_role = row['required_approval_role'] or 'none'
+            floored_role = _enforce_registry_approval_floor(row['recommended_action_key'], required_role)
+            if floored_role == required_role:
+                continue
+            existing = dict(row)
+            normalized = _normalize_playbook_definition(
+                {**existing, 'required_approval_role': floored_role},
+                existing=existing,
+                actor='system',
+                source=existing.get('source') or PLAYBOOK_SOURCE_CUSTOM,
+            )
+            _write_playbook_definition(conn, row['id'], normalized)
             continue
         raw = _legacy_playbook_definition(row)
         try:
@@ -1086,24 +1123,7 @@ def _backfill_playbook_definitions(conn):
         except ValueError:
             raw['steps_yaml'] = 'steps:\n  - action: review_evidence\n'
             definition = _normalize_playbook_definition(raw, actor='system', source=raw['source'])
-        conn.execute(
-            """
-            UPDATE playbooks
-            SET stable_key = ?, description = ?, kind = ?, trigger_json = ?,
-                recommended_action_key = ?, required_approval_role = ?, steps_yaml = ?,
-                source = ?, version = ?, definition_digest = ?, created_at = COALESCE(created_at, ?),
-                created_by = COALESCE(created_by, ?), updated_at = COALESCE(updated_at, ?),
-                updated_by = COALESCE(updated_by, ?), action = ?, yaml = ?
-            WHERE id = ?
-            """,
-            (
-                definition['stable_key'], definition['description'], definition['kind'], definition['trigger_json'],
-                definition['recommended_action_key'], definition['required_approval_role'], definition['steps_yaml'],
-                definition['source'], definition['version'], definition['definition_digest'], definition['created_at'],
-                definition['created_by'], definition['updated_at'], definition['updated_by'], definition['action'],
-                definition['yaml'], row['id'],
-            )
-        )
+        _write_playbook_definition(conn, row['id'], definition, preserve_update_metadata=True)
 
 
 def _backfill_playbook_runs(conn):

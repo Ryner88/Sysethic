@@ -119,6 +119,48 @@ class RuleValidationAndAuthInventoryTests(unittest.TestCase):
                     self.assert_rule_count_unchanged(path, before)
             self.assertIn(audit_action, self.audit_actions())
 
+    def test_anomaly_rule_accepts_valid_metric_operator_severity_and_threshold(self):
+        self.login()
+        path = '/api/anomaly_rules'
+        before = len(self.client.get(path).json['rules'])
+        payload = {
+            'metric': 'cpu_percent',
+            'operator': '>',
+            'threshold': 90,
+            'severity': 'high',
+            'enabled': True,
+            'alert_in_app': True,
+            'alert_email': True,
+        }
+
+        response = self.client.post(path, json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['rule']['metric'], 'cpu_percent')
+        self.assertEqual(response.json['rule']['operator'], '>')
+        self.assertEqual(response.json['rule']['threshold'], 90.0)
+        self.assertEqual(response.json['rule']['severity'], 'high')
+        self.assertTrue(response.json['rule']['enabled'])
+        self.assertTrue(response.json['rule']['alert_email'])
+        after = self.client.get(path).json['rules']
+        self.assertEqual(len(after), before + 1)
+
+    def test_rule_apis_reject_non_json_and_non_object_bodies(self):
+        self.login()
+        cases = [
+            ('/api/automation_rules', 'automation_rule_create_failed'),
+            ('/api/anomaly_rules', 'anomaly_rule_create_failed'),
+        ]
+        for path, audit_action in cases:
+            before = len(self.client.get(path).json['rules'])
+            for kwargs in ({'data': 'not json'}, {'json': []}):
+                with self.subTest(path=path, body=kwargs):
+                    response = self.client.post(path, **kwargs)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json['error'], 'request body must be a JSON object')
+                    self.assert_rule_count_unchanged(path, before)
+            self.assertIn(audit_action, self.audit_actions())
+
     def test_anomaly_rule_rejects_invalid_metric_operator_severity_and_threshold(self):
         self.login()
         before = len(self.client.get('/api/anomaly_rules').json['rules'])
