@@ -10,7 +10,7 @@ Shell and PowerShell scripts are compatibility wrappers only. They forward to th
 
 ## Supported Platforms
 
-- Python 3.10 or newer.
+- Python 3.11 or newer.
 - Linux, macOS, and Windows with local filesystem access, SQLite, `venv`, and `pip`.
 - Default operation is local-only on `127.0.0.1:5001`.
 
@@ -168,7 +168,7 @@ Back up `.env` separately and protect it as secret material. Do not paste or com
 
 ## Startup Services
 
-- systemd: copy and adapt `packaging/systemd/saaoe.service.example`.
+- systemd: create a dedicated `saaoe` user/group, make `/opt/saaoe` owned by that account, and adapt `packaging/systemd/saaoe.service.example`.
 - launchd: use `venv/bin/python -m web.saaoe_cli run --foreground` as the program arguments.
 - Windows scheduled start: run `venv\Scripts\python.exe -m web.saaoe_cli run --foreground`.
 

@@ -63,16 +63,20 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
    python3 scripts/setup_saaoe.py
    ```
 
+   Python 3.11 or newer is required.
+
 2. Optional: start the process monitor to collect local logs:
    ```bash
    python src/process_monitor.py &
    ```
 
-3. Create the first administrator if setup could not prompt interactively:
+3. Create the first administrator if setup could not prompt interactively and no user exists yet:
 
    ```bash
    venv/bin/python -m web.saaoe_cli bootstrap-admin
    ```
+
+   This command is refused after the initial administrator has been created.
 
 4. Start the local service:
    ```bash
@@ -117,3 +121,5 @@ Run the full regression suite:
 ```bash
 python -m unittest discover
 ```
+
+Use the Python interpreter from the setup-created virtual environment; without activation, run `venv/bin/python -m unittest discover`.

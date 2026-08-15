@@ -19,8 +19,8 @@ def venv_python():
 
 def main(argv=None):
     argv = list(argv or sys.argv[1:])
-    if sys.version_info < (3, 10):
-        print('Python 3.10 or newer is required.', file=sys.stderr)
+    if sys.version_info < (3, 11):
+        print('Python 3.11 or newer is required.', file=sys.stderr)
         return 2
     venv_dir = PROJECT_ROOT / 'venv'
     if not venv_dir.exists():

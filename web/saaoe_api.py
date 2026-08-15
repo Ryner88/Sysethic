@@ -69,6 +69,9 @@ SESSION_TIMEOUT_SECONDS = CONFIG.session_seconds
 # --- Ring buffers ---
 MAX_SAMPLES = 240          # ~4 minutes @ 1s
 SAMPLE_INTERVAL = 1.0      # seconds
+SAMPLER_THREAD = None
+SAMPLER_LAST_SUCCESS_AT = 0.0
+SAMPLER_HEALTH_MAX_AGE_SECONDS = 5.0
 
 cpu_series  = deque(maxlen=MAX_SAMPLES)
 mem_series  = deque(maxlen=MAX_SAMPLES)
@@ -2197,6 +2200,7 @@ load_persistent_state()
 # --- Background sampler ---
 
 def sampler():
+    global SAMPLER_LAST_SUCCESS_AT
     last_disk = psutil.disk_io_counters()
     last_net  = psutil.net_io_counters()
     last_time = time.time()
@@ -2228,6 +2232,7 @@ def sampler():
         cpu_series.append(float(cpu));   mem_series.append(float(mem));   usage_ts.append(now_dt)
         read_series.append(float(read_mbs)); write_series.append(float(write_mbs)); disk_ts.append(now_dt)
         rx_series.append(float(rx_mbs));     tx_series.append(float(tx_mbs));       net_ts.append(now_dt)
+        SAMPLER_LAST_SUCCESS_AT = now
 
         # Check for anomalies
         if len(cpu_series) > 10:  # need some data
@@ -2258,7 +2263,23 @@ def sampler():
         last_time = now
         time.sleep(SAMPLE_INTERVAL)
 
-threading.Thread(target=sampler, daemon=True).start()
+
+def start_sampler():
+    global SAMPLER_THREAD
+    if SAMPLER_THREAD and SAMPLER_THREAD.is_alive():
+        return SAMPLER_THREAD
+    SAMPLER_THREAD = threading.Thread(target=sampler, daemon=True)
+    SAMPLER_THREAD.start()
+    return SAMPLER_THREAD
+
+
+def sampler_is_healthy(max_age_seconds=SAMPLER_HEALTH_MAX_AGE_SECONDS):
+    thread_alive = bool(SAMPLER_THREAD and SAMPLER_THREAD.is_alive())
+    recent = SAMPLER_LAST_SUCCESS_AT > 0 and (time.time() - SAMPLER_LAST_SUCCESS_AT) <= max_age_seconds
+    return thread_alive and recent
+
+
+start_sampler()
 
 # --- Lightweight caches for expensive endpoints ---
 _PROCS_CACHE = {"data": None, "ts": 0.0}
@@ -3546,7 +3567,7 @@ def require_authentication():
     endpoint = request.endpoint or ''
     if endpoint in PUBLIC_ENDPOINTS:
         return None
-    healthcheck_probe = request.headers.get('X-SAAOE-Healthcheck') == '1'
+    healthcheck_probe = request.environ.get('saaoe.healthcheck') == '1'
 
     if not active_admin_exists():
         if endpoint == 'setup':
@@ -5332,7 +5353,7 @@ def api_audit_stats():
 
 def health_payload():
     return {
-        'ok': True,
+        'ok': sampler_is_healthy(),
         'service': 'saaoe',
         'version': SAAOE_VERSION,
     }

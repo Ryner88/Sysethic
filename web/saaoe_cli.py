@@ -3,8 +3,8 @@ import getpass
 import json
 import os
 import secrets
-import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -23,6 +23,7 @@ RUNTIME_DIR = BASE_DIR / 'instance' / 'runtime'
 PID_FILE = RUNTIME_DIR / 'saaoe.pid.json'
 LOG_FILE = RUNTIME_DIR / 'saaoe.log'
 HEALTH_TIMEOUT_SECONDS = 20
+MIN_PYTHON = (3, 11)
 
 
 class CliError(RuntimeError):
@@ -59,8 +60,8 @@ def _venv_python():
 
 
 def _check_python():
-    if sys.version_info < (3, 10):
-        raise CliError('Python 3.10 or newer is required.')
+    if sys.version_info < MIN_PYTHON:
+        raise CliError('Python 3.11 or newer is required.')
 
 
 def _write_env_if_missing():
@@ -68,21 +69,27 @@ def _write_env_if_missing():
     if env_path.exists():
         return False
     secret = secrets.token_urlsafe(48)
-    env_path.write_text(
-        '\n'.join([
-            'SAAOE_MODE=production',
-            f'SAAOE_SECRET_KEY={secret}',
-            'SAAOE_HOST=127.0.0.1',
-            'SAAOE_PORT=5001',
-            'SAAOE_DEBUG=false',
-            'SAAOE_DATABASE_PATH=data/saaoe.db',
-            'SAAOE_LOG_PATH=logs/system_log.csv',
-            'SAAOE_SESSION_COOKIE_SECURE=false',
-            'SAAOE_ENABLE_TERMINAL_WS=0',
-            '',
-        ]),
-        encoding='utf-8',
-    )
+    content = '\n'.join([
+        'SAAOE_MODE=production',
+        f'SAAOE_SECRET_KEY={secret}',
+        'SAAOE_HOST=127.0.0.1',
+        'SAAOE_PORT=5001',
+        'SAAOE_DEBUG=false',
+        'SAAOE_DATABASE_PATH=data/saaoe.db',
+        'SAAOE_LOG_PATH=logs/system_log.csv',
+        'SAAOE_SESSION_COOKIE_SECURE=false',
+        'SAAOE_ENABLE_TERMINAL_WS=0',
+        '',
+    ])
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(env_path, flags, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            fd = None
+            handle.write(content)
+    finally:
+        if fd is not None:
+            os.close(fd)
     return True
 
 
@@ -116,7 +123,7 @@ def setup(args):
         else:
             print('No administrator exists. Run bootstrap-admin from an interactive terminal.')
 
-    payload = run_health(local=True, as_json=True)
+    payload = run_health(local=True)
     if not payload['healthy'] and payload.get('status') != 'stopped':
         raise CliError('Final preflight health check failed.')
     print('setup complete')
@@ -147,36 +154,63 @@ def bootstrap_admin(args):
         raise CliError('Password must be at least 10 characters.')
     if password != confirm:
         raise CliError('Passwords do not match.')
-    org_id = appmod.create_organization('Local Workspace', created_by=username)
     now = appmod.datetime.now().isoformat()
-    appmod._db_exec(
-        "INSERT INTO users (username, password_hash, role, active, organization_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (username, generate_password_hash(password), 'admin', 1, org_id, now),
-    )
-    appmod._db_exec(
-        """
-        INSERT INTO audit_events (
-            organization_id, timestamp, actor, role, event_type, target,
-            target_type, target_id, result, source, detail, details_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            org_id,
-            now,
-            'local-console',
-            'system',
-            'admin_bootstrap_created',
-            f'user:{username}',
-            'user',
-            username,
-            'success',
-            'local',
-            'first administrator created from local console',
-            json.dumps({'username': username, 'role': 'admin'}, sort_keys=True),
-        ),
-    )
+    password_hash = generate_password_hash(password)
+    conn = sqlite3.connect(appmod.DB_PATH)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        users = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        if users:
+            conn.rollback()
+            raise CliError('Administrator bootstrap is allowed only while the user table is empty. Use authenticated user management.')
+        org = conn.execute('SELECT id FROM organizations WHERE name = ?', ('Local Workspace',)).fetchone()
+        if org:
+            org_id = org[0]
+        else:
+            cur = conn.execute(
+                "INSERT INTO organizations (name, join_policy, join_code, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+                ('Local Workspace', 'join_with_code', secrets.token_urlsafe(6), now, username),
+            )
+            org_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role, active, organization_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, password_hash, 'admin', 1, org_id, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO audit_events (
+                organization_id, timestamp, actor, role, event_type, target,
+                target_type, target_id, result, source, detail, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                org_id,
+                now,
+                'local-console',
+                'system',
+                'admin_bootstrap_created',
+                f'user:{username}',
+                'user',
+                username,
+                'success',
+                'local',
+                'first administrator created from local console',
+                json.dumps({'username': username, 'role': 'admin'}, sort_keys=True),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     print('administrator created')
     return 0
+
+
+def _require_loopback_bind(config):
+    if not config.protected_bind:
+        raise CliError(f'SAAOE_HOST must be loopback-only for packaged startup, got {config.host!r}.')
 
 
 def _config_checks(config):
@@ -188,13 +222,13 @@ def _config_checks(config):
     return checks
 
 
-def run_health(local=False, as_json=False):
+def run_health(local=False):
     checks = []
     try:
         config = load_config()
         checks.extend(_config_checks(config))
     except ConfigError as exc:
-        return {'healthy': False, 'status': 'failed', 'checks': [{'name': 'configuration', 'ok': False, 'detail': str(exc)}]}
+        return {'healthy': False, 'status': 'command_error', 'checks': [{'name': 'configuration', 'ok': False, 'detail': str(exc)}]}
 
     appmod = _load_app()
     appmod.create_app()
@@ -203,19 +237,20 @@ def run_health(local=False, as_json=False):
     except Exception as exc:
         checks.append({'name': 'database', 'ok': False, 'detail': str(exc)})
 
-    recent_sample = bool(appmod.usage_ts and appmod.cpu_series)
-    checks.append({'name': 'telemetry sampler', 'ok': recent_sample, 'detail': 'sample buffer populated'})
+    sampler_ok = appmod.sampler_is_healthy()
+    checks.append({'name': 'telemetry sampler', 'ok': sampler_ok, 'detail': 'sampler alive and recent' if sampler_ok else 'sampler stale or stopped'})
 
     with appmod.app.test_client() as client:
-        probe_headers = {'X-SAAOE-Healthcheck': '1'}
-        page = client.get('/', headers=probe_headers)
+        probe_environ = {'saaoe.healthcheck': '1'}
+        page = client.get('/', environ_overrides=probe_environ)
         login_redirect = page.status_code == 302 and '/login' in (page.location or '')
         setup_redirect = page.status_code == 302 and '/setup' in (page.location or '')
         checks.append({'name': 'protected page', 'ok': login_redirect or setup_redirect, 'detail': f'status={page.status_code}'})
-        api = client.get('/api/usage', headers=probe_headers)
+        api = client.get('/api/usage', environ_overrides=probe_environ)
         checks.append({'name': 'protected API', 'ok': api.status_code in {401, 503} and bool(api.json.get('error')), 'detail': f'status={api.status_code}'})
         health = client.get('/healthz')
-        checks.append({'name': 'application', 'ok': health.status_code == 200 and health.json.get('service') == 'saaoe', 'detail': health.json.get('version') if health.is_json else 'invalid response'})
+        application_ok = health.status_code == 200 and health.json.get('service') == 'saaoe' and health.json.get('ok') is True
+        checks.append({'name': 'application', 'ok': application_ok, 'detail': health.json.get('version') if health.is_json else 'invalid response'})
 
     if not local:
         reached = _http_health(config.host, config.port)
@@ -226,17 +261,19 @@ def run_health(local=False, as_json=False):
 
 
 def health(args):
-    payload = run_health(local=args.local, as_json=args.json)
+    payload = run_health(local=args.local)
     _print(payload, as_json=args.json)
     if payload['healthy']:
         return 0
+    if payload.get('status') == 'command_error':
+        return 2
     if any(check['name'] == 'live endpoint' and not check['ok'] for check in payload['checks']):
         return 2
     return 1
 
 
 def _http_health(host, port):
-    url = f'http://{host}:{port}/healthz'
+    url = _health_url(host, port)
     try:
         with urllib.request.urlopen(url, timeout=3) as response:
             payload = json.loads(response.read().decode('utf-8'))
@@ -245,10 +282,23 @@ def _http_health(host, port):
         return False, f'{url}: {exc}'
 
 
+def _health_url(host, port):
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    return f'http://{host}:{port}/healthz'
+
+
 def _port_available(host, port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(1)
-        return sock.connect_ex((host, port)) != 0
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise CliError(f'Cannot resolve bind host {host!r}: {exc}') from exc
+    for family, socktype, proto, _, sockaddr in infos:
+        with socket.socket(family, socktype, proto) as sock:
+            sock.settimeout(1)
+            if sock.connect_ex(sockaddr) == 0:
+                return False
+    return True
 
 
 def _metadata():
@@ -293,9 +343,10 @@ def status(args):
 
 def start(args):
     config = load_config()
+    _require_loopback_bind(config)
     if not _port_available(config.host, config.port):
         raise CliError(f'Port {config.host}:{config.port} is already in use.')
-    preflight = run_health(local=True, as_json=True)
+    preflight = run_health(local=True)
     if not preflight['healthy']:
         _print(preflight)
         return 1
@@ -317,12 +368,12 @@ def start(args):
         if proc.poll() is not None:
             break
         time.sleep(0.5)
-    stop(argparse.Namespace(force=True))
+    stop()
     print('startup health failed')
     return 1
 
 
-def stop(args):
+def stop(args=None):
     meta = _metadata()
     proc = _matched_process(meta)
     if not meta:
@@ -345,9 +396,10 @@ def stop(args):
 
 
 def run(args):
+    config = load_config()
+    _require_loopback_bind(config)
     appmod = _load_app()
     app = appmod.create_app()
-    config = load_config()
     try:
         from waitress import serve
     except ImportError as exc:
@@ -367,7 +419,8 @@ def main(argv=None):
     admin_parser.add_argument('--username')
     admin_parser.set_defaults(func=bootstrap_admin)
     subparsers.add_parser('start').set_defaults(func=start)
-    subparsers.add_parser('stop').set_defaults(func=stop)
+    stop_parser = subparsers.add_parser('stop')
+    stop_parser.set_defaults(func=stop)
     subparsers.add_parser('status').set_defaults(func=status)
     health_parser = subparsers.add_parser('health')
     health_parser.add_argument('--json', action='store_true')
