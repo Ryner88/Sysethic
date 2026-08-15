@@ -895,6 +895,32 @@ def _parse_steps_yaml(steps_yaml):
     return steps
 
 
+def _approval_role_rank(role):
+    if role in {'none', 'automatic'}:
+        return 0
+    if role == 'viewer':
+        return 1
+    if role == 'analyst':
+        return 2
+    if role == 'admin':
+        return 3
+    if role == 'local_console':
+        return 4
+    if role == 'required_from_action':
+        return 5
+    return -1
+
+
+def _enforce_registry_approval_floor(recommended_action_key, required_approval_role):
+    metadata = _response_action_metadata(recommended_action_key)
+    if not metadata:
+        return required_approval_role
+    floor = metadata.required_approval_role
+    if _approval_role_rank(required_approval_role) < _approval_role_rank(floor):
+        return floor
+    return required_approval_role
+
+
 def _canonical_steps_yaml(steps):
     lines = ['steps:']
     for step in steps:
@@ -953,6 +979,7 @@ def _normalize_playbook_definition(payload, existing=None, actor='system', sourc
         raise ValueError('unsupported recommended action key')
     if required_approval_role not in PLAYBOOK_APPROVAL_ROLES:
         raise ValueError('unsupported required approval role')
+    required_approval_role = _enforce_registry_approval_floor(recommended_action_key, required_approval_role)
     legacy_trigger = {
         'type': 'anomaly',
         'metric': payload.get('metric', (existing or {}).get('metric') or 'cpu_percent'),
@@ -1236,35 +1263,50 @@ def approval_payload_digest(payload):
     return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
-def _approval_canonical_target(action, target):
+def _validate_kill_process_target(target):
     target = str(target or '').strip()
-    if action == 'kill_process':
-        try:
-            pid = int(target)
-        except (TypeError, ValueError) as exc:
-            raise ValueError('kill process target must be a PID') from exc
-        if pid <= 0:
-            raise ValueError('kill process target must be a positive PID')
-        return str(pid)
-    if action == 'quarantine_file':
-        path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
-        if not path.startswith(BASE_DIR + os.sep):
-            raise ValueError('quarantine target must be inside the SAAOE project directory')
-        return os.path.relpath(path, BASE_DIR)
-    if action == 'block_ip':
-        return str(ipaddress.ip_address(target))
-    if action == 'restart_service':
-        if not SERVICE_RESTART_TARGET_RE.fullmatch(target):
-            raise ValueError('restart service target is not a valid service allowlist key')
-        if target not in APPROVED_SERVICE_RESTARTS:
-            allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
-            raise ValueError(f"restart service target is not approved. Allowed: {allowed}")
-        return target
-    if action == 'create_incident_report':
-        if not target:
-            raise ValueError('incident report target is required')
-        return target
-    raise ValueError('unsupported response action')
+    try:
+        pid = int(target)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('kill process target must be a PID') from exc
+    if pid <= 0:
+        raise ValueError('kill process target must be a positive PID')
+    return str(pid)
+
+
+def _validate_quarantine_file_target(target):
+    target = str(target or '').strip()
+    path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
+    if not path.startswith(BASE_DIR + os.sep):
+        raise ValueError('quarantine target must be inside the SAAOE project directory')
+    return os.path.relpath(path, BASE_DIR)
+
+
+def _validate_block_ip_target(target):
+    return str(ipaddress.ip_address(str(target or '').strip()))
+
+
+def _validate_restart_service_target(target):
+    target = str(target or '').strip()
+    if not SERVICE_RESTART_TARGET_RE.fullmatch(target):
+        raise ValueError('restart service target is not a valid service allowlist key')
+    if target not in APPROVED_SERVICE_RESTARTS:
+        allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
+        raise ValueError(f"restart service target is not approved. Allowed: {allowed}")
+    return target
+
+
+def _validate_incident_report_target(target):
+    target = str(target or '').strip()
+    if not target:
+        raise ValueError('incident report target is required')
+    return target
+
+
+def _approval_canonical_target(action, target):
+    metadata = _response_action_metadata(action)
+    validator, _executor = _validate_response_action_metadata(metadata)
+    return validator(target)
 
 
 def approval_preview(payload):
@@ -1320,6 +1362,21 @@ def _response_action_metadata(action):
     return RESPONSE_ACTION_REGISTRY.get(action)
 
 
+def _current_platform_key():
+    system = platform.system().lower()
+    if system.startswith('linux'):
+        return 'linux'
+    if system == 'darwin':
+        return 'darwin'
+    if system.startswith('windows'):
+        return 'windows'
+    return system or 'unknown'
+
+
+def _role_allowed_by_registry(actor, roles):
+    return bool(actor and any(_role_allows(actor, role) for role in roles))
+
+
 def response_action_registry_manifest():
     return {
         key: {
@@ -1341,6 +1398,22 @@ def response_action_registry_manifest():
 
 def _response_action_executor(metadata):
     return globals().get(metadata.executor) if isinstance(metadata.executor, str) else metadata.executor
+
+
+def _response_action_validator(metadata):
+    return globals().get(metadata.input_validator) if isinstance(metadata.input_validator, str) else metadata.input_validator
+
+
+def _validate_response_action_metadata(metadata):
+    if not metadata or metadata.stable_key not in RESPONSE_ACTION_REGISTRY:
+        raise ValueError('unsupported response action')
+    validator = _response_action_validator(metadata)
+    if not callable(validator):
+        raise ValueError(f'{metadata.stable_key} input validator is not configured')
+    executor = _response_action_executor(metadata)
+    if not callable(executor):
+        raise ValueError(f'{metadata.stable_key} executor is not configured')
+    return validator, executor
 
 
 def _approval_contract(action):
@@ -3255,10 +3328,16 @@ def authorizeApprovedAction(approval_id, payload, actor=None, consume=True):
             conn.rollback()
             return _approval_error('approval not found', 404)
         approval = _response_approval_from_row(row)
-        contract = _approval_contract(approval.get('action'))
+        metadata = _response_action_metadata(approval.get('action'))
+        contract = metadata.approval_contract() if metadata else None
         if not contract:
             conn.rollback()
             return _approval_error('unsupported response action', 400, approval)
+        try:
+            _validate_response_action_metadata(metadata)
+        except ValueError as exc:
+            conn.rollback()
+            return _approval_error(str(exc), 400, approval)
         if approval.get('status') == 'approved' and _approval_expired(approval, now_dt):
             _mark_approval_expired(conn, approval, now)
             conn.commit()
@@ -3272,6 +3351,16 @@ def authorizeApprovedAction(approval_id, payload, actor=None, consume=True):
         if not _role_allows(actor, approval.get('required_role') or contract['required_role']):
             conn.rollback()
             return _approval_error(f"{contract['required_role']} role required", 403, approval)
+        if not _role_allowed_by_registry(actor, metadata.execution_roles):
+            conn.rollback()
+            return _approval_error('response action execution role required', 403, approval)
+        if not metadata.enabled:
+            conn.rollback()
+            return _approval_error(f"{metadata.stable_key} execution adapter is disabled", 403, approval)
+        platform_key = _current_platform_key()
+        if platform_key not in metadata.supported_platforms:
+            conn.rollback()
+            return _approval_error(f"{metadata.stable_key} is not supported on platform {platform_key}", 403, approval)
         if approval.get('approver_role') and ROLES.get(approval['approver_role'], 0) < ROLES[contract['required_role']]:
             conn.rollback()
             return _approval_error('approver role no longer satisfies action contract', 403, approval)
@@ -3422,20 +3511,34 @@ def _recover_service_restart(result, rollback_argv):
     raise RuntimeError(_json_dumps(result))
 
 
+def _execute_kill_process(target):
+    pid = int(target)
+    if pid == os.getpid():
+        raise ValueError('refusing to terminate the SAAOE process')
+    proc = psutil.Process(pid)
+    proc.terminate()
+    return {'executed': True, 'detail': f"Terminate signal sent to PID {pid} ({proc.name()})"}
+
+
 def _execute_response_action(action, target, dry_run=True):
     preview = approval_preview({'action': action, 'target': target, 'dry_run': dry_run})
     if dry_run:
         return {'executed': False, 'detail': preview['detail']}
     metadata = _response_action_metadata(action)
     contract = metadata.approval_contract() if metadata else {}
+    if not metadata:
+        raise ValueError('unsupported response action')
+    if not metadata.enabled:
+        raise ValueError(f'{action} execution adapter is disabled')
+    platform_key = _current_platform_key()
+    if platform_key not in metadata.supported_platforms:
+        raise ValueError(f'{action} is not supported on platform {platform_key}')
     if action in {'quarantine_file', 'block_ip'}:
         raise ValueError(f'{action} execution adapter is not available in Phase 4')
     if contract.get('host_impacting') and not contract.get('enabled'):
-        return {'executed': False, 'detail': preview['detail']}
-    executor = _response_action_executor(metadata) if metadata else None
-    if executor:
-        return executor(target)
-    raise ValueError('unsupported response action')
+        raise ValueError(f'{action} execution adapter is disabled')
+    _validator, executor = _validate_response_action_metadata(metadata)
+    return executor(target)
 
 
 def _preview_authorized_action(action, target, dry_run=True):
@@ -4743,10 +4846,14 @@ def api_response_approvals():
     action = str(payload.get('action') or '').strip()
     target = str(payload.get('target', '')).strip()
     dry_run = bool(payload.get('dry_run', True))
+    metadata = _response_action_metadata(action)
     contract = _approval_contract(action)
     if action not in RESPONSE_ACTIONS:
         audit_event('response_approval_failed', 'api_response_approvals', 'failed', f"unsupported action={action}")
         return jsonify(error='unsupported response action'), 400
+    if not _role_allowed_by_registry(user, metadata.request_roles):
+        audit_event('access_denied', f"response_action:{action}", 'denied', 'response action request role required')
+        return jsonify(error='response action request role required'), 403
     if not target:
         audit_event('response_approval_failed', 'api_response_approvals', 'failed', 'target is required')
         return jsonify(error='target is required'), 400

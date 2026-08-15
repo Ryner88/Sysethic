@@ -313,7 +313,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
                 stdout = 'restart ok'
             return Proc()
 
-        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'), \
+                patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
                 patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
             response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
 
@@ -348,7 +349,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
                 proc.returncode = 0
             return proc
 
-        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'), \
+                patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
                 patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
             response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
 
@@ -381,7 +383,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
                 stdout = 'restart ok'
             return Proc()
 
-        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'), \
+                patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
                 patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
             threads = [threading.Thread(target=execute, args=(client_one,)), threading.Thread(target=execute, args=(client_two,))]
             for thread in threads:
