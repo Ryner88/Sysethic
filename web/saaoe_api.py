@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import statistics
 import json
+import math
 import socket
 import base64
 import csv
@@ -22,7 +23,9 @@ import socketserver
 import struct
 import subprocess
 import uuid
+from dataclasses import dataclass
 from functools import wraps
+from urllib.parse import urlsplit
 
 import psutil
 from flask import Flask, jsonify, render_template, Response, stream_with_context, request, redirect, session, url_for, g, has_request_context
@@ -125,6 +128,19 @@ automation_rules = [
 next_automation_rule_id = 3
 automation_history = []
 
+ANOMALY_RULE_FIELDS = {'metric', 'operator', 'threshold', 'severity', 'enabled', 'alert_in_app', 'alert_email'}
+ANOMALY_RULE_METRICS = {'cpu_percent', 'memory_percent', 'disk_percent', 'network_bytes_per_second'}
+ANOMALY_RULE_OPERATORS = {'>', '>=', '<', '<='}
+
+AUTOMATION_RULE_FIELDS = {'name', 'field', 'operator', 'value', 'run_action', 'enabled'}
+RULE_DELETE_FIELDS = {'action', 'id'}
+AUTOMATION_RULE_MATCH_FIELDS = {'severity', 'risk_score', 'metric', 'category', 'confidence', 'indicator_type'}
+AUTOMATION_RULE_TEXT_FIELDS = {'severity', 'metric', 'category', 'indicator_type'}
+AUTOMATION_RULE_NUMERIC_FIELDS = {'risk_score', 'confidence'}
+AUTOMATION_RULE_TEXT_OPERATORS = {'equals'}
+AUTOMATION_RULE_NUMERIC_OPERATORS = {'>', '>=', '<', '<=', 'equals'}
+AUTOMATION_RULE_ACTIONS = {'Isolate Process', 'Block IP', 'Capture Forensics Bundle', 'Notify Analyst'}
+
 THREAT_INTEL_PATH = str(CONFIG.threat_intel_path)
 
 TERMINAL_TIMEOUT_SECONDS = 12
@@ -169,14 +185,119 @@ INCIDENT_STATUSES = STATUSES
 APPROVAL_STATUSES = {'pending', 'approved', 'rejected', 'cancelled', 'expired', 'consumed'}
 APPROVAL_DECISION_STATUSES = {'approved', 'rejected', 'cancelled', 'expired'}
 APPROVAL_TERMINAL_STATUSES = {'rejected', 'cancelled', 'expired', 'consumed'}
-APPROVAL_ACTION_CONTRACTS = {
-    'kill_process': {'required_role': 'admin', 'action_type': 'host_process', 'host_impacting': True},
-    'quarantine_file': {'required_role': 'admin', 'action_type': 'host_file', 'host_impacting': True},
-    'block_ip': {'required_role': 'admin', 'action_type': 'network_firewall', 'host_impacting': True},
-    'restart_service': {'required_role': 'admin', 'action_type': 'service_control', 'host_impacting': True},
-    'create_incident_report': {'required_role': 'analyst', 'action_type': 'record_report', 'host_impacting': False},
+
+
+@dataclass(frozen=True)
+class ResponseActionMetadata:
+    stable_key: str
+    safety_class: str
+    input_validator: object
+    request_roles: tuple
+    required_approval_role: str
+    execution_roles: tuple
+    supported_platforms: tuple
+    enabled: bool
+    executor: object
+    action_type: str
+    host_impacting: bool
+
+    def approval_contract(self):
+        return {
+            'required_role': self.required_approval_role,
+            'action_type': self.action_type,
+            'host_impacting': self.host_impacting,
+            'enabled': self.enabled,
+            'safety_class': self.safety_class,
+            'request_roles': self.request_roles,
+            'execution_roles': self.execution_roles,
+            'supported_platforms': self.supported_platforms,
+        }
+
+
+def _unsupported_executor(*_args, **_kwargs):
+    raise ValueError('response action execution adapter is not available')
+
+
+def _incident_report_executor(_target):
+    return {'executed': True, 'detail': 'Incident report action recorded.'}
+
+
+class ResponseActionExecutionError(RuntimeError):
+    def __init__(self, detail, result=None):
+        super().__init__(detail)
+        self.detail = detail
+        self.result = result or {'executed': False, 'detail': detail}
+
+
+RESPONSE_ACTION_REGISTRY = {
+    'kill_process': ResponseActionMetadata(
+        stable_key='kill_process',
+        safety_class='destructive_host_process',
+        input_validator='_validate_kill_process_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=False,
+        executor='_execute_kill_process',
+        action_type='host_process',
+        host_impacting=True,
+    ),
+    'quarantine_file': ResponseActionMetadata(
+        stable_key='quarantine_file',
+        safety_class='destructive_host_file',
+        input_validator='_validate_quarantine_file_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=False,
+        executor=_unsupported_executor,
+        action_type='host_file',
+        host_impacting=True,
+    ),
+    'block_ip': ResponseActionMetadata(
+        stable_key='block_ip',
+        safety_class='destructive_network_firewall',
+        input_validator='_validate_block_ip_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=False,
+        executor=_unsupported_executor,
+        action_type='network_firewall',
+        host_impacting=True,
+    ),
+    'restart_service': ResponseActionMetadata(
+        stable_key='restart_service',
+        safety_class='bounded_service_control',
+        input_validator='_validate_restart_service_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='admin',
+        execution_roles=('admin',),
+        supported_platforms=('linux',),
+        enabled=True,
+        executor='_restart_approved_service',
+        action_type='service_control',
+        host_impacting=True,
+    ),
+    'create_incident_report': ResponseActionMetadata(
+        stable_key='create_incident_report',
+        safety_class='record_only',
+        input_validator='_validate_incident_report_target',
+        request_roles=('analyst', 'admin'),
+        required_approval_role='analyst',
+        execution_roles=('analyst', 'admin'),
+        supported_platforms=('linux', 'darwin', 'windows'),
+        enabled=True,
+        executor=_incident_report_executor,
+        action_type='record_report',
+        host_impacting=False,
+    ),
 }
-RESPONSE_ACTIONS = set(APPROVAL_ACTION_CONTRACTS)
+APPROVAL_ACTION_CONTRACTS = {key: metadata.approval_contract() for key, metadata in RESPONSE_ACTION_REGISTRY.items()}
+RESPONSE_ACTIONS = set(RESPONSE_ACTION_REGISTRY)
 PLAYBOOK_KINDS = {'anomaly_response', 'workflow_gate', 'incident_utility', 'approval_action', 'access_control'}
 PLAYBOOK_CATEGORIES = {'system', 'host', 'network', 'file', 'workflow', 'incident', 'authentication', 'access_control', 'custom'}
 PLAYBOOK_TRIGGER_TYPES = {'anomaly', 'workflow', 'incident'}
@@ -299,9 +420,10 @@ def _db_query(sql, params=()):
 
 @app.errorhandler(sqlite3.Error)
 def storage_error(exc):
+    app.logger.error('storage operation failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
     if _is_api_request():
-        return jsonify(error='storage write failed', detail=str(exc)), 500
-    return render_template('login.html', error=f"Storage error: {exc}", username=''), 500
+        return jsonify(error='storage operation failed'), 500
+    return render_template('login.html', error='Storage operation failed.', username=''), 500
 
 
 @app.teardown_appcontext
@@ -796,6 +918,32 @@ def _parse_steps_yaml(steps_yaml):
     return steps
 
 
+def _approval_role_rank(role):
+    if role in {'none', 'automatic'}:
+        return 0
+    if role == 'viewer':
+        return 1
+    if role == 'analyst':
+        return 2
+    if role == 'admin':
+        return 3
+    if role == 'local_console':
+        return 4
+    if role == 'required_from_action':
+        return 5
+    return -1
+
+
+def _enforce_registry_approval_floor(recommended_action_key, required_approval_role):
+    metadata = _response_action_metadata(recommended_action_key)
+    if not metadata:
+        return required_approval_role
+    floor = metadata.required_approval_role
+    if _approval_role_rank(required_approval_role) < _approval_role_rank(floor):
+        return floor
+    return required_approval_role
+
+
 def _canonical_steps_yaml(steps):
     lines = ['steps:']
     for step in steps:
@@ -854,6 +1002,7 @@ def _normalize_playbook_definition(payload, existing=None, actor='system', sourc
         raise ValueError('unsupported recommended action key')
     if required_approval_role not in PLAYBOOK_APPROVAL_ROLES:
         raise ValueError('unsupported required approval role')
+    required_approval_role = _enforce_registry_approval_floor(recommended_action_key, required_approval_role)
     legacy_trigger = {
         'type': 'anomaly',
         'metric': payload.get('metric', (existing or {}).get('metric') or 'cpu_percent'),
@@ -927,9 +1076,46 @@ def _legacy_playbook_definition(row):
     }
 
 
+def _write_playbook_definition(conn, row_id, definition, *, preserve_update_metadata=False):
+    update_clause = (
+        "updated_at = COALESCE(updated_at, ?), updated_by = COALESCE(updated_by, ?)"
+        if preserve_update_metadata
+        else "updated_at = ?, updated_by = ?"
+    )
+    conn.execute(
+        f"""
+        UPDATE playbooks
+        SET stable_key = ?, description = ?, kind = ?, trigger_json = ?,
+            recommended_action_key = ?, required_approval_role = ?, steps_yaml = ?,
+            source = ?, version = ?, definition_digest = ?, created_at = COALESCE(created_at, ?),
+            created_by = COALESCE(created_by, ?), {update_clause}, action = ?, yaml = ?
+        WHERE id = ?
+        """,
+        (
+            definition['stable_key'], definition['description'], definition['kind'], definition['trigger_json'],
+            definition['recommended_action_key'], definition['required_approval_role'], definition['steps_yaml'],
+            definition['source'], definition['version'], definition['definition_digest'], definition['created_at'],
+            definition['created_by'], definition['updated_at'], definition['updated_by'], definition['action'],
+            definition['yaml'], row_id,
+        )
+    )
+
+
 def _backfill_playbook_definitions(conn):
     for row in conn.execute("SELECT * FROM playbooks").fetchall():
         if row['stable_key'] and row['definition_digest']:
+            required_role = row['required_approval_role'] or 'none'
+            floored_role = _enforce_registry_approval_floor(row['recommended_action_key'], required_role)
+            if floored_role == required_role:
+                continue
+            existing = dict(row)
+            normalized = _normalize_playbook_definition(
+                {**existing, 'required_approval_role': floored_role},
+                existing=existing,
+                actor='system',
+                source=existing.get('source') or PLAYBOOK_SOURCE_CUSTOM,
+            )
+            _write_playbook_definition(conn, row['id'], normalized)
             continue
         raw = _legacy_playbook_definition(row)
         try:
@@ -937,24 +1123,7 @@ def _backfill_playbook_definitions(conn):
         except ValueError:
             raw['steps_yaml'] = 'steps:\n  - action: review_evidence\n'
             definition = _normalize_playbook_definition(raw, actor='system', source=raw['source'])
-        conn.execute(
-            """
-            UPDATE playbooks
-            SET stable_key = ?, description = ?, kind = ?, trigger_json = ?,
-                recommended_action_key = ?, required_approval_role = ?, steps_yaml = ?,
-                source = ?, version = ?, definition_digest = ?, created_at = COALESCE(created_at, ?),
-                created_by = COALESCE(created_by, ?), updated_at = COALESCE(updated_at, ?),
-                updated_by = COALESCE(updated_by, ?), action = ?, yaml = ?
-            WHERE id = ?
-            """,
-            (
-                definition['stable_key'], definition['description'], definition['kind'], definition['trigger_json'],
-                definition['recommended_action_key'], definition['required_approval_role'], definition['steps_yaml'],
-                definition['source'], definition['version'], definition['definition_digest'], definition['created_at'],
-                definition['created_by'], definition['updated_at'], definition['updated_by'], definition['action'],
-                definition['yaml'], row['id'],
-            )
-        )
+        _write_playbook_definition(conn, row['id'], definition, preserve_update_metadata=True)
 
 
 def _backfill_playbook_runs(conn):
@@ -1116,6 +1285,184 @@ def _clean_optional_text(value):
     return text or None
 
 
+def _reject_rule_write(event_type, target, reason, details=None, status=400):
+    audit_event(event_type, target, 'failed', reason, details=details)
+    return jsonify(error=reason), status
+
+
+def _payload_unknown_fields(payload, allowed_fields):
+    return sorted(set(payload) - set(allowed_fields))
+
+
+def _positive_int(value):
+    if isinstance(value, bool):
+        raise ValueError('id must be a positive integer')
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('id must be a positive integer') from None
+    if parsed <= 0 or str(value).strip() != str(parsed):
+        raise ValueError('id must be a positive integer')
+    return parsed
+
+
+def _finite_number(value, field_name):
+    if isinstance(value, bool):
+        raise ValueError(f'{field_name} must be a finite number')
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} must be a finite number') from None
+    if not math.isfinite(number):
+        raise ValueError(f'{field_name} must be a finite number')
+    return number
+
+
+def _strict_bool(value, field_name):
+    if not isinstance(value, bool):
+        raise ValueError(f'{field_name} must be true or false')
+    return value
+
+
+def _required_text(payload, field_name, *, max_length=120):
+    value = payload.get(field_name)
+    if not isinstance(value, str):
+        raise ValueError(f'{field_name} is required')
+    text = value.strip()
+    if not text:
+        raise ValueError(f'{field_name} is required')
+    if len(text) > max_length:
+        raise ValueError(f'{field_name} is too long')
+    return text
+
+
+def _validate_automation_rule_payload(payload):
+    unknown_fields = _payload_unknown_fields(payload, AUTOMATION_RULE_FIELDS)
+    if unknown_fields:
+        raise ValueError(f"unknown automation rule fields: {', '.join(unknown_fields)}")
+
+    field = payload.get('field')
+    if field not in AUTOMATION_RULE_MATCH_FIELDS:
+        raise ValueError('unsupported automation rule field')
+
+    operator = payload.get('operator')
+    allowed_operators = AUTOMATION_RULE_TEXT_OPERATORS if field in AUTOMATION_RULE_TEXT_FIELDS else AUTOMATION_RULE_NUMERIC_OPERATORS
+    if operator not in allowed_operators:
+        raise ValueError('unsupported automation rule operator')
+
+    raw_value = payload.get('value')
+    if field in AUTOMATION_RULE_NUMERIC_FIELDS:
+        value = f"{_finite_number(raw_value, 'value'):g}"
+    else:
+        value = _required_text(payload, 'value', max_length=120)
+
+    run_action = payload.get('run_action')
+    if run_action not in AUTOMATION_RULE_ACTIONS:
+        raise ValueError('unsupported automation rule action')
+
+    enabled = payload.get('enabled', True)
+    if 'enabled' in payload:
+        enabled = _strict_bool(enabled, 'enabled')
+
+    return {
+        'name': _required_text(payload, 'name', max_length=120),
+        'field': field,
+        'operator': operator,
+        'value': value,
+        'action': run_action,
+        'enabled': enabled,
+    }
+
+
+def _validate_anomaly_rule_payload(payload):
+    unknown_fields = _payload_unknown_fields(payload, ANOMALY_RULE_FIELDS)
+    if unknown_fields:
+        raise ValueError(f"unknown anomaly rule fields: {', '.join(unknown_fields)}")
+
+    metric = payload.get('metric')
+    if metric not in ANOMALY_RULE_METRICS:
+        raise ValueError('unsupported anomaly rule metric')
+
+    operator = payload.get('operator')
+    if operator not in ANOMALY_RULE_OPERATORS:
+        raise ValueError('unsupported anomaly rule operator')
+
+    severity = payload.get('severity')
+    if severity not in SEVERITIES:
+        raise ValueError('unsupported anomaly rule severity')
+
+    enabled = payload.get('enabled', True)
+    alert_in_app = payload.get('alert_in_app', True)
+    alert_email = payload.get('alert_email', False)
+    if 'enabled' in payload:
+        enabled = _strict_bool(enabled, 'enabled')
+    if 'alert_in_app' in payload:
+        alert_in_app = _strict_bool(alert_in_app, 'alert_in_app')
+    if 'alert_email' in payload:
+        alert_email = _strict_bool(alert_email, 'alert_email')
+
+    return {
+        'metric': metric,
+        'operator': operator,
+        'threshold': _finite_number(payload.get('threshold'), 'threshold'),
+        'severity': severity,
+        'enabled': enabled,
+        'alert_in_app': alert_in_app,
+        'alert_email': alert_email,
+    }
+
+
+def _public_error_detail(exc, fallback):
+    message = exc.args[0] if isinstance(exc, ValueError) and exc.args and isinstance(exc.args[0], str) else None
+    public_messages = {
+        'unsupported response action',
+        'target is required',
+        'kill process target must be a PID',
+        'kill process target must be a positive PID',
+        'quarantine target must be inside the SAAOE project directory',
+        'restart service target is not a valid service allowlist key',
+        'incident report target is required',
+        'unsupported playbook kind',
+        'unsupported playbook category',
+        'unsupported recommended action key',
+        'unsupported required approval role',
+        'unsupported trigger type',
+        'trigger metric is required',
+        'unsupported trigger operator',
+        'trigger threshold must be numeric',
+        'trigger event is required',
+        'steps YAML is required',
+        'steps YAML contains executable or shell-like content',
+        'only declarative metadata and steps are allowed',
+        'step entries must use key/value pairs',
+        'step fields must belong to a step',
+        'at least one declarative step is required',
+        'stable_key must be 3-97 lowercase letters, numbers, dots, underscores, or hyphens',
+    }
+    if message in public_messages or (message and message.startswith('unsupported step action: ')):
+        return message
+    if message and message.startswith('restart service target is not approved.'):
+        allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
+        return f"restart service target is not approved. Allowed: {allowed}"
+    app.logger.error('%s correlation_id=%s exception_type=%s', fallback, uuid.uuid4().hex, type(exc).__name__)
+    return fallback
+
+
+def _safe_local_redirect_target(value, fallback=None):
+    fallback = fallback or url_for('dashboard')
+    target = str(value or '').strip()
+    if not target:
+        return fallback
+    if any(ord(ch) < 32 for ch in target):
+        return fallback
+    if '\\' in target or not target.startswith('/') or target.startswith('//'):
+        return fallback
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return fallback
+    return target
+
+
 def _approval_payload(action, target, incident_id=None, anomaly_id=None, dry_run=True):
     return {
         'action': str(action or '').strip(),
@@ -1137,35 +1484,50 @@ def approval_payload_digest(payload):
     return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
-def _approval_canonical_target(action, target):
+def _validate_kill_process_target(target):
     target = str(target or '').strip()
-    if action == 'kill_process':
-        try:
-            pid = int(target)
-        except (TypeError, ValueError) as exc:
-            raise ValueError('kill process target must be a PID') from exc
-        if pid <= 0:
-            raise ValueError('kill process target must be a positive PID')
-        return str(pid)
-    if action == 'quarantine_file':
-        path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
-        if not path.startswith(BASE_DIR + os.sep):
-            raise ValueError('quarantine target must be inside the SAAOE project directory')
-        return os.path.relpath(path, BASE_DIR)
-    if action == 'block_ip':
-        return str(ipaddress.ip_address(target))
-    if action == 'restart_service':
-        if not SERVICE_RESTART_TARGET_RE.fullmatch(target):
-            raise ValueError('restart service target is not a valid service allowlist key')
-        if target not in APPROVED_SERVICE_RESTARTS:
-            allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
-            raise ValueError(f"restart service target is not approved. Allowed: {allowed}")
-        return target
-    if action == 'create_incident_report':
-        if not target:
-            raise ValueError('incident report target is required')
-        return target
-    raise ValueError('unsupported response action')
+    try:
+        pid = int(target)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('kill process target must be a PID') from exc
+    if pid <= 0:
+        raise ValueError('kill process target must be a positive PID')
+    return str(pid)
+
+
+def _validate_quarantine_file_target(target):
+    target = str(target or '').strip()
+    path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
+    if not path.startswith(BASE_DIR + os.sep):
+        raise ValueError('quarantine target must be inside the SAAOE project directory')
+    return os.path.relpath(path, BASE_DIR)
+
+
+def _validate_block_ip_target(target):
+    return str(ipaddress.ip_address(str(target or '').strip()))
+
+
+def _validate_restart_service_target(target):
+    target = str(target or '').strip()
+    if not SERVICE_RESTART_TARGET_RE.fullmatch(target):
+        raise ValueError('restart service target is not a valid service allowlist key')
+    if target not in APPROVED_SERVICE_RESTARTS:
+        allowed = ', '.join(sorted(APPROVED_SERVICE_RESTARTS))
+        raise ValueError(f"restart service target is not approved. Allowed: {allowed}")
+    return target
+
+
+def _validate_incident_report_target(target):
+    target = str(target or '').strip()
+    if not target:
+        raise ValueError('incident report target is required')
+    return target
+
+
+def _approval_canonical_target(action, target):
+    metadata = _response_action_metadata(action)
+    validator, _executor = _validate_response_action_metadata(metadata)
+    return validator(target)
 
 
 def approval_preview(payload):
@@ -1180,7 +1542,7 @@ def approval_preview(payload):
     if not contract:
         raise ValueError('unsupported response action')
     canonical_target = _approval_canonical_target(normalized['action'], normalized['target'])
-    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'] and normalized['action'] != 'restart_service')
+    disabled_host_action = bool(contract.get('host_impacting') and not normalized['dry_run'] and not contract.get('enabled'))
     if normalized['action'] == 'kill_process':
         effect = f"Would validate termination of PID {canonical_target}."
     elif normalized['action'] == 'quarantine_file':
@@ -1217,8 +1579,67 @@ def _approval_error(message, status_code=409, approval=None):
     return {'ok': False, 'error': message, 'status_code': status_code, 'approval': approval}
 
 
+def _response_action_metadata(action):
+    return RESPONSE_ACTION_REGISTRY.get(action)
+
+
+def _current_platform_key():
+    system = platform.system().lower()
+    if system.startswith('linux'):
+        return 'linux'
+    if system == 'darwin':
+        return 'darwin'
+    if system.startswith('windows'):
+        return 'windows'
+    return system or 'unknown'
+
+
+def _role_allowed_by_registry(actor, roles):
+    return bool(actor and any(_role_allows(actor, role) for role in roles))
+
+
+def response_action_registry_manifest():
+    return {
+        key: {
+            'stable_key': metadata.stable_key,
+            'safety_class': metadata.safety_class,
+            'input_validator': metadata.input_validator if isinstance(metadata.input_validator, str) else metadata.input_validator.__name__,
+            'request_roles': list(metadata.request_roles),
+            'required_approval_role': metadata.required_approval_role,
+            'execution_roles': list(metadata.execution_roles),
+            'supported_platforms': list(metadata.supported_platforms),
+            'enabled': metadata.enabled,
+            'executor': metadata.executor if isinstance(metadata.executor, str) else metadata.executor.__name__,
+            'action_type': metadata.action_type,
+            'host_impacting': metadata.host_impacting,
+        }
+        for key, metadata in RESPONSE_ACTION_REGISTRY.items()
+    }
+
+
+def _response_action_executor(metadata):
+    return globals().get(metadata.executor) if isinstance(metadata.executor, str) else metadata.executor
+
+
+def _response_action_validator(metadata):
+    return globals().get(metadata.input_validator) if isinstance(metadata.input_validator, str) else metadata.input_validator
+
+
+def _validate_response_action_metadata(metadata):
+    if not metadata or metadata.stable_key not in RESPONSE_ACTION_REGISTRY:
+        raise ValueError('unsupported response action')
+    validator = _response_action_validator(metadata)
+    if not callable(validator):
+        raise ValueError(f'{metadata.stable_key} input validator is not configured')
+    executor = _response_action_executor(metadata)
+    if not callable(executor):
+        raise ValueError(f'{metadata.stable_key} executor is not configured')
+    return validator, executor
+
+
 def _approval_contract(action):
-    return APPROVAL_ACTION_CONTRACTS.get(action)
+    metadata = _response_action_metadata(action)
+    return metadata.approval_contract() if metadata else None
 
 
 def _mark_approval_expired(conn, approval, now):
@@ -2883,8 +3304,8 @@ def _validate_terminal_command(command):
         return None, 'Shell syntax and expansion characters are blocked in browser diagnostics.'
     try:
         parts = shlex.split(command)
-    except ValueError as exc:
-        return None, str(exc)
+    except ValueError:
+        return None, 'Command could not be parsed.'
     if not parts:
         return None, 'Enter a diagnostic command.'
     if os.path.basename(parts[0]) != parts[0]:
@@ -2962,7 +3383,7 @@ def _run_terminal_command(command, incident_id=None):
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'timeout', details=audit_details)
         return {'success': False, 'error': 'command timed out', 'output': ''}, 408
     except OSError as exc:
-        audit_details.update({'error_type': type(exc).__name__, 'error': str(exc)})
+        audit_details.update({'error_type': type(exc).__name__})
         audit_event('terminal_command_attempted', f"command:{os.path.basename(args[0])}", 'failed', 'execution failed', details=audit_details)
         return {'success': False, 'error': 'command execution failed', 'output': ''}, 500
 
@@ -3043,7 +3464,7 @@ def _approval_diagnostics(approval):
     except ValueError as exc:
         expected_preview = None
         expected_preview_digest = None
-        preview_error = str(exc)
+        preview_error = _public_error_detail(exc, 'response action validation failed')
     audit_events = _approval_audit_events(approval)
     timeline_events = _approval_timeline_events(approval)
     reconstruction = []
@@ -3128,10 +3549,16 @@ def authorizeApprovedAction(approval_id, payload, actor=None, consume=True):
             conn.rollback()
             return _approval_error('approval not found', 404)
         approval = _response_approval_from_row(row)
-        contract = _approval_contract(approval.get('action'))
+        metadata = _response_action_metadata(approval.get('action'))
+        contract = metadata.approval_contract() if metadata else None
         if not contract:
             conn.rollback()
             return _approval_error('unsupported response action', 400, approval)
+        try:
+            _validate_response_action_metadata(metadata)
+        except ValueError as exc:
+            conn.rollback()
+            return _approval_error(_public_error_detail(exc, 'response action registry validation failed'), 400, approval)
         if approval.get('status') == 'approved' and _approval_expired(approval, now_dt):
             _mark_approval_expired(conn, approval, now)
             conn.commit()
@@ -3145,6 +3572,16 @@ def authorizeApprovedAction(approval_id, payload, actor=None, consume=True):
         if not _role_allows(actor, approval.get('required_role') or contract['required_role']):
             conn.rollback()
             return _approval_error(f"{contract['required_role']} role required", 403, approval)
+        if not _role_allowed_by_registry(actor, metadata.execution_roles):
+            conn.rollback()
+            return _approval_error('response action execution role required', 403, approval)
+        if not metadata.enabled:
+            conn.rollback()
+            return _approval_error(f"{metadata.stable_key} execution adapter is disabled", 403, approval)
+        platform_key = _current_platform_key()
+        if platform_key not in metadata.supported_platforms:
+            conn.rollback()
+            return _approval_error(f"{metadata.stable_key} is not supported on platform {platform_key}", 403, approval)
         if approval.get('approver_role') and ROLES.get(approval['approver_role'], 0) < ROLES[contract['required_role']]:
             conn.rollback()
             return _approval_error('approver role no longer satisfies action contract', 403, approval)
@@ -3255,13 +3692,14 @@ def _restart_approved_service(target):
     try:
         returncode, output = _run_fixed_service_argv(restart_argv, SERVICE_RESTART_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
-        result.update({'error': 'service restart timed out', 'output': exc.stdout or ''})
+        result.update({'error': 'service restart timed out'})
         return _recover_service_restart(result, rollback_argv)
     except OSError as exc:
-        result.update({'error': f'service restart execution failed: {exc}'})
+        result.update({'error': 'service restart execution failed'})
+        app.logger.error('service restart execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
         return _recover_service_restart(result, rollback_argv)
     if returncode != 0:
-        result.update({'error': f'service restart failed with exit={returncode}', 'returncode': returncode, 'output': output})
+        result.update({'error': f'service restart failed with exit={returncode}', 'returncode': returncode})
         return _recover_service_restart(result, rollback_argv)
     result.update({
         'executed': True,
@@ -3278,54 +3716,51 @@ def _recover_service_restart(result, rollback_argv):
         rollback_code, rollback_output = _run_fixed_service_argv(rollback_argv, SERVICE_RESTART_TIMEOUT_SECONDS)
         result.update({
             'rollback_returncode': rollback_code,
-            'rollback_output': rollback_output,
             'rollback_succeeded': rollback_code == 0,
         })
     except Exception as exc:
         result.update({
-            'rollback_error': str(exc),
+            'rollback_error': 'service recovery execution failed',
             'rollback_succeeded': False,
         })
+        app.logger.error('service recovery execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
     detail = result.get('error') or 'service restart failed'
     if result.get('rollback_succeeded'):
         detail = f"{detail}; recovery start completed"
     else:
         detail = f"{detail}; recovery start failed"
     result['detail'] = detail
-    raise RuntimeError(_json_dumps(result))
+    raise ResponseActionExecutionError(detail, result)
+
+
+def _execute_kill_process(target):
+    pid = int(target)
+    if pid == os.getpid():
+        raise ValueError('refusing to terminate the SAAOE process')
+    proc = psutil.Process(pid)
+    proc.terminate()
+    return {'executed': True, 'detail': f"Terminate signal sent to PID {pid} ({proc.name()})"}
 
 
 def _execute_response_action(action, target, dry_run=True):
     preview = approval_preview({'action': action, 'target': target, 'dry_run': dry_run})
     if dry_run:
         return {'executed': False, 'detail': preview['detail']}
-    contract = _approval_contract(action) or {}
+    metadata = _response_action_metadata(action)
+    contract = metadata.approval_contract() if metadata else {}
+    if not metadata:
+        raise ValueError('unsupported response action')
+    if not metadata.enabled:
+        raise ValueError(f'{action} execution adapter is disabled')
+    platform_key = _current_platform_key()
+    if platform_key not in metadata.supported_platforms:
+        raise ValueError(f'{action} is not supported on platform {platform_key}')
     if action in {'quarantine_file', 'block_ip'}:
         raise ValueError(f'{action} execution adapter is not available in Phase 4')
-    if contract.get('host_impacting') and action != 'restart_service':
-        return {'executed': False, 'detail': preview['detail']}
-    if action == 'restart_service':
-        return _restart_approved_service(target)
-    if action == 'kill_process':
-        pid = int(target)
-        if pid == os.getpid():
-            raise ValueError('refusing to terminate the SAAOE process')
-        proc = psutil.Process(pid)
-        proc.terminate()
-        return {'executed': True, 'detail': f"Terminate signal sent to PID {pid} ({proc.name()})"}
-    if action == 'quarantine_file':
-        path = os.path.abspath(os.path.join(BASE_DIR, target)) if not os.path.isabs(target) else os.path.abspath(target)
-        if not path.startswith(BASE_DIR + os.sep):
-            raise ValueError('quarantine target must be inside the SAAOE project directory')
-        os.makedirs(QUARANTINE_DIR, exist_ok=True)
-        dest = os.path.join(QUARANTINE_DIR, f"{uuid.uuid4().hex}_{os.path.basename(path)}")
-        shutil.move(path, dest)
-        return {'executed': True, 'detail': f"Moved {os.path.relpath(path, BASE_DIR)} to {os.path.relpath(dest, BASE_DIR)}"}
-    if action == 'create_incident_report':
-        return {'executed': True, 'detail': 'Incident report action recorded.'}
-    if action == 'block_ip':
-        raise ValueError('firewall adapter is not configured; action failed closed')
-    raise ValueError('unsupported response action')
+    if contract.get('host_impacting') and not contract.get('enabled'):
+        raise ValueError(f'{action} execution adapter is disabled')
+    _validator, executor = _validate_response_action_metadata(metadata)
+    return executor(target)
 
 
 def _preview_authorized_action(action, target, dry_run=True):
@@ -3710,9 +4145,7 @@ def login():
             start_user_session(user)
             _db_exec("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user['id']))
             audit_event('login', f"user:{username}", 'success', 'interactive login', actor=username, role=user['role'])
-            next_url = request.args.get('next') or url_for('dashboard')
-            if not next_url.startswith('/'):
-                next_url = url_for('dashboard')
+            next_url = _safe_local_redirect_target(request.args.get('next'))
             return redirect(next_url)
         audit_event('login', f"user:{username or 'unknown'}", 'failed', 'invalid credentials', actor=username or 'anonymous', role='anonymous')
         error = 'Invalid username or password.'
@@ -4633,18 +5066,23 @@ def api_response_approvals():
     action = str(payload.get('action') or '').strip()
     target = str(payload.get('target', '')).strip()
     dry_run = bool(payload.get('dry_run', True))
+    metadata = _response_action_metadata(action)
     contract = _approval_contract(action)
     if action not in RESPONSE_ACTIONS:
         audit_event('response_approval_failed', 'api_response_approvals', 'failed', f"unsupported action={action}")
         return jsonify(error='unsupported response action'), 400
+    if not _role_allowed_by_registry(user, metadata.request_roles):
+        audit_event('access_denied', f"response_action:{action}", 'denied', 'response action request role required')
+        return jsonify(error='response action request role required'), 403
     if not target:
         audit_event('response_approval_failed', 'api_response_approvals', 'failed', 'target is required')
         return jsonify(error='target is required'), 400
     try:
         preview = _preview_authorized_action(action, target, dry_run=dry_run)
     except Exception as exc:
-        audit_event('response_approval_failed', f"response_action:{action}", 'failed', str(exc))
-        return jsonify(error=str(exc)), 400
+        reason = _public_error_detail(exc, 'response action validation failed')
+        audit_event('response_approval_failed', f"response_action:{action}", 'failed', reason)
+        return jsonify(error=reason), 400
     incident_id = _clean_optional_text(payload.get('incident_id'))
     anomaly_id = _clean_optional_text(payload.get('anomaly_id'))
     if incident_id:
@@ -4807,19 +5245,23 @@ def api_response_approval_detail(approval_id):
             audit_event('response_action_succeeded', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
             audit_event('response_action_executed', f"approval:{approval_id}", 'success', result['detail'], details=result_details)
             return jsonify(success=True, result=result, approval=executed_approval)
+        except ResponseActionExecutionError as exc:
+            failure_result = exc.result
+            failure_detail = exc.detail
         except Exception as exc:
-            failure_result = _json_loads(str(exc), None)
-            failure_detail = failure_result.get('detail') if isinstance(failure_result, dict) else str(exc)
-            _db_exec(
-                "UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
-                (now, now, failure_detail, approval_id)
-            )
-            failed_approval = _approval_row(approval_id)
-            _approval_incident_event(failed_approval, 'response_failed', failure_detail, actor=user['username'], result='failed')
-            failed_details = _approval_structured_details(failed_approval, error=failure_detail, result='failed', execution_result=failure_result)
-            audit_event('response_action_failed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
-            audit_event('response_action_executed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
-            return jsonify(error=failure_detail, result=failure_result, approval=failed_approval), 400
+            failure_result = None
+            failure_detail = 'response action execution failed'
+            app.logger.error('response action execution failed correlation_id=%s exception_type=%s', uuid.uuid4().hex, type(exc).__name__)
+        _db_exec(
+            "UPDATE response_approvals SET executed_at = ?, updated_at = ?, result = ? WHERE id = ?",
+            (now, now, failure_detail, approval_id)
+        )
+        failed_approval = _approval_row(approval_id)
+        _approval_incident_event(failed_approval, 'response_failed', failure_detail, actor=user['username'], result='failed')
+        failed_details = _approval_structured_details(failed_approval, error=failure_detail, result='failed', execution_result=failure_result)
+        audit_event('response_action_failed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
+        audit_event('response_action_executed', f"approval:{approval_id}", 'failed', failure_detail, details=failed_details)
+        return jsonify(error=failure_detail, result=failure_result, approval=failed_approval), 400
     audit_event('response_approval_failed', f"approval:{approval_id}", 'failed', f"unsupported command={command}")
     return jsonify(error='unsupported command'), 400
 
@@ -4952,8 +5394,8 @@ def api_playbooks():
         existing_model = _playbooks_from_db(org_id)
         existing_pb = next((pb for pb in existing_model if existing and pb['id'] == existing['id']), None)
         definition = _normalize_playbook_definition(payload, existing=existing_pb, actor=user['username'], source=(existing_pb or {}).get('source') or payload.get('source') or PLAYBOOK_SOURCE_CUSTOM)
-    except ValueError as exc:
-        reason = str(exc)
+    except Exception as exc:
+        reason = _public_error_detail(exc, 'playbook validation failed')
         _write_rejected_audit(payload, reason, actor=user['username'], org_id=org_id)
         if reason == 'trigger threshold must be numeric':
             audit_event('playbook_create_failed', 'playbook:new', 'failed', 'threshold must be numeric')
@@ -5097,9 +5539,17 @@ def api_automation_rules():
             rules=_automation_rules_from_db(),
             history=_automation_history_from_db()
         )
-    payload = request.json or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _reject_rule_write('automation_rule_create_failed', 'automation_rule:new', 'request body must be a JSON object')
     if payload.get('action') == 'delete':
-        rid = int(payload.get('id', 0))
+        unknown_fields = _payload_unknown_fields(payload, RULE_DELETE_FIELDS)
+        if unknown_fields:
+            return _reject_rule_write('automation_rule_delete_failed', 'automation_rule:unknown', f"unknown automation rule delete fields: {', '.join(unknown_fields)}")
+        try:
+            rid = _positive_int(payload.get('id'))
+        except ValueError as exc:
+            return _reject_rule_write('automation_rule_delete_failed', 'automation_rule:unknown', exc.args[0])
         if not _db_query("SELECT id FROM automation_rules WHERE id = ?", (rid,)):
             audit_event('automation_rule_delete_failed', f"automation_rule:{rid}", 'failed', 'automation rule not found')
             return jsonify(error='automation rule not found'), 404
@@ -5107,14 +5557,15 @@ def api_automation_rules():
         load_persistent_state()
         audit_event('automation_rule_deleted', f"automation_rule:{rid}", 'success', 'automation rule deleted')
         return jsonify(success=True, rules=_automation_rules_from_db())
+    if 'action' in payload:
+        return _reject_rule_write('automation_rule_create_failed', 'automation_rule:new', 'unsupported automation rule command')
+    try:
+        validated = _validate_automation_rule_payload(payload)
+    except ValueError as exc:
+        return _reject_rule_write('automation_rule_create_failed', 'automation_rule:new', exc.args[0])
     rule = {
         'id': next_automation_rule_id,
-        'name': payload.get('name', 'New automation rule'),
-        'field': payload.get('field', 'severity'),
-        'operator': payload.get('operator', 'equals'),
-        'value': payload.get('value', 'critical'),
-        'action': payload.get('run_action', 'Isolate Process'),
-        'enabled': bool(payload.get('enabled', True)),
+        **validated,
     }
     _db_exec(
         "INSERT INTO automation_rules (id, name, field, operator, value, action, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -5142,9 +5593,17 @@ def api_anomaly_rules():
     if request.method == 'GET':
         return jsonify(rules=_anomaly_rules_from_db())
 
-    payload = request.json or {}
-    if 'action' in payload and payload['action'] == 'delete':
-        rid = int(payload.get('id', 0))
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _reject_rule_write('anomaly_rule_create_failed', 'anomaly_rule:new', 'request body must be a JSON object')
+    if payload.get('action') == 'delete':
+        unknown_fields = _payload_unknown_fields(payload, RULE_DELETE_FIELDS)
+        if unknown_fields:
+            return _reject_rule_write('anomaly_rule_delete_failed', 'anomaly_rule:unknown', f"unknown anomaly rule delete fields: {', '.join(unknown_fields)}")
+        try:
+            rid = _positive_int(payload.get('id'))
+        except ValueError as exc:
+            return _reject_rule_write('anomaly_rule_delete_failed', 'anomaly_rule:unknown', exc.args[0])
         if not _db_query("SELECT id FROM anomaly_rules WHERE id = ?", (rid,)):
             audit_event('anomaly_rule_delete_failed', f"anomaly_rule:{rid}", 'failed', 'anomaly rule not found')
             return jsonify(error='anomaly rule not found'), 404
@@ -5152,21 +5611,16 @@ def api_anomaly_rules():
         load_persistent_state()
         audit_event('anomaly_rule_deleted', f"anomaly_rule:{rid}", 'success', 'anomaly rule deleted')
         return jsonify(success=True, rules=_anomaly_rules_from_db())
+    if 'action' in payload:
+        return _reject_rule_write('anomaly_rule_create_failed', 'anomaly_rule:new', 'unsupported anomaly rule command')
 
     try:
-        threshold = float(payload.get('threshold', 90))
-    except (TypeError, ValueError):
-        audit_event('anomaly_rule_create_failed', 'anomaly_rule:new', 'failed', 'threshold must be numeric')
-        return jsonify(error='threshold must be numeric'), 400
+        validated = _validate_anomaly_rule_payload(payload)
+    except ValueError as exc:
+        return _reject_rule_write('anomaly_rule_create_failed', 'anomaly_rule:new', exc.args[0])
     rule = {
         'id': next_rule_id,
-        'metric': payload.get('metric', 'cpu_percent'),
-        'operator': payload.get('operator', '>'),
-        'threshold': threshold,
-        'severity': normalize_severity(payload.get('severity', 'high'), default='info'),
-        'enabled': bool(payload.get('enabled', True)),
-        'alert_in_app': bool(payload.get('alert_in_app', True)),
-        'alert_email': bool(payload.get('alert_email', False))
+        **validated,
     }
     _db_exec(
         "INSERT INTO anomaly_rules (id, metric, operator, threshold, severity, enabled, alert_in_app, alert_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

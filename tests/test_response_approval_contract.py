@@ -297,10 +297,11 @@ class ResponseApprovalContractTests(unittest.TestCase):
         approval_id = self.request_restart_approval(incident_id=incident_id)
         self.approve_as_admin2(approval_id)
 
-        response = self.client.post(
-            f'/api/response_approvals/{approval_id}',
-            json={'command': 'execute', 'target': 'saaoe-dashboard2'},
-        )
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'):
+            response = self.client.post(
+                f'/api/response_approvals/{approval_id}',
+                json={'command': 'execute', 'target': 'saaoe-dashboard2'},
+            )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json['error'], 'approval target or action does not match request payload')
 
@@ -313,7 +314,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
                 stdout = 'restart ok'
             return Proc()
 
-        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'), \
+                patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
                 patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
             response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
 
@@ -324,7 +326,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
         self.assertFalse(calls[0][1].get('shell', False))
         self.assertEqual(calls[0][1]['timeout'], self.appmod.SERVICE_RESTART_TIMEOUT_SECONDS)
 
-        response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'):
+            response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json['approval']['status'], 'consumed')
 
@@ -348,7 +351,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
                 proc.returncode = 0
             return proc
 
-        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'), \
+                patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
                 patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
             response = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
 
@@ -381,7 +385,8 @@ class ResponseApprovalContractTests(unittest.TestCase):
                 stdout = 'restart ok'
             return Proc()
 
-        with patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
+        with patch.object(self.appmod, '_current_platform_key', return_value='linux'), \
+                patch.object(self.appmod.shutil, 'which', return_value='/bin/systemctl'), \
                 patch.object(self.appmod.subprocess, 'run', side_effect=fake_run):
             threads = [threading.Thread(target=execute, args=(client_one,)), threading.Thread(target=execute, args=(client_two,))]
             for thread in threads:

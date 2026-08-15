@@ -133,8 +133,9 @@ class ControlledValidationEventCenterTests(unittest.TestCase):
         })
         self.assertEqual(approved.status_code, 200)
         executed = self.client.post(f'/api/response_approvals/{approval_id}', json={'command': 'execute'})
-        self.assertEqual(executed.status_code, 400)
-        self.assertIn('not available in Phase 4', executed.json['error'])
+        self.assertEqual(executed.status_code, 403)
+        self.assertIn('execution adapter is disabled', executed.json['error'])
+        self.assertEqual(executed.json['approval']['status'], 'approved')
 
         rejection = self.client.post('/api/response_approvals', json={
             'incident_id': event['incident']['id'],

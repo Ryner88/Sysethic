@@ -2,6 +2,10 @@
 
 These are the near-term fixes required to make SAAOE an operational tool that users can safely run on their own computers. The order matters: identity, storage, auditability, and safety controls must come before real host-impacting response actions.
 
+## Follow-Up Maintainability
+
+- Simplify the response-action registry by storing validator and executor callables directly and validating registry shape once during startup. This is a maintainability cleanup; it must preserve the current disabled-action, platform, digest, expiry, self-approval, and single-use safety contracts.
+
 ## Phase 1: Operational Foundation
 
 ### 1. Add Authentication and Local User Access Control
