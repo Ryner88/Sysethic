@@ -138,7 +138,7 @@ class TerminalHardeningTests(unittest.TestCase):
                 '#!/bin/sh\nprintf "abcdefghij%.0s" $(seq 1 200)\n',
                 '@echo off\npython -c "print(\'abcdefghij\' * 200, end=\'\')"\n',
             )
-            os.environ['PATH'] = f"{bin_dir}:{self.original_path}"
+            os.environ['PATH'] = os.pathsep.join([bin_dir, self.original_path])
             self.appmod.DIAGNOSTIC_COMMANDS = {
                 **self.original_commands,
                 'slowcmd': {()},
