@@ -70,8 +70,10 @@ SESSION_TIMEOUT_SECONDS = CONFIG.session_seconds
 MAX_SAMPLES = 240          # ~4 minutes @ 1s
 SAMPLE_INTERVAL = 1.0      # seconds
 SAMPLER_THREAD = None
+SAMPLER_STARTED_AT = 0.0
 SAMPLER_LAST_SUCCESS_AT = 0.0
 SAMPLER_HEALTH_MAX_AGE_SECONDS = 5.0
+SAMPLER_STARTUP_GRACE_SECONDS = 5.0
 
 cpu_series  = deque(maxlen=MAX_SAMPLES)
 mem_series  = deque(maxlen=MAX_SAMPLES)
@@ -2265,18 +2267,23 @@ def sampler():
 
 
 def start_sampler():
-    global SAMPLER_THREAD
+    global SAMPLER_STARTED_AT, SAMPLER_THREAD
     if SAMPLER_THREAD and SAMPLER_THREAD.is_alive():
         return SAMPLER_THREAD
+    SAMPLER_STARTED_AT = time.time()
     SAMPLER_THREAD = threading.Thread(target=sampler, daemon=True)
     SAMPLER_THREAD.start()
     return SAMPLER_THREAD
 
 
-def sampler_is_healthy(max_age_seconds=SAMPLER_HEALTH_MAX_AGE_SECONDS):
+def sampler_is_healthy(max_age_seconds=SAMPLER_HEALTH_MAX_AGE_SECONDS, startup_grace_seconds=SAMPLER_STARTUP_GRACE_SECONDS):
     thread_alive = bool(SAMPLER_THREAD and SAMPLER_THREAD.is_alive())
-    recent = SAMPLER_LAST_SUCCESS_AT > 0 and (time.time() - SAMPLER_LAST_SUCCESS_AT) <= max_age_seconds
-    return thread_alive and recent
+    if not thread_alive:
+        return False
+    now = time.time()
+    if SAMPLER_LAST_SUCCESS_AT <= 0:
+        return SAMPLER_STARTED_AT > 0 and (now - SAMPLER_STARTED_AT) <= startup_grace_seconds
+    return (now - SAMPLER_LAST_SUCCESS_AT) <= max_age_seconds
 
 
 start_sampler()

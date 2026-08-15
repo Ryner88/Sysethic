@@ -138,11 +138,24 @@ class InstallationStartupTests(unittest.TestCase):
         time.sleep(1.2)
         self.assertTrue(self.appmod.sampler_is_healthy())
         with patch.object(self.appmod, 'SAMPLER_THREAD', None), \
+                patch.object(self.appmod, 'SAMPLER_STARTED_AT', time.time() - 100), \
                 patch.object(self.appmod, 'SAMPLER_LAST_SUCCESS_AT', time.time() - 100):
             self.assertFalse(self.appmod.sampler_is_healthy())
             payload = self.cli.run_health(local=True)
             sampler = next(check for check in payload['checks'] if check['name'] == 'telemetry sampler')
             self.assertFalse(sampler['ok'])
+
+    def test_sampler_startup_grace_allows_initial_warmup_only(self):
+        thread = type('Thread', (), {'is_alive': lambda self: True})()
+        with patch.object(self.appmod, 'SAMPLER_THREAD', thread), \
+                patch.object(self.appmod, 'SAMPLER_STARTED_AT', time.time()), \
+                patch.object(self.appmod, 'SAMPLER_LAST_SUCCESS_AT', 0.0):
+            self.assertTrue(self.appmod.sampler_is_healthy())
+
+        with patch.object(self.appmod, 'SAMPLER_THREAD', thread), \
+                patch.object(self.appmod, 'SAMPLER_STARTED_AT', time.time() - 100), \
+                patch.object(self.appmod, 'SAMPLER_LAST_SUCCESS_AT', 0.0):
+            self.assertFalse(self.appmod.sampler_is_healthy())
 
     def test_healthz_returns_503_when_sampler_is_unhealthy(self):
         with patch('web.saaoe_api.sampler_is_healthy', return_value=False):
