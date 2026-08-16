@@ -656,4 +656,19 @@ Implementation:
 
 Status: Complete. Merged to `main` in PR #3 as `87c4270`.
 
+Manual sign-off status:
+
+- Completed: anonymous route protection.
+- Completed: viewer restrictions and audit logging.
+- Completed: analyst access and request restrictions.
+- Completed: separate-admin approval.
+- Completed: safe dry-run execution.
+- Completed: single-use and replay protection.
+- Completed: sanitized approval audit trail.
+- Blocked: P1 broken Anomalies page requires fix and retest before full manual sign-off.
+- Remaining: manually test invalid automation and anomaly-rule writes, verifying rejection, no mutation, and audit entries.
+- Remaining: verify cross-workspace isolation with Acme and Northstar accounts.
+- Remaining: safely verify disabled and unsupported response actions fail closed.
+- Remaining: run final health check and audit review.
+
 Why priority: once SAAOE controls local machine actions, tests become a safety requirement.
