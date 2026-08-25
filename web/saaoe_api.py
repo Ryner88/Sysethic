@@ -736,7 +736,7 @@ def init_db():
         default_org = conn.execute("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',)).fetchone()
         organization_count = conn.execute("SELECT COUNT(*) FROM organizations").fetchone()[0]
         legacy_null_tables = (
-            'users', 'audit_events', 'incidents', 'incident_events', 'response_approvals',
+            'users', 'incidents', 'incident_events', 'response_approvals',
             'validation_events', 'file_classifications', 'app_configuration', 'report_history',
         )
         needs_legacy_workspace = any(
@@ -757,7 +757,6 @@ def init_db():
             conn.execute("UPDATE organizations SET join_code = ? WHERE id = ?", (secrets.token_urlsafe(6), org[0]))
         if default_org_id is not None:
             conn.execute("UPDATE users SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-            conn.execute("UPDATE audit_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
             conn.execute("UPDATE incidents SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE incidents SET linked_anomalies = '[\"' || replace(anomaly_id, '\"', '\\\"') || '\"]' WHERE (linked_anomalies IS NULL OR linked_anomalies = '[]') AND anomaly_id IS NOT NULL")
         if default_org_id is not None:
@@ -1275,20 +1274,6 @@ def _seed_db():
                 )
             )
             _seed_audit_event('playbook_seeded', f"playbook:{definition['stable_key']}", definition['name'], details={'stable_key': definition['stable_key'], 'source': definition['source'], 'definition_digest': definition['definition_digest']})
-        elif pb['source'] == PLAYBOOK_SOURCE_SEEDED:
-            row = _db_query("SELECT source FROM playbooks WHERE id = ?", (existing[0]['id'],))[0]
-            if row['source'] == PLAYBOOK_SOURCE_SEEDED:
-                continue
-            _db_exec(
-                """
-                UPDATE playbooks
-                SET source = ?, updated_at = ?, updated_by = ?
-                WHERE id = ?
-                """,
-                (
-                    PLAYBOOK_SOURCE_SEEDED, datetime.now().isoformat(), 'system', existing[0]['id'],
-                ),
-            )
     if _table_count('automation_rules') == 0:
         for rule in automation_rules:
             _db_exec(
