@@ -739,7 +739,20 @@ def init_db():
             'users', 'incidents', 'incident_events', 'response_approvals',
             'validation_events', 'file_classifications', 'app_configuration', 'report_history',
         )
-        needs_legacy_workspace = any(
+        global_audit_event_sql = (
+            "event_type = 'playbook_seeded' "
+            "AND COALESCE(actor, '') = 'system' "
+            "AND COALESCE(role, '') = 'system' "
+            "AND COALESCE(result, '') = 'success'"
+        )
+        needs_legacy_audit_workspace = conn.execute(
+            f"""
+            SELECT 1 FROM audit_events
+            WHERE organization_id IS NULL AND NOT ({global_audit_event_sql})
+            LIMIT 1
+            """
+        ).fetchone()
+        needs_legacy_workspace = needs_legacy_audit_workspace or any(
             conn.execute(f"SELECT 1 FROM {table} WHERE organization_id IS NULL LIMIT 1").fetchone()
             for table in legacy_null_tables
         )
@@ -795,6 +808,14 @@ def init_db():
             conn.execute("UPDATE file_classifications SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
             conn.execute("UPDATE app_configuration SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
             conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute(
+                f"""
+                UPDATE audit_events
+                SET organization_id = ?
+                WHERE organization_id IS NULL AND NOT ({global_audit_event_sql})
+                """,
+                (default_org_id,)
+            )
         conn.execute("UPDATE file_classifications SET path = 'org:' || organization_id || ':' || path WHERE path NOT LIKE 'org:%'")
         conn.execute("UPDATE app_configuration SET key = 'org:' || organization_id || ':' || key WHERE key NOT LIKE 'org:%'")
         _backfill_playbook_definitions(conn)

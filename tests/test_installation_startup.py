@@ -261,6 +261,53 @@ class InstallationStartupTests(unittest.TestCase):
         audit = self.appmod._db_query("SELECT organization_id FROM audit_events WHERE target = ?", ('playbook:global',))[0]
         self.assertIsNone(audit['organization_id'])
 
+    def test_legacy_audit_events_backfill_while_seed_events_stay_global(self):
+        self.appmod._db_exec("DELETE FROM audit_events")
+        self.appmod._db_exec("DELETE FROM organizations")
+        self.appmod._db_exec(
+            """
+            INSERT INTO audit_events (
+                organization_id, timestamp, actor, role, event_type, target,
+                target_type, target_id, result, source, detail, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None, '2026-08-25T00:00:01', 'system', 'system', 'playbook_seeded',
+                'playbook:memory-pressure-response', 'playbook', 'memory-pressure-response',
+                'success', 'local', 'seeded playbook', None,
+            ),
+        )
+        self.appmod._db_exec(
+            """
+            INSERT INTO audit_events (
+                organization_id, timestamp, actor, role, event_type, target,
+                target_type, target_id, result, source, detail, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None, '2026-08-25T00:00:02', 'admin', 'admin', 'login',
+                'admin', 'user', 'admin', 'success', 'local', 'legacy login', None,
+            ),
+        )
+
+        self.appmod.init_db()
+
+        local = self.appmod._db_query("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',))
+        self.assertEqual(len(local), 1)
+        local_id = local[0]['id']
+        seed_audit = self.appmod._db_query(
+            "SELECT organization_id FROM audit_events WHERE event_type = ?",
+            ('playbook_seeded',),
+        )[0]
+        legacy_audit = self.appmod._db_query(
+            "SELECT organization_id FROM audit_events WHERE event_type = ?",
+            ('login',),
+        )[0]
+        self.assertIsNone(seed_audit['organization_id'])
+        self.assertEqual(legacy_audit['organization_id'], local_id)
+        logs = self.appmod._audit_rows(event_type='login', organization_id=local_id)
+        self.assertEqual([log['detail'] for log in logs], ['legacy login'])
+
     def test_health_local_checks_auth_contract_without_treating_404_as_success(self):
         self.appmod.create_user('admin', 'longpassword1', 'admin')
         before = self.appmod._db_query("SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ?", ('access_denied',))[0]['count']
