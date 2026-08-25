@@ -677,12 +677,13 @@ def init_db():
             );
             """
         )
+        conn.execute("BEGIN")
         _ensure_column(conn, 'users', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'users', 'session_version', 'INTEGER NOT NULL DEFAULT 1')
         _ensure_column(conn, 'organizations', 'join_policy', "TEXT NOT NULL DEFAULT 'join_with_code'")
         _ensure_column(conn, 'organizations', 'join_code', "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, 'join_requests', 'detail', 'TEXT')
-        _ensure_column(conn, 'audit_events', 'organization_id', 'INTEGER')
+        audit_org_column_added = _ensure_column(conn, 'audit_events', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'audit_events', 'target_type', 'TEXT')
         _ensure_column(conn, 'audit_events', 'target_id', 'TEXT')
         _ensure_column(conn, 'audit_events', 'details_json', 'TEXT')
@@ -739,19 +740,9 @@ def init_db():
             'users', 'incidents', 'incident_events', 'response_approvals',
             'validation_events', 'file_classifications', 'app_configuration', 'report_history',
         )
-        global_audit_event_sql = (
-            "event_type = 'playbook_seeded' "
-            "AND COALESCE(actor, '') = 'system' "
-            "AND COALESCE(role, '') = 'system' "
-            "AND COALESCE(result, '') = 'success'"
+        needs_legacy_audit_workspace = (
+            audit_org_column_added and conn.execute("SELECT 1 FROM audit_events LIMIT 1").fetchone()
         )
-        needs_legacy_audit_workspace = conn.execute(
-            f"""
-            SELECT 1 FROM audit_events
-            WHERE organization_id IS NULL AND NOT ({global_audit_event_sql})
-            LIMIT 1
-            """
-        ).fetchone()
         needs_legacy_workspace = needs_legacy_audit_workspace or any(
             conn.execute(f"SELECT 1 FROM {table} WHERE organization_id IS NULL LIMIT 1").fetchone()
             for table in legacy_null_tables
@@ -808,14 +799,8 @@ def init_db():
             conn.execute("UPDATE file_classifications SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
             conn.execute("UPDATE app_configuration SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
             conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-            conn.execute(
-                f"""
-                UPDATE audit_events
-                SET organization_id = ?
-                WHERE organization_id IS NULL AND NOT ({global_audit_event_sql})
-                """,
-                (default_org_id,)
-            )
+            if audit_org_column_added:
+                conn.execute("UPDATE audit_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE file_classifications SET path = 'org:' || organization_id || ':' || path WHERE path NOT LIKE 'org:%'")
         conn.execute("UPDATE app_configuration SET key = 'org:' || organization_id || ':' || key WHERE key NOT LIKE 'org:%'")
         _backfill_playbook_definitions(conn)
@@ -824,6 +809,9 @@ def init_db():
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_playbook_runs_anomaly_playbook ON playbook_runs(anomaly_id, playbook_id) WHERE anomaly_id IS NOT NULL")
         _backfill_vocabulary(conn)
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -832,6 +820,8 @@ def _ensure_column(conn, table, column, definition):
     columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        return True
+    return False
 
 
 def _slug(value):
