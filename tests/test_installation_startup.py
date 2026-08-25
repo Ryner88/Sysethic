@@ -253,40 +253,66 @@ class InstallationStartupTests(unittest.TestCase):
                 'global audit row', None,
             ),
         )
+        self.appmod._db_exec(
+            """
+            INSERT INTO audit_events (
+                organization_id, timestamp, actor, role, event_type, target,
+                target_type, target_id, result, source, detail, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None, '2026-08-25T00:00:02', 'anonymous', 'anonymous', 'login',
+                'user:unknown', 'user', 'unknown', 'failed', 'local',
+                'invalid credentials', None,
+            ),
+        )
 
         self.appmod.init_db()
 
         local = self.appmod._db_query("SELECT * FROM organizations WHERE name = ?", ('Local Workspace',))
         self.assertFalse(local)
-        audit = self.appmod._db_query("SELECT organization_id FROM audit_events WHERE target = ?", ('playbook:global',))[0]
-        self.assertIsNone(audit['organization_id'])
+        audits = self.appmod._db_query("SELECT organization_id FROM audit_events ORDER BY id")
+        self.assertEqual([audit['organization_id'] for audit in audits], [None, None])
 
-    def test_legacy_audit_events_backfill_while_seed_events_stay_global(self):
+    def test_legacy_audit_events_backfill_when_organization_column_is_added(self):
         self.appmod._db_exec("DELETE FROM audit_events")
         self.appmod._db_exec("DELETE FROM organizations")
+        self.appmod._db_exec("DROP TABLE audit_events")
+        self.appmod._db_exec(
+            """
+            CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                role TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                result TEXT NOT NULL,
+                source TEXT NOT NULL,
+                detail TEXT
+            )
+            """
+        )
         self.appmod._db_exec(
             """
             INSERT INTO audit_events (
-                organization_id, timestamp, actor, role, event_type, target,
-                target_type, target_id, result, source, detail, details_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp, actor, role, event_type, target, result, source, detail
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                None, '2026-08-25T00:00:01', 'system', 'system', 'playbook_seeded',
-                'playbook:memory-pressure-response', 'playbook', 'memory-pressure-response',
-                'success', 'local', 'seeded playbook', None,
+                '2026-08-25T00:00:01', 'system', 'system', 'playbook_seeded',
+                'playbook:memory-pressure-response', 'success', 'local', 'seeded playbook',
             ),
         )
         self.appmod._db_exec(
             """
             INSERT INTO audit_events (
-                organization_id, timestamp, actor, role, event_type, target,
-                target_type, target_id, result, source, detail, details_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp, actor, role, event_type, target, result, source, detail
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                None, '2026-08-25T00:00:02', 'admin', 'admin', 'login',
-                'admin', 'user', 'admin', 'success', 'local', 'legacy login', None,
+                '2026-08-25T00:00:02', 'admin', 'admin', 'login',
+                'admin', 'success', 'local', 'legacy login',
             ),
         )
 
@@ -295,18 +321,61 @@ class InstallationStartupTests(unittest.TestCase):
         local = self.appmod._db_query("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',))
         self.assertEqual(len(local), 1)
         local_id = local[0]['id']
-        seed_audit = self.appmod._db_query(
-            "SELECT organization_id FROM audit_events WHERE event_type = ?",
-            ('playbook_seeded',),
-        )[0]
-        legacy_audit = self.appmod._db_query(
-            "SELECT organization_id FROM audit_events WHERE event_type = ?",
-            ('login',),
-        )[0]
-        self.assertIsNone(seed_audit['organization_id'])
-        self.assertEqual(legacy_audit['organization_id'], local_id)
+        audit_orgs = self.appmod._db_query("SELECT event_type, organization_id FROM audit_events ORDER BY id")
+        self.assertEqual(
+            [(audit['event_type'], audit['organization_id']) for audit in audit_orgs],
+            [('playbook_seeded', local_id), ('login', local_id)],
+        )
         logs = self.appmod._audit_rows(event_type='login', organization_id=local_id)
         self.assertEqual([log['detail'] for log in logs], ['legacy login'])
+
+    def test_legacy_audit_migration_retries_after_failure(self):
+        self.appmod._db_exec("DROP TABLE audit_events")
+        self.appmod._db_exec("DELETE FROM organizations")
+        self.appmod._db_exec(
+            """
+            CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                role TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                result TEXT NOT NULL,
+                source TEXT NOT NULL,
+                detail TEXT
+            )
+            """
+        )
+        self.appmod._db_exec(
+            """
+            INSERT INTO audit_events (
+                timestamp, actor, role, event_type, target, result, source, detail
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                '2026-08-25T00:00:03', 'admin', 'admin', 'login',
+                'admin', 'success', 'local', 'retryable legacy login',
+            ),
+        )
+
+        with patch.object(self.appmod, '_backfill_playbook_definitions', side_effect=RuntimeError('forced migration stop')):
+            with self.assertRaisesRegex(RuntimeError, 'forced migration stop'):
+                self.appmod.init_db()
+
+        conn = self.appmod.sqlite3.connect(self.tmp.name)
+        try:
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(audit_events)").fetchall()]
+        finally:
+            conn.close()
+        self.assertNotIn('organization_id', columns)
+
+        self.appmod.init_db()
+
+        local = self.appmod._db_query("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',))
+        self.assertEqual(len(local), 1)
+        logs = self.appmod._audit_rows(event_type='login', organization_id=local[0]['id'])
+        self.assertEqual([log['detail'] for log in logs], ['retryable legacy login'])
 
     def test_health_local_checks_auth_contract_without_treating_404_as_success(self):
         self.appmod.create_user('admin', 'longpassword1', 'admin')
