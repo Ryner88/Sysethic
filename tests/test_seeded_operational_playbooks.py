@@ -11,6 +11,7 @@ class SeededOperationalPlaybooksTests(unittest.TestCase):
         cls.tmp = tempfile.NamedTemporaryFile(delete=False)
         cls.tmp.close()
         os.unlink(cls.tmp.name)
+        os.environ['SAAOE_DATABASE_PATH'] = cls.tmp.name
         os.environ['SAAOE_DB_PATH'] = cls.tmp.name
         os.environ['SAAOE_ENV'] = 'development'
         os.environ['SAAOE_SECRET_KEY'] = 'test-secret'
@@ -60,6 +61,29 @@ class SeededOperationalPlaybooksTests(unittest.TestCase):
             self.appmod._parse_trigger(row['trigger_json'])
             self.appmod._parse_steps_yaml(row['steps_yaml'])
             self.assertNotIn(row['recommended_action_key'], {'kill_process', 'quarantine_file', 'block_ip'})
+
+    def test_seed_repair_restores_exactly_eight_operational_seeded_playbooks(self):
+        expected = {
+            'runaway-cpu-process-review',
+            'memory-pressure-response',
+            'suspicious-network-connection-review',
+            'sensitive-file-access-review',
+            'human-approval-required',
+            'create-incident-report',
+            'quarantine-file-with-approval',
+            'block-ip-with-approval',
+        }
+        self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key = ?", ('custom', 'memory-pressure-response'))
+        self.appmod._db_exec("DELETE FROM playbooks WHERE stable_key = ?", ('block-ip-with-approval',))
+        self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key = ?", ('seeded', 'first-run-admin-setup'))
+
+        self.appmod._seed_db()
+
+        rows = self.appmod._db_query("SELECT stable_key FROM playbooks WHERE source = ? ORDER BY stable_key", ('seeded',))
+        self.assertEqual({row['stable_key'] for row in rows}, expected)
+        self.assertEqual(len(rows), 8)
+        system = self.appmod._db_query("SELECT source FROM playbooks WHERE stable_key = ?", ('first-run-admin-setup',))[0]
+        self.assertEqual(system['source'], 'system')
 
     def test_definition_update_toggle_validation_and_matching_query(self):
         cpu = self.appmod._db_query("SELECT * FROM playbooks WHERE stable_key = ?", ('runaway-cpu-process-review',))[0]

@@ -734,22 +734,35 @@ def init_db():
         _ensure_column(conn, 'app_configuration', 'organization_id', 'INTEGER')
         _ensure_column(conn, 'report_history', 'organization_id', 'INTEGER')
         default_org = conn.execute("SELECT id FROM organizations WHERE name = ?", ('Local Workspace',)).fetchone()
-        if not default_org:
+        organization_count = conn.execute("SELECT COUNT(*) FROM organizations").fetchone()[0]
+        legacy_null_tables = (
+            'users', 'audit_events', 'incidents', 'incident_events', 'response_approvals',
+            'validation_events', 'file_classifications', 'app_configuration', 'report_history',
+        )
+        needs_legacy_workspace = any(
+            conn.execute(f"SELECT 1 FROM {table} WHERE organization_id IS NULL LIMIT 1").fetchone()
+            for table in legacy_null_tables
+        )
+        if not default_org and (organization_count == 0 or needs_legacy_workspace):
             cur = conn.execute(
                 "INSERT INTO organizations (name, created_at, created_by) VALUES (?, ?, ?)",
                 ('Local Workspace', datetime.now().isoformat(), 'system')
             )
             default_org_id = cur.lastrowid
-        else:
+        elif default_org:
             default_org_id = default_org[0]
+        else:
+            default_org_id = None
         for org in conn.execute("SELECT id FROM organizations WHERE join_code = '' OR join_code IS NULL").fetchall():
             conn.execute("UPDATE organizations SET join_code = ? WHERE id = ?", (secrets.token_urlsafe(6), org[0]))
-        conn.execute("UPDATE users SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-        conn.execute("UPDATE audit_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-        conn.execute("UPDATE incidents SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        if default_org_id is not None:
+            conn.execute("UPDATE users SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute("UPDATE audit_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute("UPDATE incidents SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE incidents SET linked_anomalies = '[\"' || replace(anomaly_id, '\"', '\\\"') || '\"]' WHERE (linked_anomalies IS NULL OR linked_anomalies = '[]') AND anomaly_id IS NOT NULL")
-        conn.execute("UPDATE incident_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-        conn.execute("UPDATE response_approvals SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        if default_org_id is not None:
+            conn.execute("UPDATE incident_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute("UPDATE response_approvals SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         for approval in conn.execute("SELECT id, action, target, incident_id, anomaly_id, dry_run, payload_digest, preview_digest FROM response_approvals").fetchall():
             action_contract = APPROVAL_ACTION_CONTRACTS.get(approval[1], {})
             approval_payload = {
@@ -778,10 +791,11 @@ def init_db():
                 """,
                 (payload_digest, preview_digest, preview_detail, action_contract.get('action_type'), action_contract.get('required_role'), approval[0])
             )
-        conn.execute("UPDATE validation_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-        conn.execute("UPDATE file_classifications SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-        conn.execute("UPDATE app_configuration SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
-        conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+        if default_org_id is not None:
+            conn.execute("UPDATE validation_events SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute("UPDATE file_classifications SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute("UPDATE app_configuration SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
+            conn.execute("UPDATE report_history SET organization_id = ? WHERE organization_id IS NULL", (default_org_id,))
         conn.execute("UPDATE file_classifications SET path = 'org:' || organization_id || ':' || path WHERE path NOT LIKE 'org:%'")
         conn.execute("UPDATE app_configuration SET key = 'org:' || organization_id || ':' || key WHERE key NOT LIKE 'org:%'")
         _backfill_playbook_definitions(conn)
@@ -1228,8 +1242,16 @@ def _seed_db():
                 "INSERT INTO anomaly_rules (id, metric, operator, threshold, severity, enabled, alert_in_app, alert_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (rule['id'], rule['metric'], rule['operator'], rule['threshold'], rule['severity'], int(rule['enabled']), int(rule['alert_in_app']), int(rule['alert_email']))
             )
+    seeded_keys = {pb['stable_key'] for pb in seeded_playbooks}
+    for row in _db_query("SELECT id, stable_key FROM playbooks WHERE source = ?", (PLAYBOOK_SOURCE_SEEDED,)):
+        if row['stable_key'] not in seeded_keys:
+            _db_exec(
+                "UPDATE playbooks SET source = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+                (PLAYBOOK_SOURCE_SYSTEM, datetime.now().isoformat(), 'system', row['id']),
+            )
     for pb in seeded_playbooks + system_playbooks:
-        if not _db_query("SELECT id FROM playbooks WHERE stable_key = ?", (pb['stable_key'],)):
+        existing = _db_query("SELECT id FROM playbooks WHERE stable_key = ?", (pb['stable_key'],))
+        if not existing:
             definition = _normalize_playbook_definition(pb, actor='system', source=pb['source'])
             _db_exec(
                 """
@@ -1253,6 +1275,20 @@ def _seed_db():
                 )
             )
             _seed_audit_event('playbook_seeded', f"playbook:{definition['stable_key']}", definition['name'], details={'stable_key': definition['stable_key'], 'source': definition['source'], 'definition_digest': definition['definition_digest']})
+        elif pb['source'] == PLAYBOOK_SOURCE_SEEDED:
+            row = _db_query("SELECT source FROM playbooks WHERE id = ?", (existing[0]['id'],))[0]
+            if row['source'] == PLAYBOOK_SOURCE_SEEDED:
+                continue
+            _db_exec(
+                """
+                UPDATE playbooks
+                SET source = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    PLAYBOOK_SOURCE_SEEDED, datetime.now().isoformat(), 'system', existing[0]['id'],
+                ),
+            )
     if _table_count('automation_rules') == 0:
         for rule in automation_rules:
             _db_exec(
@@ -3432,9 +3468,18 @@ def _response_approval_from_row(row):
     approval['dry_run'] = bool(approval.get('dry_run'))
     contract = _approval_contract(approval.get('action'))
     approval['host_impacting'] = bool(contract and contract.get('host_impacting'))
-    approval['workflow_status'] = normalize_status(approval.get('status'), default='open')
-    approval['status_label'] = status_label(approval['workflow_status'])
-    approval['status_class'] = status_class(approval['workflow_status'])
+    raw_status = str(approval.get('status') or 'pending')
+    approval['workflow_status'] = normalize_status(raw_status, default='open')
+    approval_status_labels = {
+        'pending': status_label(approval['workflow_status']),
+        'approved': 'Approved',
+        'rejected': 'Rejected',
+        'cancelled': 'Cancelled',
+        'expired': 'Expired',
+        'consumed': 'Consumed',
+    }
+    approval['status_label'] = approval_status_labels.get(raw_status, raw_status.replace('_', ' ').title())
+    approval['status_class'] = f"status-{raw_status.replace('_', '-')}"
     return approval
 
 

@@ -38,34 +38,90 @@
 </div>
 <script>
 const CAN_ADMIN = {{ 'true' if can('admin') else 'false' }};
-async function loadApprovals(){
-  const data = await fetch('/api/response_approvals').then(r=>r.json());
-  document.querySelector('#approvalTable tbody').innerHTML = (data.approvals || []).map(a => `
-    <tr>
-      <td>${a.id}</td><td>${a.action}</td><td>${a.target}</td><td>${SysEthicVocabulary.statusBadge(a.workflow_status)}</td><td>${a.requested_by}</td>
+function approvalDisplayStatus(approval){
+  const status = approval.status || 'pending';
+  return status === 'pending' ? (approval.workflow_status || status) : status;
+}
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
+function renderApprovalRow(a){
+  const status = a.status || 'pending';
+  const displayStatus = approvalDisplayStatus(a);
+  const terminal = status !== 'pending';
+  const statusBadge = terminal
+    ? `<span class="vocabulary-badge status-${escapeHtml(status).replaceAll('_', '-')}">${escapeHtml(a.status_label || status)}</span>`
+    : SysEthicVocabulary.statusBadge(displayStatus);
+  return `
+    <tr id="approval-row-${escapeHtml(a.id)}" data-approval-id="${escapeHtml(a.id)}">
+      <td>${escapeHtml(a.id)}</td><td>${escapeHtml(a.action)}</td><td>${escapeHtml(a.target)}</td><td>${statusBadge}</td><td>${escapeHtml(a.requested_by)}</td>
       <td>
-        ${CAN_ADMIN ? `<button class="btn btn-small" onclick="approvalCommand('${a.id}','approve')">Approve</button>
-        <button class="btn btn-small" onclick="approvalCommand('${a.id}','reject')">Reject</button>
-        <button class="btn btn-small" onclick="approvalCommand('${a.id}','cancel')">Cancel</button>
-        <button class="btn btn-small" onclick="approvalCommand('${a.id}','execute')">Execute</button>` : ''}
+        ${CAN_ADMIN ? `<button class="btn btn-small approval-action" data-command="approve" data-id="${escapeHtml(a.id)}" ${terminal ? 'disabled' : ''}>Approve</button>
+        <button class="btn btn-small approval-action" data-command="reject" data-id="${escapeHtml(a.id)}" ${terminal ? 'disabled' : ''}>Reject</button>
+        <button class="btn btn-small approval-action" data-command="cancel" data-id="${escapeHtml(a.id)}" ${terminal ? 'disabled' : ''}>Cancel</button>
+        <button class="btn btn-small approval-action" data-command="execute" data-id="${escapeHtml(a.id)}" ${status === 'approved' ? '' : 'disabled'}>Execute</button>` : ''}
+        <div class="help row-message" id="approval-message-${escapeHtml(a.id)}"></div>
       </td>
     </tr>
-  `).join('');
+  `;
+}
+function setMessage(text, isError=false, id=null){
+  const global = document.getElementById('approvalMessage');
+  global.textContent = text || '';
+  global.style.color = isError ? 'var(--bad)' : '';
+  if(id){
+    const rowMessage = document.getElementById('approval-message-' + id);
+    if(rowMessage){
+      rowMessage.textContent = text || '';
+      rowMessage.style.color = isError ? 'var(--bad)' : '';
+    }
+  }
+}
+function replaceApprovalRow(approval){
+  const row = document.getElementById('approval-row-' + approval.id);
+  if(row){
+    row.outerHTML = renderApprovalRow(approval);
+  } else {
+    loadApprovals();
+  }
+}
+async function loadApprovals(){
+  const data = await fetch('/api/response_approvals').then(r=>r.json());
+  const approvals = data.approvals || [];
+  document.querySelector('#approvalTable tbody').innerHTML = approvals.length
+    ? approvals.map(renderApprovalRow).join('')
+    : '<tr><td colspan="6" class="help">No approval requests yet.</td></tr>';
 }
 async function approvalCommand(id, command){
+  const reason = decisionReason.value.trim();
+  if(command !== 'execute' && !reason){
+    setMessage('Decision reason is required.', true, id);
+    decisionReason.focus();
+    return;
+  }
   const body = {command};
-  if(command !== 'execute') body.reason = decisionReason.value;
+  if(command !== 'execute') body.reason = reason;
   const res = await fetch('/api/response_approvals/' + id, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   const data = await res.json();
-  document.getElementById('approvalMessage').textContent = data.error || data.result?.detail || command + ' complete';
-  loadApprovals();
+  if(data.approval) replaceApprovalRow(data.approval);
+  setMessage(data.error || data.result?.detail || command + ' complete', !res.ok, id);
+  if(res.ok && command !== 'execute') decisionReason.value = '';
 }
 document.getElementById('requestApproval').addEventListener('click', async () => {
-  const payload = {action: action.value, target: target.value, incident_id: incidentId.value || null, dry_run: dryRun.checked};
+  if(!target.value.trim()){
+    setMessage('Target is required.', true);
+    target.focus();
+    return;
+  }
+  const payload = {action: action.value, target: target.value.trim(), incident_id: incidentId.value || null, dry_run: dryRun.checked};
   const res = await fetch('/api/response_approvals', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
   const data = await res.json();
-  document.getElementById('approvalMessage').textContent = data.error || data.preview || 'Approval requested.';
+  setMessage(data.error || data.preview || 'Approval requested.', !res.ok);
   loadApprovals();
+});
+document.querySelector('#approvalTable tbody').addEventListener('click', event => {
+  const button = event.target.closest('.approval-action');
+  if(button) approvalCommand(button.dataset.id, button.dataset.command);
 });
 loadApprovals();
 </script>

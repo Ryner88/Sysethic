@@ -7,6 +7,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 DEVELOPMENT_MODES = {'development', 'dev', 'local'}
+PRODUCTION_MODES = {'production', 'prod'}
+ALLOWED_MODES = DEVELOPMENT_MODES | PRODUCTION_MODES
 
 
 class ConfigError(RuntimeError):
@@ -141,6 +143,9 @@ def load_config():
     load_environment()
 
     mode = _env('SAAOE_MODE', aliases=('SAAOE_ENV',), default='development').strip().lower()
+    if mode not in ALLOWED_MODES:
+        allowed = ', '.join(sorted(ALLOWED_MODES))
+        raise ConfigError(f'SAAOE_MODE must be one of: {allowed}.')
     debug = _bool_env('SAAOE_DEBUG', default=False)
     secret_key = _env('SAAOE_SECRET_KEY')
     if not secret_key:

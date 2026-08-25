@@ -47,7 +47,11 @@ function refreshPlaybooks(){
   fetch('/api/playbooks').then(r=>r.json()).then(data=>{
     const body = document.querySelector('#playbooksTable tbody');
     body.innerHTML = '';
-    data.playbooks.forEach(pb=>{
+    const playbooks = data.playbooks || [];
+    if(!playbooks.length){
+      body.innerHTML = '<tr><td colspan="7" class="help">No playbooks configured yet.</td></tr>';
+    }
+    playbooks.forEach(pb=>{
       const tr=document.createElement('tr');
       const ops = CAN_MUTATE_PLAYBOOKS ? `<button class='btn btn-small' data-toggle='${pb.id}'>${pb.enabled ? 'Disable' : 'Enable'}</button> <button class='btn btn-small' data-id='${pb.id}'>Delete</button>` : '';
       tr.innerHTML = `<td>${pb.name}<div class="help">${pb.stable_key || ''}</div><pre class="yaml-view compact">${pb.steps_yaml || pb.yaml || ''}</pre></td><td>${pb.kind || ''}<div class="help">${pb.category || 'system'}</div></td><td>${pb.metric} ${pb.operator} ${pb.threshold}</td><td>${pb.recommended_action_key || pb.action}<div class="help">approval: ${pb.required_approval_role || 'none'}</div></td><td>${pb.version || 1}<div class="help">${(pb.definition_digest || '').slice(0,12)}</div></td><td>${pb.enabled}</td><td>${ops}</td>`;
@@ -68,7 +72,11 @@ function refreshPlaybooks(){
 
     const runs = document.getElementById('playbookRuns');
     runs.innerHTML = '';
-    (data.runs || []).slice(-8).reverse().forEach(r=>{
+    const recentRuns = (data.runs || []).slice(-8).reverse();
+    if(!recentRuns.length){
+      runs.innerHTML = '<div class="help">No playbook runs recorded yet.</div>';
+    }
+    recentRuns.forEach(r=>{
       const d=document.createElement('div');
       d.innerHTML = `${r.timestamp} ${r.playbook_name || r.name} v${r.playbook_version || ''} -> ${r.recommended_action_key || r.action} ${SysEthicVocabulary.statusBadge(r.status)}`;
       runs.appendChild(d);

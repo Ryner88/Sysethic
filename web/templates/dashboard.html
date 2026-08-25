@@ -486,7 +486,11 @@
       $('procUpdated').textContent = data.updated || '—';
       $('activeProcesses').textContent = data.total_processes ?? (data.rows || []).length;
       const tb = $('procTable').querySelector('tbody'); tb.innerHTML='';
-      (data.rows||[]).forEach(r=>{
+      const rows = data.rows || [];
+      if(!rows.length){
+        tb.innerHTML = '<tr><td colspan="5" class="help">No process records available yet.</td></tr>';
+      }
+      rows.forEach(r=>{
         const tr=document.createElement('tr');
         tr.innerHTML = `<td>${r.pid}</td><td>${r.name}</td><td>${r.user}</td>
                         <td class="num">${fmt(r.cpu,1)}</td><td class="num">${fmt(r.mem_mb,1)}</td>`;
@@ -563,6 +567,9 @@
         tr.innerHTML = `<td>${new Date(r.timestamp).toLocaleString()}</td><td class="num">${fmt(r.cpu_percent,1)}</td><td class="num">${fmt(r.memory_percent,1)}</td><td class="num">${r.num_processes}</td><td class="num">${fmt(r.disk_read_bytes/1024/1024,2)} MB</td><td class="num">${fmt(r.disk_write_bytes/1024/1024,2)} MB</td><td class="num">${fmt(r.net_bytes_sent/1024/1024,2)} MB</td><td class="num">${fmt(r.net_bytes_recv/1024/1024,2)} MB</td>`;
         tb.appendChild(tr);
       });
+      if(!logs.length){
+        tb.innerHTML = '<tr><td colspan="8" class="help">No telemetry log records available yet.</td></tr>';
+      }
     }
 
     function startPolling(ms){ if(timer) clearInterval(timer); if(paused) return; tick(); timer=setInterval(tick,ms); }
@@ -741,7 +748,11 @@
       fetch('/api/assets').then(r=>r.json()).then(data=>{
         const tbody = document.querySelector('#assetsTable tbody');
         tbody.innerHTML = '';
-        data.assets.forEach(a=>{
+        const assets = data.assets || [];
+        if(!assets.length){
+          tbody.innerHTML = '<tr><td colspan="5" class="help">No asset records available yet.</td></tr>';
+        }
+        assets.forEach(a=>{
           const tr = document.createElement('tr');
           tr.innerHTML = `<td>${a.name}</td><td>${a.ip}</td><td>${a.health}</td><td>${a.active_processes}</td><td>${a.vuln_scan}</td>`;
           tbody.appendChild(tr);

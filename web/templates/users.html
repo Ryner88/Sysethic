@@ -111,7 +111,7 @@ async function loadUsers(){
     userSelect.innerHTML = `<option value="">Select user</option>${currentUsers.map(u => `<option value="${u.id}">${u.username}</option>`).join('')}`;
   }
   const permissionLabel = u => u.role === 'admin' ? 'Full access' : ((u.permissions || []).join(', ') || 'None');
-  body.innerHTML = currentUsers.map(u => `
+  body.innerHTML = currentUsers.length ? currentUsers.map(u => `
     <tr>
       <td>${u.username}</td>
       <td>${roleLabel(u.role)}</td>
@@ -121,20 +121,21 @@ async function loadUsers(){
       <td>${u.last_login_at || ''}</td>
       <td>${u.active ? `<button class="btn btn-small" onclick="disableUser(${u.id})">Disable</button>` : `<button class="btn btn-small" onclick="enableUser(${u.id})">Enable</button>`}</td>
     </tr>
-  `).join('');
+  `).join('') : '<tr><td colspan="7" class="help">No users found in this workspace.</td></tr>';
 }
 async function loadJoinRequests(){
   if (!CAN_WORKSPACE_ADMIN) return;
   const data = await fetch('/api/join_requests').then(r=>r.json());
   const body = document.querySelector('#joinRequestsTable tbody');
-  body.innerHTML = (data.requests || []).map(r => `
+  const requests = data.requests || [];
+  body.innerHTML = requests.length ? requests.map(r => `
     <tr>
       <td>${r.username}</td>
       <td>${r.status}</td>
       <td>${r.requested_at || ''}</td>
       <td>${r.status === 'pending' ? `<button class="btn btn-small" onclick="decideJoin(${r.id}, 'approve')">Approve</button> <button class="btn btn-small" onclick="decideJoin(${r.id}, 'deny')">Deny</button>` : ''}</td>
     </tr>
-  `).join('');
+  `).join('') : '<tr><td colspan="4" class="help">No join requests yet.</td></tr>';
 }
 async function decideJoin(id, action){
   const res = await fetch('/api/join_requests', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, action})});

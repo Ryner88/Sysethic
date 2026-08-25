@@ -366,7 +366,7 @@ def start(args):
     while time.time() < deadline:
         ok, _ = _http_health(config.host, config.port)
         if ok:
-            print(f'started pid={proc.pid}')
+            print(f'started pid={proc.pid} bind={config.host}:{config.port}')
             return 0
         if proc.poll() is not None:
             break
@@ -407,6 +407,7 @@ def run(args):
         from waitress import serve
     except ImportError as exc:
         raise CliError('Waitress is required. Run setup or install pinned dependencies.') from exc
+    print(f'serving bind={config.host}:{config.port}', flush=True)
     serve(app, host=config.host, port=config.port)
     return 0
 

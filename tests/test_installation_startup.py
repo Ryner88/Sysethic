@@ -216,6 +216,23 @@ class InstallationStartupTests(unittest.TestCase):
         audits = self.appmod._db_query("SELECT * FROM audit_events WHERE event_type = ?", ('admin_bootstrap_created',))
         self.assertFalse(audits)
 
+    def test_init_db_does_not_add_local_workspace_to_populated_multi_workspace_database(self):
+        self.appmod._db_exec("DELETE FROM audit_events")
+        self.appmod._db_exec("DELETE FROM organizations WHERE name = ?", ('Local Workspace',))
+        self.appmod._db_exec(
+            "INSERT INTO organizations (name, join_policy, join_code, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+            ('Workspace One', 'join_with_code', 'one', '2026-08-25T00:00:00', 'test'),
+        )
+        self.appmod._db_exec(
+            "INSERT INTO organizations (name, join_policy, join_code, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+            ('Workspace Two', 'join_with_code', 'two', '2026-08-25T00:00:00', 'test'),
+        )
+
+        self.appmod.init_db()
+
+        names = [row['name'] for row in self.appmod._db_query("SELECT name FROM organizations ORDER BY name")]
+        self.assertEqual(names, ['Workspace One', 'Workspace Two'])
+
     def test_health_local_checks_auth_contract_without_treating_404_as_success(self):
         self.appmod.create_user('admin', 'longpassword1', 'admin')
         before = self.appmod._db_query("SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ?", ('access_denied',))[0]['count']
@@ -310,6 +327,38 @@ class InstallationStartupTests(unittest.TestCase):
 
             stop.assert_called_once()
             self.assertIn('startup health failed', output.getvalue())
+
+    def test_start_and_run_log_packaged_bind_after_preflight(self):
+        class Proc:
+            pid = os.getpid()
+
+        config = type('Config', (), {'host': '127.0.0.1', 'port': 5097, 'protected_bind': True})()
+        preflight = {'healthy': True, 'status': 'healthy', 'checks': []}
+        with tempfile.TemporaryDirectory() as runtime:
+            pid_file = Path(runtime) / 'saaoe.pid.json'
+            log_file = Path(runtime) / 'saaoe.log'
+            with patch.object(self.cli, 'RUNTIME_DIR', Path(runtime)), \
+                    patch.object(self.cli, 'PID_FILE', pid_file), \
+                    patch.object(self.cli, 'LOG_FILE', log_file), \
+                    patch('web.saaoe_cli.load_config', return_value=config), \
+                    patch('web.saaoe_cli._port_available', return_value=True), \
+                    patch('web.saaoe_cli.run_health', return_value=preflight), \
+                    patch('web.saaoe_cli.subprocess.Popen', return_value=Proc()), \
+                    patch('web.saaoe_cli.psutil.Process') as process, \
+                    patch('web.saaoe_cli._http_health', return_value=(True, 'ok')), \
+                    redirect_stdout(io.StringIO()) as output:
+                process.return_value.create_time.return_value = 1.0
+                self.assertEqual(self.cli.start(type('Args', (), {})()), 0)
+            self.assertIn('started pid=', output.getvalue())
+            self.assertIn('bind=127.0.0.1:5097', output.getvalue())
+
+        with patch('web.saaoe_cli.load_config', return_value=config), \
+                patch('web.saaoe_cli._load_app') as load_app, \
+                patch.dict('sys.modules', {'waitress': type('Waitress', (), {'serve': staticmethod(lambda app, host, port: None)})}), \
+                redirect_stdout(io.StringIO()) as output:
+            load_app.return_value.create_app.return_value = object()
+            self.assertEqual(self.cli.run(type('Args', (), {'foreground': True})()), 0)
+        self.assertIn('serving bind=127.0.0.1:5097', output.getvalue())
 
     def test_successful_verified_stop_removes_pid_file(self):
         class Proc:

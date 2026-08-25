@@ -38,6 +38,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, 'SAAOE_SECRET_KEY is required'):
             self.load_with_env({'SAAOE_MODE': 'production'})
 
+    def test_unknown_mode_fails_closed(self):
+        with self.assertRaisesRegex(ConfigError, 'SAAOE_MODE must be one of'):
+            self.load_with_env({'SAAOE_MODE': 'staging', 'SAAOE_SECRET_KEY': 'x' * 32})
+
     def test_production_requires_strong_secret_key(self):
         with self.assertRaisesRegex(ConfigError, 'SAAOE_SECRET_KEY must be at least 32 characters'):
             self.load_with_env({'SAAOE_MODE': 'production', 'SAAOE_SECRET_KEY': 'short-secret'})
