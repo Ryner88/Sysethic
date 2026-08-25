@@ -62,7 +62,7 @@ class SeededOperationalPlaybooksTests(unittest.TestCase):
             self.appmod._parse_steps_yaml(row['steps_yaml'])
             self.assertNotIn(row['recommended_action_key'], {'kill_process', 'quarantine_file', 'block_ip'})
 
-    def test_seed_repair_restores_exactly_eight_operational_seeded_playbooks(self):
+    def test_seed_repair_restores_missing_seeded_rows_without_extra_seeded_sources(self):
         expected = {
             'runaway-cpu-process-review',
             'memory-pressure-response',
@@ -73,7 +73,6 @@ class SeededOperationalPlaybooksTests(unittest.TestCase):
             'quarantine-file-with-approval',
             'block-ip-with-approval',
         }
-        self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key = ?", ('custom', 'memory-pressure-response'))
         self.appmod._db_exec("DELETE FROM playbooks WHERE stable_key = ?", ('block-ip-with-approval',))
         self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key = ?", ('seeded', 'first-run-admin-setup'))
 
@@ -84,6 +83,27 @@ class SeededOperationalPlaybooksTests(unittest.TestCase):
         self.assertEqual(len(rows), 8)
         system = self.appmod._db_query("SELECT source FROM playbooks WHERE stable_key = ?", ('first-run-admin-setup',))[0]
         self.assertEqual(system['source'], 'system')
+
+    def test_seed_repair_preserves_existing_custom_or_system_playbook_ownership(self):
+        try:
+            self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key = ?", ('custom', 'memory-pressure-response'))
+            self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key = ?", ('system', 'human-approval-required'))
+
+            self.appmod._seed_db()
+
+            memory = self.appmod._db_query("SELECT source FROM playbooks WHERE stable_key = ?", ('memory-pressure-response',))[0]
+            approval = self.appmod._db_query("SELECT source FROM playbooks WHERE stable_key = ?", ('human-approval-required',))[0]
+            self.assertEqual(memory['source'], 'custom')
+            self.assertEqual(approval['source'], 'system')
+            seeded_keys = {
+                row['stable_key']
+                for row in self.appmod._db_query("SELECT stable_key FROM playbooks WHERE source = ?", ('seeded',))
+            }
+            self.assertNotIn('memory-pressure-response', seeded_keys)
+            self.assertNotIn('human-approval-required', seeded_keys)
+        finally:
+            self.appmod._db_exec("UPDATE playbooks SET source = ? WHERE stable_key IN (?, ?)", ('seeded', 'memory-pressure-response', 'human-approval-required'))
+
 
     def test_definition_update_toggle_validation_and_matching_query(self):
         cpu = self.appmod._db_query("SELECT * FROM playbooks WHERE stable_key = ?", ('runaway-cpu-process-review',))[0]

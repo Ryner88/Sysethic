@@ -233,6 +233,34 @@ class InstallationStartupTests(unittest.TestCase):
         names = [row['name'] for row in self.appmod._db_query("SELECT name FROM organizations ORDER BY name")]
         self.assertEqual(names, ['Workspace One', 'Workspace Two'])
 
+    def test_global_audit_events_do_not_trigger_local_workspace_backfill(self):
+        self.appmod._db_exec("DELETE FROM audit_events")
+        self.appmod._db_exec("DELETE FROM organizations WHERE name = ?", ('Local Workspace',))
+        self.appmod._db_exec(
+            "INSERT INTO organizations (name, join_policy, join_code, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+            ('Workspace One', 'join_with_code', 'one', '2026-08-25T00:00:00', 'test'),
+        )
+        self.appmod._db_exec(
+            """
+            INSERT INTO audit_events (
+                organization_id, timestamp, actor, role, event_type, target,
+                target_type, target_id, result, source, detail, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None, '2026-08-25T00:00:01', 'system', 'system', 'playbook_seeded',
+                'playbook:global', 'playbook', 'global', 'success', 'local',
+                'global audit row', None,
+            ),
+        )
+
+        self.appmod.init_db()
+
+        local = self.appmod._db_query("SELECT * FROM organizations WHERE name = ?", ('Local Workspace',))
+        self.assertFalse(local)
+        audit = self.appmod._db_query("SELECT organization_id FROM audit_events WHERE target = ?", ('playbook:global',))[0]
+        self.assertIsNone(audit['organization_id'])
+
     def test_health_local_checks_auth_contract_without_treating_404_as_success(self):
         self.appmod.create_user('admin', 'longpassword1', 'admin')
         before = self.appmod._db_query("SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ?", ('access_denied',))[0]['count']
