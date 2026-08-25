@@ -26,12 +26,13 @@ const Vocabulary = SysEthicVocabulary;
 async function loadIncidents(){
   const data = await fetch('/api/incidents').then(r=>r.json());
   const body = document.querySelector('#incidentTable tbody');
-  body.innerHTML = (data.incidents || []).map(i => `
+  const incidents = data.incidents || [];
+  body.innerHTML = incidents.length ? incidents.map(i => `
     <tr>
       <td>${i.id}</td><td>${i.title}</td><td>${Vocabulary.severityBadge(i.severity)}</td><td>${Vocabulary.statusBadge(i.status)}</td><td>${i.owner || ''}</td><td>${i.updated_at}</td>
       <td><button class="btn btn-small" onclick="openIncident('${i.id}')">Open</button></td>
     </tr>
-  `).join('');
+  `).join('') : '<tr><td colspan="7" class="help">No incidents recorded yet.</td></tr>';
 }
 async function openIncident(id){
   const data = await fetch('/api/incidents/' + id).then(r=>r.json());

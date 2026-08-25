@@ -135,7 +135,7 @@ function renderAnomalies(data) {
         <button class="btn btn-small" onclick="respond('${a.id}')">Respond</button>
       </td>
     </tr>`).join('');
-  document.querySelector('#anomalyTable tbody').innerHTML = rows;
+  document.querySelector('#anomalyTable tbody').innerHTML = rows || '<tr><td colspan="8" class="help">No anomaly records match the current filters.</td></tr>';
 
   const timelineData = data.anomalies.map(a=>({x: new Date(a.timestamp), y: a.value}));
   timelineChart.data.labels = timelineData.map(p=>p.x);

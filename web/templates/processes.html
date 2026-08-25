@@ -75,7 +75,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const tb = $('procTable').querySelector('tbody'); tb.innerHTML='';
     // Count states for stat cards
     let running=0, suspended=0, sandboxed=0, terminated=0;
-    (data.rows||[]).forEach(r=>{
+    const rows = data.rows || [];
+    if(!rows.length){
+      tb.innerHTML = '<tr><td colspan="9" class="help">No process records available yet.</td></tr>';
+    }
+    rows.forEach(r=>{
       // State logic
       let state = 'running', stateLabel = 'Running', stateClass = 'running';
       if(r.status==='suspended'){ state='suspended'; stateLabel='Suspended'; stateClass='suspended'; suspended++; }

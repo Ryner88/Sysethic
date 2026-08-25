@@ -119,7 +119,9 @@ async function loadAuditLogs() {
   const filtered = logs.filter(l => (!rf||l.role===rf) && (!sf||SysEthicVocabulary.normalizeSeverity(l.severity)===sf) && (!of||l.outcome===of));
 
   // Table
-  document.getElementById('logsTable').querySelector('tbody').innerHTML = filtered.map(renderLogRow).join('');
+  document.getElementById('logsTable').querySelector('tbody').innerHTML = filtered.length
+    ? filtered.map(renderLogRow).join('')
+    : '<tr><td colspan="9" class="help">No audit events match the current filters.</td></tr>';
   document.getElementById('eventCount').textContent = filtered.length;
 }
 

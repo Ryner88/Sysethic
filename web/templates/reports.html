@@ -49,12 +49,18 @@ fetch('/api/reports/summary').then(r=>r.json()).then(data => {
   document.getElementById('criticalCount').textContent = data.critical_count;
   document.getElementById('highRiskCount').textContent = data.high_risk_count;
   document.getElementById('auditCount').textContent = data.audit_count;
-  document.querySelector('#frameworkTable tbody').innerHTML = Object.entries(data.frameworks)
-    .map(([name, controls]) => `<tr><td>${name}</td><td>${controls.map(c=>`<span class="badge">${c}</span>`).join('')}</td></tr>`).join('');
-  document.querySelector('#reportAnomalies tbody').innerHTML = data.anomalies.slice(0, 12)
-    .map(a => `<tr><td>${new Date(a.timestamp).toLocaleString()}</td><td>${Vocabulary.severityBadge(a.severity)}</td><td><span class="risk ${Vocabulary.risk(a.risk_score).css_class}">${a.risk_score} ${Vocabulary.risk(a.risk_score).label}</span></td><td>${a.frameworks.slice(0,3).join(', ')}</td></tr>`).join('');
-  document.querySelector('#reportIncidents tbody').innerHTML = (data.incidents || []).slice(0, 12)
-    .map(i => `<tr><td>${new Date(i.updated_at).toLocaleString()}</td><td>${i.id}</td><td>${Vocabulary.severityBadge(i.severity)}</td><td>${Vocabulary.statusBadge(i.status)}</td></tr>`).join('');
+  const frameworks = Object.entries(data.frameworks || {});
+  document.querySelector('#frameworkTable tbody').innerHTML = frameworks.length
+    ? frameworks.map(([name, controls]) => `<tr><td>${name}</td><td>${controls.map(c=>`<span class="badge">${c}</span>`).join('')}</td></tr>`).join('')
+    : '<tr><td colspan="2" class="help">No framework coverage data yet.</td></tr>';
+  const anomalies = (data.anomalies || []).slice(0, 12);
+  document.querySelector('#reportAnomalies tbody').innerHTML = anomalies.length
+    ? anomalies.map(a => `<tr><td>${new Date(a.timestamp).toLocaleString()}</td><td>${Vocabulary.severityBadge(a.severity)}</td><td><span class="risk ${Vocabulary.risk(a.risk_score).css_class}">${a.risk_score} ${Vocabulary.risk(a.risk_score).label}</span></td><td>${a.frameworks.slice(0,3).join(', ')}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="help">No anomaly records available for reports yet.</td></tr>';
+  const incidents = (data.incidents || []).slice(0, 12);
+  document.querySelector('#reportIncidents tbody').innerHTML = incidents.length
+    ? incidents.map(i => `<tr><td>${new Date(i.updated_at).toLocaleString()}</td><td>${i.id}</td><td>${Vocabulary.severityBadge(i.severity)}</td><td>${Vocabulary.statusBadge(i.status)}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="help">No incident records available for reports yet.</td></tr>';
 });
 </script>
 {% endblock %}

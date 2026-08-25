@@ -28,9 +28,10 @@ async function loadValidation(){
   document.getElementById('validationButtons').innerHTML = Object.entries(types).map(([key, cfg]) =>
     `<button class="btn" onclick="runValidation('${key}')" title="${cfg.detail || ''}">${cfg.label || key}</button>`
   ).join('');
-  document.querySelector('#validationTable tbody').innerHTML = (data.events || []).map(e => `
+  const events = data.events || [];
+  document.querySelector('#validationTable tbody').innerHTML = events.length ? events.map(e => `
     <tr><td>${e.id}</td><td>${types[e.event_type]?.label || e.event_type}</td><td>${SysEthicVocabulary.statusBadge(e.status)}</td><td>${e.anomaly_id || ''}</td><td>${e.incident_id || ''}</td><td>${e.detail || ''}</td><td>${e.created_at}</td></tr>
-  `).join('');
+  `).join('') : '<tr><td colspan="7" class="help">No validation events recorded yet.</td></tr>';
 }
 async function runValidation(event_type){
   const res = await fetch('/api/validation_events', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({event_type})});

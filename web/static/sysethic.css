@@ -99,6 +99,9 @@ select{padding:7px 8px}
 .status-open{background:#17313a;color:#8ed9e8;border-color:#285563;}
 .status-investigating{background:#3f300a;color:#f5c451;border-color:#80651d;}
 .status-waiting-for-approval{background:#281c40;color:#c7adff;border-color:#65449b;}
+.status-approved{background:#073a28;color:#78e4ad;border-color:#238b5c;}
+.status-rejected,.status-cancelled,.status-expired{background:#3d1418;color:#ff8b8f;border-color:#a53239;}
+.status-consumed{background:#292d30;color:#b8c1c5;border-color:#505b60;}
 .status-resolved{background:#073a28;color:#78e4ad;border-color:#238b5c;}
 .status-dismissed{background:#292d30;color:#b8c1c5;border-color:#505b60;}
 .status-failed{background:#3d1418;color:#ff8b8f;border-color:#a53239;}
