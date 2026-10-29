@@ -85,7 +85,7 @@ See [SAAOE UML Diagrams](docs/uml-diagrams.md) for component, domain, sequence, 
    venv/bin/python -m web.saaoe_cli start
    ```
 
-5. Open http://127.0.0.1:5001 in your browser.
+5. Open http://127.0.0.1:5001 in your browser for the public homepage, then sign in at `/login` to access the protected `/dashboard`.
 
 6. Check status and health:
    ```bash
@@ -125,3 +125,7 @@ python -m unittest discover
 ```
 
 Use the Python interpreter from the setup-created virtual environment; without activation, run `venv/bin/python -m unittest discover`.
+
+### Public homepage and workspace routes
+
+The homepage at `/` introduces SysEthic without requiring authentication or exposing operational data. The existing sign-in page remains at `/login`; the private dashboard now lives at `/dashboard`. Existing navigation links and successful sign-ins lead to the protected dashboard. Operational APIs retain their existing authentication and role checks. The homepage ships with the same Flask server and does not require separate hosting.
