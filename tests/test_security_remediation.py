@@ -84,7 +84,7 @@ class SecurityRemediationTests(unittest.TestCase):
                     data={'username': 'admin', 'password': 'longpassword1'},
                 )
                 self.assertEqual(response.status_code, 302)
-                self.assertEqual(response.location, '/')
+                self.assertEqual(response.location, '/dashboard')
 
         self.client.get('/logout')
         response = self.client.post(
