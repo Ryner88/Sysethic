@@ -46,7 +46,7 @@ class RuleValidationAndAuthInventoryTests(unittest.TestCase):
         self.assertEqual(len(after), before)
 
     def test_public_endpoint_allowlist_is_exact(self):
-        expected_public_endpoints = {'static', 'login', 'logout', 'setup', 'signup', 'join', 'health'}
+        expected_public_endpoints = {'static', 'home', 'login', 'logout', 'setup', 'signup', 'join', 'health'}
         self.assertEqual(self.appmod.PUBLIC_ENDPOINTS, expected_public_endpoints)
 
         public_routes = {}
@@ -55,6 +55,7 @@ class RuleValidationAndAuthInventoryTests(unittest.TestCase):
                 public_routes.setdefault(rule.endpoint, set()).add(rule.rule)
 
         self.assertEqual(public_routes, {
+            'home': {'/'},
             'health': {'/health', '/healthz'},
             'join': {'/join'},
             'login': {'/login'},
@@ -64,7 +65,7 @@ class RuleValidationAndAuthInventoryTests(unittest.TestCase):
         })
 
     def test_anonymous_routes_are_protected_by_category(self):
-        protected_pages = ['/', '/terminal', '/users']
+        protected_pages = ['/dashboard', '/terminal', '/users']
         for path in protected_pages:
             with self.subTest(path=path):
                 response = self.client.get(path)
@@ -76,6 +77,10 @@ class RuleValidationAndAuthInventoryTests(unittest.TestCase):
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 401)
+
+        homepage = self.client.get('/')
+        self.assertEqual(homepage.status_code, 200)
+        self.assertIn(b'SysEthic', homepage.data)
 
         public_response = self.client.get('/healthz')
         self.assertIn(public_response.status_code, {200, 503})
