@@ -31,7 +31,7 @@ class SecurityWorkflowTests(unittest.TestCase):
         return self.client.post('/login', data={'username': username, 'password': password})
 
     def test_operational_security_workflow(self):
-        response = self.client.get('/')
+        response = self.client.get('/dashboard')
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.location, '/setup')
 
@@ -231,7 +231,7 @@ class SecurityWorkflowTests(unittest.TestCase):
             self.appmod.create_user('pending', 'longpassword6', 'viewer', active=False)
             client = self.appmod.app.test_client()
 
-            response = client.get('/')
+            response = client.get('/dashboard')
             self.assertEqual(response.status_code, 302)
             self.assertEqual(response.location, '/setup')
 
