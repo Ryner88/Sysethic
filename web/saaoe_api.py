@@ -3946,7 +3946,7 @@ def _auth_failed(status, message):
 ROLES = {'viewer': 1, 'analyst': 2, 'admin': 3, 'system': 4}
 PERMISSIONS = {'manage_members', 'mutate_playbooks', 'access_terminal'}
 
-PUBLIC_ENDPOINTS = {'static', 'login', 'logout', 'setup', 'signup', 'join', 'health'}
+PUBLIC_ENDPOINTS = {'static', 'home', 'login', 'logout', 'setup', 'signup', 'join', 'health'}
 
 ADMIN_ENDPOINTS = {
     'automation_page',
@@ -4318,6 +4318,11 @@ def logout():
 
 
 @app.route('/')
+def home():
+    return render_template('landing.html')
+
+
+@app.route('/dashboard')
 def dashboard():
     return render_template('dashboard.html')
 
