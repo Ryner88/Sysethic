@@ -119,7 +119,8 @@ The CLI health command validates:
 | Configuration | Production-like mode, strong secret, debug disabled, loopback binding |
 | Database | Connection succeeds and required schema tables exist |
 | Telemetry sampler | In-process sampler buffer is populated |
-| Public homepage | Anonymous `GET /` returns the public product page |\n| Protected page | Anonymous `GET /dashboard` redirects to setup or login |
+| Public homepage | Anonymous `GET /` returns the public product page |
+| Protected page | Anonymous `GET /dashboard` redirects to setup or login |
 | Protected API | Anonymous request returns the defined authentication/setup error |
 | Application | `/healthz` returns the expected SAAOE service/version payload |
 | Live endpoint | Running service responds on loopback |
