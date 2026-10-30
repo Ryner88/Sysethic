@@ -242,7 +242,9 @@ def run_health(local=False):
 
     with appmod.app.test_client() as client:
         probe_environ = {'saaoe.healthcheck': '1'}
-        page = client.get('/', environ_overrides=probe_environ)
+        home = client.get('/', environ_overrides=probe_environ)
+        checks.append({'name': 'public homepage', 'ok': home.status_code == 200 and b'SysEthic' in home.data, 'detail': f'status={home.status_code}'})
+        page = client.get('/dashboard', environ_overrides=probe_environ)
         login_redirect = page.status_code == 302 and '/login' in (page.location or '')
         setup_redirect = page.status_code == 302 and '/setup' in (page.location or '')
         checks.append({'name': 'protected page', 'ok': login_redirect or setup_redirect, 'detail': f'status={page.status_code}'})
