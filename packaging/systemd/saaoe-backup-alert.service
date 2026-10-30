@@ -1,0 +1,6 @@
+[Unit]
+Description=Record SysEthic backup failure for monitoring
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p daemon.err -t saaoe-backup SysEthic backup failed; inspect saaoe-backup.service
