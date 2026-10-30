@@ -4135,6 +4135,13 @@ def audit_unlogged_protected_mutation(response):
 
 @app.context_processor
 def inject_auth_context():
+    if request.endpoint == 'home':
+        try:
+            user = current_user()
+        except sqlite3.Error:
+            user = None
+        return {'current_user': user}
+
     user = current_user()
     organization = organization_for_user(user)
 

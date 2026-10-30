@@ -1,7 +1,10 @@
 import importlib
 import os
+import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
 class PublicLandingTests(unittest.TestCase):
@@ -48,6 +51,34 @@ class PublicLandingTests(unittest.TestCase):
         self.assertIn('/login', protected.location)
         self.assertIn('/dashboard', protected.location)
         self.assertEqual(self.client.get('/api/usage').status_code, 401)
+
+    def test_anonymous_home_does_not_query_unavailable_database(self):
+        with patch.object(self.appmod, '_db_query', side_effect=sqlite3.OperationalError('database is locked')) as query:
+            response = self.client.get('/')
+
+        query.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Operational clarity.', response.data)
+        self.assertIn(b'href="/login"', response.data)
+
+    def test_signed_in_home_falls_back_to_guest_links_when_database_is_unavailable(self):
+        self.appmod.create_user('admin', 'longpassword1', 'admin')
+        self.client.post('/login', data={'username': 'admin', 'password': 'longpassword1'})
+
+        with patch.object(self.appmod, '_db_query', side_effect=sqlite3.OperationalError('unable to open database file')) as query:
+            response = self.client.get('/')
+
+        query.assert_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'Operational clarity.', response.data)
+        self.assertIn(b'href="/login"', response.data)
+        self.assertNotIn(b'href="/dashboard"', response.data)
+
+    def test_page_route_inventory_matches_public_and_protected_routes(self):
+        document = (Path(__file__).resolve().parents[1] / 'docs' / 'method-function-list-meaning-and-design.md').read_text()
+        page_routes = document.split('### Page Routes', 1)[1].split('### Telemetry APIs', 1)[0]
+        self.assertIn('- `/`: public homepage.', page_routes)
+        self.assertIn('- `/dashboard`: protected workspace dashboard.', page_routes)
 
     def test_signed_in_user_can_open_dashboard_from_home(self):
         self.appmod.create_user('admin', 'longpassword1', 'admin')
