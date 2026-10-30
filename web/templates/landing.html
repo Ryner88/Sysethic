@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#081016">
+  <meta name="description" content="SysEthic connects operational monitoring, incident investigation, and controlled response in one secure workspace.">
+  <title>SysEthic | Operational clarity. Accountable action.</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='landing.css') }}">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="{{ url_for('home') }}" aria-label="SysEthic home">
+        <span class="brand-symbol" aria-hidden="true">S<span>/</span></span>
+        Sys<span class="accent">Ethic</span>
+      </a>
+      <nav class="nav" aria-label="Main navigation">
+        <a class="nav-section" href="#capabilities">Capabilities</a>
+        <a class="nav-section" href="#approach">How it works</a>
+        {% if current_user %}
+        <a class="nav-signin" href="{{ url_for('dashboard') }}">Open workspace ↗</a>
+        {% else %}
+        <a class="nav-signin" href="{{ url_for('login') }}">Sign in ↗</a>
+        {% endif %}
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> MONITOR · INVESTIGATE · RESPOND</p>
+        <h1 id="hero-title">Operational clarity.<br><span class="accent">Accountable action.</span></h1>
+        <p class="hero-description">Understand what is happening across your environment, investigate incidents, and coordinate approved responses—with traceability built into each step.</p>
+        <div class="hero-actions">
+          {% if current_user %}
+          <a class="button primary" href="{{ url_for('dashboard') }}">Open your workspace <span aria-hidden="true">↗</span></a>
+          {% else %}
+          <a class="button primary" href="{{ url_for('login') }}">Sign in to SysEthic <span aria-hidden="true">↗</span></a>
+          {% endif %}
+          <a class="button secondary" href="#capabilities">Explore capabilities <span aria-hidden="true">↓</span></a>
+        </div>
+        <div class="trust-line"><span>✓ Role-based access</span><span>✓ Audited decisions</span><span>✓ Approval controls</span></div>
+      </div>
+
+      <div class="preview" aria-label="Illustrative SysEthic workflow preview">
+        <div class="preview-bar"><div class="dots" aria-hidden="true"><i></i><i></i><i></i></div><span>SYSETHIC / OPERATIONS</span><span class="preview-tag">UI PREVIEW</span></div>
+        <div class="preview-body">
+          <div class="preview-head"><div><small>WORKSPACE OVERVIEW</small><h2>Built for controlled operations</h2></div><span class="green-pill">● Secure workflow</span></div>
+          <div class="mini-cards">
+            <div><span class="small-icon">01</span><strong>Monitor</strong><small>System activity</small></div>
+            <div><span class="small-icon amber">02</span><strong>Investigate</strong><small>Incident context</small></div>
+            <div><span class="small-icon lilac">03</span><strong>Approve</strong><small>Bounded action</small></div>
+          </div>
+          <p class="preview-label">ILLUSTRATIVE WORKFLOW — NOT LIVE DATA</p>
+          <div class="event"><span class="indicator"></span><span class="event-glyph">◎</span><div><strong>Operational signal</strong><small>Visibility into system activity</small></div><em>Observe</em></div>
+          <div class="event"><span class="indicator amber-bg"></span><span class="event-glyph">◇</span><div><strong>Incident review</strong><small>Investigation and coordination</small></div><em>Review</em></div>
+          <div class="event"><span class="indicator lilac-bg"></span><span class="event-glyph">✓</span><div><strong>Decision trail</strong><small>Approvals and audit evidence</small></div><em>Record</em></div>
+          <div class="preview-footer"><span>DESIGNED FOR TRACEABILITY</span><span>SYS / ETHIC</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section capabilities" id="capabilities" aria-labelledby="cap-title">
+      <div class="shell">
+        <p class="kicker">THE PLATFORM</p>
+        <div class="section-heading"><h2 id="cap-title">See clearly.<br>Respond deliberately.</h2><p>Connected tools for operational awareness, investigation, and responsible decision-making.</p></div>
+        <div class="feature-grid">
+          <article class="feature"><span class="feature-icon" aria-hidden="true">◎</span><h3>Operational monitoring</h3><p>View system metrics, processes, anomalies, and activity in one workspace.</p></article>
+          <article class="feature"><span class="feature-icon" aria-hidden="true">◇</span><h3>Incident management</h3><p>Track investigations, status updates, and incident context together.</p></article>
+          <article class="feature"><span class="feature-icon" aria-hidden="true">↗</span><h3>Controlled response</h3><p>Use approval workflows and bounded actions before changing systems.</p></article>
+          <article class="feature"><span class="feature-icon" aria-hidden="true">≡</span><h3>Audit trails</h3><p>Review recorded events and the decisions behind operational activity.</p></article>
+          <article class="feature"><span class="feature-icon" aria-hidden="true">⌘</span><h3>Playbook workflows</h3><p>Connect signals to defined, reviewable operational procedures.</p></article>
+          <article class="feature"><span class="feature-icon" aria-hidden="true">▣</span><h3>Workspace security</h3><p>Protect operational data with authentication and role-based access.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section approach" id="approach" aria-labelledby="approach-title">
+      <div class="shell">
+        <p class="kicker">THE APPROACH</p>
+        <div class="section-heading"><h2 id="approach-title">From signal to decision.</h2><p>Designed to make each operational step visible and accountable.</p></div>
+        <div class="steps">
+          <div><span>01 / OBSERVE</span><h3>See what changed</h3><p>Bring metrics and system events into view.</p></div>
+          <div><span>02 / INVESTIGATE</span><h3>Understand the impact</h3><p>Review anomalies and coordinate incident handling.</p></div>
+          <div><span>03 / CONTROL</span><h3>Approve and document</h3><p>Record authorized decisions and their outcomes.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell final-section" aria-labelledby="final-title">
+      <div class="final-panel">
+        <div><p class="kicker">THE NEXT STEP</p><h2 id="final-title">Responsibility at every step.</h2><p>Access your secure workspace and put operational discipline to work.</p></div>
+        <div class="final-actions">
+          {% if current_user %}
+          <a class="button primary" href="{{ url_for('dashboard') }}">Open workspace ↗</a>
+          {% else %}
+          <a class="button primary" href="{{ url_for('login') }}">Sign in ↗</a>
+          <a class="text-link" href="{{ url_for('signup') }}">Create a workspace ↗</a>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="footer"><div class="shell footer-inner"><span>© SysEthic · Responsible operations, by design.</span><div><a href="#capabilities">Capabilities</a><a href="{{ url_for('login') }}">Workspace sign in</a></div></div></footer>
+</body>
+</html>

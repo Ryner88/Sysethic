@@ -248,7 +248,8 @@ Design note: cache TTLs and invalidation should be tuned for deployment size.
 
 ### Page Routes
 
-- `/`: dashboard overview.
+- `/`: public homepage.
+- `/dashboard`: protected workspace dashboard.
 - `/processes`: process monitor page.
 - `/analytics`: live analytics page.
 - `/visualization-lab`: scientific visualization page.
