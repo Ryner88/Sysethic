@@ -312,6 +312,60 @@ import tarfile
             with self.assertRaises(offhost.Failure):
                 offhost.B2.valid_url(url)
 
+    def test_documented_backblaze_upload_hosts_and_existing_endpoints(self):
+        for host in ('api.backblazeb2.com', 'api005.backblazeb2.com',
+                     'f005.backblazeb2.com', 'pod001.backblazeb2.com',
+                     'pod-000-1005-03.backblaze.com', 'pod-050-1045-06.backblaze.com'):
+            with self.subTest(host=host):
+                offhost.B2.valid_url('https://' + host + '/b2api/v2/b2_upload_file')
+                offhost.B2.valid_url('https://' + host + ':443/')
+
+    def test_upload_endpoint_lookalikes_and_unsafe_urls_rejected(self):
+        urls = ('https://pod-050-1045-06.backblaze.com.evil.example/upload',
+                'https://evilbackblaze.com', 'https://www.backblaze.com',
+                'https://pod-evil.backblaze.com', 'https://pod-050-1045-06Xbackblaze.com',
+                'https://evil.pod-050-1045-06.backblaze.com',
+                'https://bad_label.backblazeb2.com', 'https://-bad.backblazeb2.com',
+                'https://pod-050-1045-06.backblaze.com:444/upload',
+                'https://pod-050-1045-06.backblaze.com:bad/upload',
+                'https://user:secret@pod-050-1045-06.backblaze.com/upload',
+                'https://@pod-050-1045-06.backblaze.com/upload',
+                'http://pod-050-1045-06.backblaze.com/upload',
+                'ftp://pod-050-1045-06.backblaze.com/upload', 'https://[invalid',
+                ' https://api005.backblazeb2.com',
+                'https://pod-050-1045-06.backblaze.com/\n',
+                'https://pod-050-1045-06.backblaze.com/\t',
+                'https://pod-050-1045-06.backblaze.com/\x7f', None)
+        for url in urls:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(offhost.Failure, 'untrusted_b2_endpoint'):
+                    offhost.B2.valid_url(url)
+
+    def test_documented_upload_endpoint_reaches_upload_and_checks_acknowledgement(self):
+        client = object.__new__(offhost.B2)
+        client.api, client.bucket = 'https://api005.backblazeb2.com', 'testbucket123'
+        client.prefix, client.token = 'production/backups/', 'synthetic'
+        payload = self.root / 'endpoint-test.age'
+        payload.write_bytes(b'synthetic ciphertext')
+        endpoint = 'https://pod-050-1045-06.backblaze.com/b2api/v2/b2_upload_file/synthetic'
+        responses = [{'uploadUrl': endpoint, 'authorizationToken': 'synthetic'},
+                     {'bucketId': client.bucket, 'fileName': client.prefix + 'test.age',
+                      'contentSha1': 'incorrect', 'contentLength': payload.stat().st_size,
+                      'fileId': 'synthetic-id'}]
+        with patch.object(client, 'request', side_effect=responses) as request:
+            with self.assertRaisesRegex(offhost.Failure, 'upload_acknowledgement_mismatch'):
+                client.upload(payload, client.prefix + 'test.age')
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[1].args[0], endpoint)
+
+    def test_redirects_remain_rejected_even_to_trusted_hosts(self):
+        for status in (301, 302, 303, 307, 308):
+            for target in ('https://pod-050-1045-06.backblaze.com/upload',
+                           'https://evil.example/upload'):
+                with self.subTest(status=status, target=target):
+                    with self.assertRaisesRegex(offhost.Failure, 'redirect_rejected'):
+                        offhost.NoRedirect().redirect_request(None, None, status, '', {}, target)
+
     def test_real_age_public_recipient_encryption(self):
         age = Path('/tmp/sysethic-age-test-v1.3.2/age')
         if not age.exists():

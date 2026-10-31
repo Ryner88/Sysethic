@@ -210,8 +210,21 @@ class B2:
 
     @staticmethod
     def valid_url(url):
-        parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith('.backblazeb2.com') or parsed.username or parsed.password or parsed.port not in (None, 443):
+        if not isinstance(url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+            raise Failure('untrusted_b2_endpoint')
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            host = parsed.hostname or ''
+            trusted_host = (
+                re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+backblazeb2\.com', host)
+                or re.fullmatch(r'pod-[0-9]+-[0-9]+-[0-9]+\.backblaze\.com', host)
+            )
+            valid = (parsed.scheme == 'https' and trusted_host
+                     and parsed.username is None and parsed.password is None
+                     and parsed.port in (None, 443))
+        except (ValueError, TypeError):
+            valid = False
+        if not valid:
             raise Failure('untrusted_b2_endpoint')
 
     def request(self, url, data=None, headers=None, destination=None):
