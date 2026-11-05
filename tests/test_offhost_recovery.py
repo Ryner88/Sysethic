@@ -1,6 +1,7 @@
 """Disposable fixtures: transport/age doubles are not cryptographic validation."""
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -38,12 +40,22 @@ class MemoryB2:
             raise RuntimeError('simulated interrupted download')
         content = self.objects[identity]
         Path(destination).write_bytes(content + (b'tampered' if self.corrupt_download else b''))
+    def info(self, identity):
+        content = self.objects[identity]
+        return {'fileId': identity, 'fileName': self.names[int(identity) - 1],
+                'bucketId': self.bucket, 'action': 'upload', 'contentLength': len(content),
+                'contentSha1': hashlib.sha1(content).hexdigest()}
+    def versions(self, name):
+        return [self.info(identity) for identity in self.objects if self.info(identity)['fileName'] == name]
 
 
+@unittest.skipUnless(os.name == 'posix', 'Off-host filesystem safeguards and executable fixtures require POSIX')
 class OffhostTests(unittest.TestCase):
     def setUp(self):
         self.previous_umask = os.umask(0o077)
         self.addCleanup(os.umask, self.previous_umask)
+        # Synthetic source identity: do not depend on Linux /etc/machine-id on macOS.
+        self.enterContext(patch.object(offhost, 'machine_id', return_value='synthetic-source-host'))
         recovery_fixtures.RecoveryTests.setUp(self)
         with contextlib.redirect_stdout(io.StringIO()):
             offhost.recovery.backup(self.db, self.repo, self.output, sys.executable)
@@ -72,6 +84,9 @@ import tarfile
 +    sys.stdout.buffer.write(b'age-encryption.org/v1\\n' + sys.stdin.buffer.read())
 +'''.replace('\n+', '\n'))
         self.age.chmod(0o700)
+        self.failed_age = self.root / 'failing-age-double'
+        self.failed_age.write_text('#!' + sys.executable + '\nimport sys\nsys.exit(1)\n')
+        self.failed_age.chmod(0o700)
         self.transport = MemoryB2()
 
     def seal(self, age=None):
@@ -120,8 +135,8 @@ import tarfile
         self.assertEqual(list(self.sealed.iterdir()), [])
 
     def test_failed_encryption_has_no_published_package(self):
-        with self.assertRaises(Exception):
-            self.seal('/bin/false')
+        with self.assertRaisesRegex(offhost.Failure, 'encryption_failed'):
+            self.seal(self.failed_age)
         self.assertEqual(list(self.sealed.iterdir()), [])
 
     def test_wrong_ciphertext_header_rejected(self):
@@ -210,7 +225,7 @@ import tarfile
         retrieved = offhost.retrieve(package / 'upload-receipt.json', receipt_hash, self.received, self.transport)
         with patch.object(offhost, 'machine_id', return_value='independent-test-host'):
             with self.assertRaisesRegex(offhost.Failure, "decryption_failed"):
-                offhost.decrypt(retrieved, self.identity, self.restored, receipt_hash, age='/bin/false')
+                offhost.decrypt(retrieved, self.identity, self.restored, receipt_hash, age=str(self.failed_age))
         self.assertEqual(list(self.restored.iterdir()), [])
 
     def test_unsafe_and_incomplete_archives_fail_without_publication(self):
@@ -233,6 +248,25 @@ import tarfile
                     offhost.decrypt(retrieved, self.identity, self.restored, offhost.sha(receipt), age=str(self.age))
             self.assertEqual(list(self.restored.iterdir()), [])
             self.assertFalse((self.root / 'escape').exists())
+
+    def test_real_age_public_recipient_encryption(self):
+        age = Path('/tmp/sysethic-age-test-v1.3.2/age')
+        if not age.exists():
+            self.skipTest('Real age executable unavailable; no private identities are generated')
+        package = self.seal(age)
+        ciphertext = (package / 'recovery.tar.gz.age').read_bytes()
+        self.assertTrue(ciphertext.startswith(HEADER))
+        self.assertNotIn(b'disposable-configuration-marker', ciphertext)
+        self.assertNotIn(b'inventory.json', ciphertext)
+        self.assertNotIn(b'SQLite format 3', ciphertext)
+
+
+class B2EndpointTests(unittest.TestCase):
+    """API scope, endpoint and redirect checks run on every CI platform."""
+
+    def setUp(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(temporary).resolve()
 
     def auth_payload(self, caps=None, buckets=None, prefix='sysethic/'):
         return {'accountId': 'test-account', 'authorizationToken': 'test-token', 'apiInfo': {'storageApi': {
@@ -297,8 +331,48 @@ import tarfile
                 with self.assertRaisesRegex(offhost.Failure, 'private_bucket'):
                     offhost.B2('testbucket123','sysethic/','upload')
 
+    def test_reconciliation_requires_separate_exact_read_only_scope(self):
+        self.assertEqual(offhost.CAPABILITIES['upload'], {'writeFiles', 'readFiles', 'listBuckets'})
+        caps = ['readFiles', 'listFiles', 'listBuckets']
+        records = {'buckets': [{'bucketId': 'testbucket123', 'bucketType': 'allPrivate'}]}
+        for capabilities in (caps, caps + ['writeFiles'], caps[:-1]):
+            with self.subTest(capabilities=capabilities):
+                with patch.dict(os.environ, {'SAAOE_B2_KEY_ID': 'test', 'SAAOE_B2_APPLICATION_KEY': 'test'}):
+                    with patch.object(offhost.B2, 'request', side_effect=[self.auth_payload(caps=capabilities), records]):
+                        if capabilities == caps:
+                            client = offhost.B2('testbucket123', 'sysethic/', 'reconcile')
+                            self.assertEqual(client.mode, 'reconcile')
+                        else:
+                            with self.assertRaisesRegex(offhost.Failure, 'minimally_scoped_key_required'):
+                                offhost.B2('testbucket123', 'sysethic/', 'reconcile')
+
+    def test_version_lookup_is_exact_and_incomplete_results_fail_closed(self):
+        client = object.__new__(offhost.B2)
+        client.api, client.bucket, client.prefix, client.token = 'https://api005.backblazeb2.com', 'testbucket123', 'sysethic/', 'synthetic'
+        client.mode = 'reconcile'
+        name = 'sysethic/operation/recovery.tar.gz.age'
+        with patch.object(client, 'request', return_value={'files': [], 'nextFileName': None, 'nextFileId': None}) as request:
+            self.assertEqual(client.versions(name), [])
+            payload = json.loads(request.call_args.args[1])
+            self.assertEqual(payload, {'bucketId': client.bucket, 'prefix': name, 'startFileName': name, 'maxFileCount': 2})
+        for result in ({'files': []},
+                       {'files': [], 'nextFileName': name, 'nextFileId': 'more'},
+                       {'files': [{'fileName': name + '-lookalike'}], 'nextFileName': None, 'nextFileId': None}):
+            with patch.object(client, 'request', return_value=result):
+                with self.assertRaisesRegex(offhost.Failure, 'incomplete_or_ambiguous_remote_listing'):
+                    client.versions(name)
+        client.mode = 'upload'
+        with patch.object(client, 'request', side_effect=AssertionError('No permission widening')):
+            with self.assertRaisesRegex(offhost.Failure, 'read_only_reconciliation_identity_required'):
+                client.versions(name)
+        client.mode = 'reconcile'
+        with patch.object(client, 'request', side_effect=AssertionError('Read-only identity cannot upload')):
+            with self.assertRaisesRegex(offhost.Failure, 'uploader_identity_required'):
+                client.upload(self.root / 'absent', name)
+
     def test_upload_acknowledgement_mismatch_rejected(self):
         client = object.__new__(offhost.B2)
+        client.mode = 'upload'
         client.api, client.bucket, client.prefix, client.token = 'https://api001.backblazeb2.com', 'testbucket123', 'sysethic/', 'test-token'
         payload = self.root / 'payload.age'
         payload.write_bytes(b'test ciphertext')
@@ -312,17 +386,73 @@ import tarfile
             with self.assertRaises(offhost.Failure):
                 offhost.B2.valid_url(url)
 
-    def test_real_age_public_recipient_encryption(self):
-        age = Path('/tmp/sysethic-age-test-v1.3.2/age')
-        if not age.exists():
-            self.skipTest('Real age executable unavailable; no private identities are generated')
-        package = self.seal(age)
-        ciphertext = (package / 'recovery.tar.gz.age').read_bytes()
-        self.assertTrue(ciphertext.startswith(HEADER))
-        self.assertNotIn(b'disposable-configuration-marker', ciphertext)
-        self.assertNotIn(b'inventory.json', ciphertext)
-        self.assertNotIn(b'SQLite format 3', ciphertext)
+    def test_documented_backblaze_upload_hosts_and_existing_endpoints(self):
+        for host in ('api.backblazeb2.com', 'api005.backblazeb2.com',
+                     'f005.backblazeb2.com', 'pod001.backblazeb2.com',
+                     'pod-000-1005-03.backblaze.com', 'pod-050-1045-06.backblaze.com'):
+            with self.subTest(host=host):
+                offhost.B2.valid_url('https://' + host + '/b2api/v2/b2_upload_file')
+                offhost.B2.valid_url('https://' + host + ':443/')
 
+    def test_upload_endpoint_lookalikes_and_unsafe_urls_rejected(self):
+        urls = ('https://pod-050-1045-06.backblaze.com.evil.example/upload',
+                'https://evilbackblaze.com', 'https://www.backblaze.com',
+                'https://pod-evil.backblaze.com', 'https://pod-050-1045-06Xbackblaze.com',
+                'https://evil.pod-050-1045-06.backblaze.com',
+                'https://bad_label.backblazeb2.com', 'https://-bad.backblazeb2.com',
+                'https://pod-050-1045-06.backblaze.com:444/upload',
+                'https://pod-050-1045-06.backblaze.com:bad/upload',
+                'https://user:secret@pod-050-1045-06.backblaze.com/upload',
+                'https://@pod-050-1045-06.backblaze.com/upload',
+                'http://pod-050-1045-06.backblaze.com/upload',
+                'ftp://pod-050-1045-06.backblaze.com/upload', 'https://[invalid',
+                ' https://api005.backblazeb2.com',
+                'https://pod-050-1045-06.backblaze.com/\n',
+                'https://pod-050-1045-06.backblaze.com/\t',
+                'https://pod-050-1045-06.backblaze.com/\x7f', None)
+        for url in urls:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(offhost.Failure, 'untrusted_b2_endpoint'):
+                    offhost.B2.valid_url(url)
+
+    def test_dns_length_limits_and_empty_ports_rejected(self):
+        # A pod label at the DNS boundary remains valid; the next character does not.
+        offhost.B2.valid_url('https://pod-' + '0' * 55 + '-1-1.backblaze.com/')
+        for url in (
+            'https://pod-' + '0' * 56 + '-1-1.backblaze.com/',
+            'https://' + 'a.' * 120 + 'backblazeb2.com/',
+            'https://api005.backblazeb2.com:/',
+            'https://pod-050-1045-06.backblaze.com:/upload',
+        ):
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(offhost.Failure, 'untrusted_b2_endpoint'):
+                    offhost.B2.valid_url(url)
+
+    def test_documented_upload_endpoint_reaches_upload_and_checks_acknowledgement(self):
+        client = object.__new__(offhost.B2)
+        client.mode = 'upload'
+        client.api, client.bucket = 'https://api005.backblazeb2.com', 'testbucket123'
+        client.prefix, client.token = 'production/backups/', 'synthetic'
+        payload = self.root / 'endpoint-test.age'
+        payload.write_bytes(b'synthetic ciphertext')
+        endpoint = 'https://pod-050-1045-06.backblaze.com/b2api/v2/b2_upload_file/synthetic'
+        responses = [{'uploadUrl': endpoint, 'authorizationToken': 'synthetic'},
+                     {'bucketId': client.bucket, 'fileName': client.prefix + 'test.age',
+                      'contentSha1': 'incorrect', 'contentLength': payload.stat().st_size,
+                      'fileId': 'synthetic-id'}]
+        with patch.object(client, 'request', side_effect=responses) as request:
+            with self.assertRaisesRegex(offhost.Failure, 'upload_acknowledgement_mismatch'):
+                client.upload(payload, client.prefix + 'test.age')
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[1].args[0], endpoint)
+
+    def test_redirects_remain_rejected_even_to_trusted_hosts(self):
+        for status in (301, 302, 303, 307, 308):
+            for target in ('https://pod-050-1045-06.backblaze.com/upload',
+                           'https://evil.example/upload'):
+                with self.subTest(status=status, target=target):
+                    with self.assertRaisesRegex(offhost.Failure, 'redirect_rejected'):
+                        offhost.NoRedirect().redirect_request(None, None, status, '', {}, target)
 
 if __name__ == '__main__':
     unittest.main()

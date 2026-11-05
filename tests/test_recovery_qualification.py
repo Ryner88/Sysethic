@@ -17,15 +17,24 @@ spec.loader.exec_module(qualification)
 
 class QualificationSafetyTests(unittest.TestCase):
     def test_host_network_namespace_rejected_before_private_access(self):
+        with patch.object(qualification.os, 'readlink', return_value='net:[host]'):
+            with self.assertRaisesRegex(RuntimeError, 'Private network'):
+                qualification.require_isolation('net:[host]')
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and Path('/proc/self/ns/net').exists(),
+                         'Live network namespace validation requires Linux procfs')
+    def test_live_host_network_namespace_rejected(self):
         with self.assertRaisesRegex(RuntimeError, 'Private network'):
             qualification.require_isolation(os.readlink('/proc/self/ns/net'))
 
     def test_wrong_manifest_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / 'manifest.json').write_text('{}')
-            with self.assertRaisesRegex(RuntimeError, 'independently recorded'):
-                qualification.checked_manifest(root)
+            # Exercise the trust anchor independently of POSIX directory permissions.
+            with patch.object(qualification.recovery, 'secure_directory', return_value=root):
+                with self.assertRaisesRegex(RuntimeError, 'independently recorded'):
+                    qualification.checked_manifest(root)
 
     def test_effective_capabilities_rejected(self):
         with patch.object(qualification.os, 'readlink', return_value='net:[private]'):
@@ -46,7 +55,7 @@ class QualificationSafetyTests(unittest.TestCase):
         if not python.exists():
             self.skipTest('Local application test environment unavailable')
         with tempfile.TemporaryDirectory(prefix='saaoe-synthetic-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             archive = root / 'release.tar.gz'
             files, version = qualification.recovery.release_archive(ROOT, qualification.EXPECTED_COMMIT, archive)
             qualification.recovery.validate_archive(archive, files, root)

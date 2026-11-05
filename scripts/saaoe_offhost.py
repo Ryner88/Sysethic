@@ -1,6 +1,7 @@
 """Manual age/B2 recovery transport. No production service or database writes."""
 import argparse
 import base64
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import io
@@ -22,7 +23,8 @@ import saaoe_recovery as recovery
 
 MAX_BYTES = 128 * 1024 * 1024
 CAPABILITIES = {'upload': {'writeFiles', 'readFiles', 'listBuckets'},
-                'recover': {'readFiles', 'listBuckets'}}
+                'recover': {'readFiles', 'listBuckets'},
+                'reconcile': {'readFiles', 'listFiles', 'listBuckets'}}
 
 
 class Failure(RuntimeError):
@@ -140,7 +142,7 @@ def seal(bundle, output, recipient, manifest_sha, secret_files=(), age='age', ev
         if {name: sha(path) for name, path in files.items()} != initial:
             raise Failure('source_changed_during_encryption')
         record = {'format': 1, 'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-                  'package_id': identity, 'source_machine_id': machine_id(),
+                  'package_id': identity, 'source_machine_id': machine_id(), 'upload_protocol': 2,
                   'bundle': bundle.name, 'commit': manifest['commit'],
                   'manifest_sha256': manifest_sha, 'release_sha256': manifest['sha256']['release.tar.gz'],
                   'snapshot_sha256': manifest['sha256']['database.sqlite3'],
@@ -196,6 +198,7 @@ class B2:
         if set(allowed['capabilities']) != CAPABILITIES[mode] or allowed.get('namePrefix') != key_prefix:
             raise Failure('minimally_scoped_key_required')
         self.account_id = auth['accountId']
+        self.mode = mode
         self.bucket, self.prefix = bucket_id, prefix
         self.api, self.download_url = storage['apiUrl'], storage['downloadUrl']
         self.token = auth['authorizationToken']
@@ -210,8 +213,23 @@ class B2:
 
     @staticmethod
     def valid_url(url):
-        parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith('.backblazeb2.com') or parsed.username or parsed.password or parsed.port not in (None, 443):
+        if not isinstance(url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+            raise Failure('untrusted_b2_endpoint')
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            host = parsed.hostname or ''
+            trusted_host = (
+                re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+backblazeb2\.com', host)
+                or re.fullmatch(r'pod-[0-9]+-[0-9]+-[0-9]+\.backblaze\.com', host)
+            )
+            valid = (parsed.scheme == 'https' and trusted_host
+                     and len(host) <= 253 and all(len(label) <= 63 for label in host.split('.'))
+                     and parsed.username is None and parsed.password is None
+                     and not parsed.netloc.endswith(':')
+                     and parsed.port in (None, 443))
+        except (ValueError, TypeError):
+            valid = False
+        if not valid:
             raise Failure('untrusted_b2_endpoint')
 
     def request(self, url, data=None, headers=None, destination=None):
@@ -232,6 +250,8 @@ class B2:
                     handle.write(chunk)
 
     def upload(self, path, name):
+        if self.mode != 'upload':
+            raise Failure('uploader_identity_required')
         if not name.startswith(self.prefix):
             raise Failure('object_outside_prefix')
         url = self.request(self.api + '/b2api/v2/b2_get_upload_url',
@@ -253,8 +273,75 @@ class B2:
         url = self.download_url + '/b2api/v2/b2_download_file_by_id?fileId=' + urllib.parse.quote(file_id, safe='')
         self.request(url, headers={'Authorization': self.token}, destination=destination)
 
+    def info(self, file_id):
+        return self.request(self.api + '/b2api/v2/b2_get_file_info',
+                            json.dumps({'fileId': file_id}).encode(),
+                            {'Authorization': self.token, 'Content-Type': 'application/json'})
 
-def upload(package, transport):
+    def versions(self, name):
+        # Listing is reserved for a separate, exactly scoped read-only identity.
+        if self.mode != 'reconcile' or not name.startswith(self.prefix):
+            raise Failure('read_only_reconciliation_identity_required')
+        result = self.request(self.api + '/b2api/v2/b2_list_file_versions',
+                              json.dumps({'bucketId': self.bucket, 'prefix': name,
+                                          'startFileName': name, 'maxFileCount': 2}).encode(),
+                              {'Authorization': self.token, 'Content-Type': 'application/json'})
+        if (not isinstance(result.get('files'), list)
+                or 'nextFileName' not in result or 'nextFileId' not in result
+                or result['nextFileName'] is not None or result['nextFileId'] is not None
+                or any(item.get('fileName') != name for item in result['files'])):
+            raise Failure('incomplete_or_ambiguous_remote_listing')
+        return result['files']
+
+
+def atomic_json(path, data, replace=False):
+    """Publish complete private JSON, then persist the directory entry."""
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        private_file(path)
+    fd, temporary = tempfile.mkstemp(prefix='.upload-state-', dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(data, handle, sort_keys=True, indent=2)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        if replace:
+            os.replace(temporary, path)
+        else:
+            # Link publishes exclusively: never replace an existing receipt/intent.
+            os.link(temporary, path)
+            temporary.unlink()
+        recovery.sync_directory(path.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+@contextmanager
+def upload_lock(package):
+    # The lock inode is deliberately retained. Unlinking it would allow a second
+    # process to lock a different inode for the same authoritative package.
+    import fcntl
+    fd = os.open(package / '.upload.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_nlink != 1):
+            raise Failure('private_upload_lock_required')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Failure('upload_operation_locked') from None
+        os.fsync(fd)
+        recovery.sync_directory(package)
+        yield
+    finally:
+        os.close(fd)
+
+
+def upload_package(package):
     package = recovery.secure_directory(package)
     record = json.loads(private_file(package / 'seal.json').read_text())
     ciphertext = private_file(package / 'recovery.tar.gz.age')
@@ -262,30 +349,173 @@ def upload(package, transport):
         raise Failure('local_ciphertext_mismatch')
     if not re.fullmatch(r'[a-zA-Z0-9_-]+', record['package_id']):
         raise Failure('unsafe_package_id')
-    if (package / 'upload-receipt.json').exists():
-        raise Failure('already_uploaded_use_existing_receipt')
-    attempt_prefix = transport.prefix + record['package_id'] + '/' + uuid.uuid4().hex + '/'
-    name = attempt_prefix + 'recovery.tar.gz.age'
-    file_id = transport.upload(ciphertext, name)
-    with tempfile.TemporaryDirectory(prefix='.readback-', dir=package) as tmp:
-        downloaded = Path(tmp) / 'remote.age'
+    if record.get('upload_protocol') != 2:
+        raise Failure('legacy_package_requires_operator_reconciliation')
+    return package, record, ciphertext
+
+
+def upload_intent(package, record, transport, create=False):
+    binding = {'bucket_id': transport.bucket, 'prefix': transport.prefix,
+               'package_id': record['package_id'], 'seal_sha256': sha(package / 'seal.json'),
+               'source_machine_id': record['source_machine_id'],
+               'manifest_sha256': record['manifest_sha256'], 'snapshot_sha256': record['snapshot_sha256'],
+               'ciphertext_sha256': record['ciphertext_sha256'], 'ciphertext_bytes': record['ciphertext_bytes']}
+    operation = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    prefix = transport.prefix + record['package_id'] + '/' + operation + '/'
+    fixed = {'format': 2, 'operation_id': operation, 'binding': binding,
+             'object_name': prefix + 'recovery.tar.gz.age', 'completion_name': prefix + 'complete.json'}
+    expected = dict(fixed, ciphertext_status='ready', ciphertext_file_id=None,
+                    marker_status='ready', completion_file_id=None, completion=None)
+    path = package / 'upload-intent.json'
+    if not path.exists():
+        if not create:
+            raise Failure('durable_upload_intent_required')
+        atomic_json(path, expected)
+        return expected
+    state = json.loads(private_file(path).read_text())
+    if set(state) != set(expected) or any(state.get(key) != value for key, value in fixed.items()):
+        raise Failure('upload_intent_binding_mismatch')
+    for kind, field in (('ciphertext', 'ciphertext_file_id'), ('marker', 'completion_file_id')):
+        status, file_id = state[kind + '_status'], state[field]
+        if (status not in {'ready', 'pending', 'acknowledged'}
+                or (status == 'acknowledged' and not (isinstance(file_id, str) and 0 < len(file_id) <= 1024))
+                or (status != 'acknowledged' and file_id is not None)):
+            raise Failure('invalid_upload_intent_state')
+    completion = state['completion']
+    if completion is not None:
+        if not isinstance(completion, dict) or not isinstance(completion.get('remote_verified_at'), str):
+            raise Failure('invalid_upload_completion_state')
+        if completion != completion_record(record, state, transport, completion['remote_verified_at']):
+            raise Failure('upload_completion_binding_mismatch')
+    if ((state['ciphertext_status'] != 'acknowledged' and completion is not None)
+            or (state['marker_status'] != 'ready' and completion is None)):
+        raise Failure('invalid_upload_intent_state')
+    return state
+
+
+def save_upload_intent(package, state):
+    atomic_json(package / 'upload-intent.json', state, replace=True)
+
+
+def completion_record(record, state, transport, verified_at):
+    return dict(record, operation_id=state['operation_id'],
+                ciphertext_file_id=state['ciphertext_file_id'], bucket_id=transport.bucket,
+                object_name=state['object_name'], remote_verified_at=verified_at)
+
+
+def verify_remote_file(package, transport, file_id, name, path, digest, size, label):
+    if sha(path) != digest or path.stat().st_size != size:
+        raise Failure('local_upload_source_changed')
+    with path.open('rb') as handle:
+        sha1 = hashlib.file_digest(handle, 'sha1').hexdigest()
+    info = transport.info(file_id)
+    if (info.get('fileId') != file_id or info.get('bucketId') != transport.bucket
+            or info.get('fileName') != name or info.get('action') != 'upload'
+            or info.get('contentLength') != size or info.get('contentSha1') != sha1):
+        raise Failure(label + '_metadata_mismatch')
+    with tempfile.TemporaryDirectory(prefix='.readback-', dir=package) as temporary:
+        downloaded = Path(temporary) / 'remote'
         transport.download(file_id, downloaded)
-        if sha(downloaded) != record['ciphertext_sha256'] or downloaded.stat().st_size != record['ciphertext_bytes']:
-            raise Failure('remote_ciphertext_mismatch')
-    completion = dict(record, ciphertext_file_id=file_id, bucket_id=transport.bucket,
-                      object_name=name, remote_verified_at=dt.datetime.now(dt.timezone.utc).isoformat())
-    with tempfile.TemporaryDirectory(prefix='.marker-', dir=package) as tmp:
-        marker = Path(tmp) / 'complete.json'
-        json_file(marker, completion)
-        marker_id = transport.upload(marker, attempt_prefix + 'complete.json')
-        readback = Path(tmp) / 'marker-readback.json'
-        transport.download(marker_id, readback)
-        if sha(readback) != sha(marker):
-            raise Failure('completion_marker_mismatch')
-        completion.update({'completion_file_id': marker_id, 'completion_sha256': sha(marker)})
-    json_file(package / 'upload-receipt.json', completion)
-    recovery.sync_directory(package)
-    return sha(package / 'upload-receipt.json')
+        if sha(downloaded) != digest or downloaded.stat().st_size != size:
+            raise Failure(label + '_mismatch')
+
+
+def send_once(package, transport, state, kind, path):
+    status_key = kind + '_status'
+    id_key = 'ciphertext_file_id' if kind == 'ciphertext' else 'completion_file_id'
+    name_key = 'object_name' if kind == 'ciphertext' else 'completion_name'
+    if state[status_key] == 'pending':
+        raise Failure('uncertain_upload_requires_read_only_reconciliation')
+    if state[status_key] == 'ready':
+        # This durable write MUST precede the first byte of a remote mutation.
+        state[status_key] = 'pending'
+        save_upload_intent(package, state)
+        file_id = transport.upload(path, state[name_key])
+        if not isinstance(file_id, str) or not 0 < len(file_id) <= 1024:
+            raise Failure('invalid_upload_acknowledgement')
+        state[id_key], state[status_key] = file_id, 'acknowledged'
+        save_upload_intent(package, state)
+
+
+def publish_upload_receipt(package, state, marker):
+    receipt = dict(state['completion'], completion_file_id=state['completion_file_id'],
+                   completion_sha256=sha(marker))
+    path = package / 'upload-receipt.json'
+    if path.exists():
+        if json.loads(private_file(path).read_text()) != receipt:
+            raise Failure('existing_upload_receipt_mismatch')
+        recovery.sync_file(path)
+        recovery.sync_directory(package)
+    else:
+        atomic_json(path, receipt)
+    return sha(path)
+
+
+def upload(package, transport):
+    package, record, ciphertext = upload_package(package)
+    with upload_lock(package):
+        if (package / 'upload-receipt.json').exists():
+            raise Failure('already_uploaded_use_existing_receipt')
+        state = upload_intent(package, record, transport, create=True)
+        send_once(package, transport, state, 'ciphertext', ciphertext)
+        verify_remote_file(package, transport, state['ciphertext_file_id'], state['object_name'],
+                           ciphertext, record['ciphertext_sha256'], record['ciphertext_bytes'], 'remote_ciphertext')
+        if state['completion'] is None:
+            state['completion'] = completion_record(record, state, transport, dt.datetime.now(dt.timezone.utc).isoformat())
+            save_upload_intent(package, state)
+        with tempfile.TemporaryDirectory(prefix='.marker-', dir=package) as temporary:
+            marker = Path(temporary) / 'complete.json'
+            json_file(marker, state['completion'])
+            send_once(package, transport, state, 'marker', marker)
+            verify_remote_file(package, transport, state['completion_file_id'], state['completion_name'],
+                               marker, sha(marker), marker.stat().st_size, 'completion_marker')
+            return publish_upload_receipt(package, state, marker)
+
+
+def reconcile_upload(package, transport):
+    """Read remote versions and repair local acknowledgements; NEVER upload."""
+    package, record, ciphertext = upload_package(package)
+    with upload_lock(package):
+        state = upload_intent(package, record, transport)
+
+        def reconcile_file(kind, path, digest, size, label):
+            status_key = kind + '_status'
+            id_key = 'ciphertext_file_id' if kind == 'ciphertext' else 'completion_file_id'
+            name_key = 'object_name' if kind == 'ciphertext' else 'completion_name'
+            try:
+                versions = transport.versions(state[name_key])
+            except Exception:
+                raise Failure('reconciliation_lookup_unavailable_or_ambiguous') from None
+            if not isinstance(versions, list) or len(versions) > 1:
+                raise Failure('ambiguous_remote_object_versions')
+            if not versions:
+                if state[status_key] != 'ready':
+                    # Absence does not exclude a previously sent request still in flight.
+                    raise Failure('remote_absence_cannot_resolve_uncertain_upload')
+                return False
+            info = versions[0]
+            file_id = info.get('fileId')
+            if (info.get('fileName') != state[name_key] or info.get('bucketId') != transport.bucket
+                    or info.get('action') != 'upload' or not isinstance(file_id, str) or not 0 < len(file_id) <= 1024
+                    or (state[id_key] is not None and state[id_key] != file_id)):
+                raise Failure('remote_reconciliation_metadata_mismatch')
+            verify_remote_file(package, transport, file_id, state[name_key], path, digest, size, label)
+            state[id_key], state[status_key] = file_id, 'acknowledged'
+            save_upload_intent(package, state)
+            return True
+
+        if not reconcile_file('ciphertext', ciphertext, record['ciphertext_sha256'],
+                              record['ciphertext_bytes'], 'remote_ciphertext'):
+            return {'status': 'ready_to_resume', 'operation_id': state['operation_id'], 'next': 'ciphertext'}
+        if state['completion'] is None:
+            state['completion'] = completion_record(record, state, transport, dt.datetime.now(dt.timezone.utc).isoformat())
+            save_upload_intent(package, state)
+        with tempfile.TemporaryDirectory(prefix='.marker-', dir=package) as temporary:
+            marker = Path(temporary) / 'complete.json'
+            json_file(marker, state['completion'])
+            if not reconcile_file('marker', marker, sha(marker), marker.stat().st_size, 'completion_marker'):
+                return {'status': 'ready_to_resume', 'operation_id': state['operation_id'], 'next': 'completion_marker'}
+            return {'status': 'verified', 'receipt_sha256': publish_upload_receipt(package, state, marker)}
 
 
 def retrieve(receipt, expected_hash, output, transport):
@@ -432,12 +662,12 @@ def main():
     command.add_argument('--public-file', action='append', default=[])
     command.add_argument('--evidence-file', action='append', default=[])
     command.add_argument('--age', default='age')
-    for name in ('upload', 'retrieve'):
+    for name in ('upload', 'retrieve', 'reconcile'):
         command = commands.add_parser(name)
         command.add_argument('--bucket-id', required=True)
         command.add_argument('--prefix', default='sysethic/', help='Destination object prefix')
         command.add_argument('--key-prefix', help='Exact authorized key prefix; defaults to destination prefix')
-        if name == 'upload':
+        if name in ('upload', 'reconcile'):
             command.add_argument('--package', required=True)
         else:
             command.add_argument('--receipt', required=True)
@@ -454,11 +684,13 @@ def main():
         result = seal(args.bundle, args.output, args.recipient, args.manifest_sha256, args.secret_file, args.age, args.evidence_file, args.public_file)
     elif args.command == 'upload':
         result = upload(args.package, B2(args.bucket_id, args.prefix, 'upload', key_prefix=args.key_prefix))
+    elif args.command == 'reconcile':
+        result = reconcile_upload(args.package, B2(args.bucket_id, args.prefix, 'reconcile', key_prefix=args.key_prefix))
     elif args.command == 'retrieve':
         result = retrieve(args.receipt, args.receipt_sha256, args.output, B2(args.bucket_id, args.prefix, 'recover', key_prefix=args.key_prefix))
     else:
         result = decrypt(args.package, args.identity, args.output, args.receipt_sha256, args.age)
-    print(json.dumps({'status': 'ok', 'result': str(result)}))
+    print(json.dumps({'status': 'ok', 'result': str(result) if isinstance(result, Path) else result}))
 
 
 if __name__ == '__main__':
