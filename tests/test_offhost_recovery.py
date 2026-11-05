@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -40,10 +41,13 @@ class MemoryB2:
         Path(destination).write_bytes(content + (b'tampered' if self.corrupt_download else b''))
 
 
+@unittest.skipUnless(os.name == 'posix', 'Off-host filesystem safeguards and executable fixtures require POSIX')
 class OffhostTests(unittest.TestCase):
     def setUp(self):
         self.previous_umask = os.umask(0o077)
         self.addCleanup(os.umask, self.previous_umask)
+        # Synthetic source identity: do not depend on Linux /etc/machine-id on macOS.
+        self.enterContext(patch.object(offhost, 'machine_id', return_value='synthetic-source-host'))
         recovery_fixtures.RecoveryTests.setUp(self)
         with contextlib.redirect_stdout(io.StringIO()):
             offhost.recovery.backup(self.db, self.repo, self.output, sys.executable)
@@ -234,6 +238,25 @@ import tarfile
             self.assertEqual(list(self.restored.iterdir()), [])
             self.assertFalse((self.root / 'escape').exists())
 
+    def test_real_age_public_recipient_encryption(self):
+        age = Path('/tmp/sysethic-age-test-v1.3.2/age')
+        if not age.exists():
+            self.skipTest('Real age executable unavailable; no private identities are generated')
+        package = self.seal(age)
+        ciphertext = (package / 'recovery.tar.gz.age').read_bytes()
+        self.assertTrue(ciphertext.startswith(HEADER))
+        self.assertNotIn(b'disposable-configuration-marker', ciphertext)
+        self.assertNotIn(b'inventory.json', ciphertext)
+        self.assertNotIn(b'SQLite format 3', ciphertext)
+
+
+class B2EndpointTests(unittest.TestCase):
+    """API scope, endpoint and redirect checks run on every CI platform."""
+
+    def setUp(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(temporary).resolve()
+
     def auth_payload(self, caps=None, buckets=None, prefix='sysethic/'):
         return {'accountId': 'test-account', 'authorizationToken': 'test-token', 'apiInfo': {'storageApi': {
             'apiUrl': 'https://api001.backblazeb2.com', 'downloadUrl': 'https://f001.backblazeb2.com',
@@ -365,18 +388,6 @@ import tarfile
                 with self.subTest(status=status, target=target):
                     with self.assertRaisesRegex(offhost.Failure, 'redirect_rejected'):
                         offhost.NoRedirect().redirect_request(None, None, status, '', {}, target)
-
-    def test_real_age_public_recipient_encryption(self):
-        age = Path('/tmp/sysethic-age-test-v1.3.2/age')
-        if not age.exists():
-            self.skipTest('Real age executable unavailable; no private identities are generated')
-        package = self.seal(age)
-        ciphertext = (package / 'recovery.tar.gz.age').read_bytes()
-        self.assertTrue(ciphertext.startswith(HEADER))
-        self.assertNotIn(b'disposable-configuration-marker', ciphertext)
-        self.assertNotIn(b'inventory.json', ciphertext)
-        self.assertNotIn(b'SQLite format 3', ciphertext)
-
 
 if __name__ == '__main__':
     unittest.main()
