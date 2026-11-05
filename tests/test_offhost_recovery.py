@@ -76,6 +76,9 @@ import tarfile
 +    sys.stdout.buffer.write(b'age-encryption.org/v1\\n' + sys.stdin.buffer.read())
 +'''.replace('\n+', '\n'))
         self.age.chmod(0o700)
+        self.failed_age = self.root / 'failing-age-double'
+        self.failed_age.write_text('#!' + sys.executable + '\nimport sys\nsys.exit(1)\n')
+        self.failed_age.chmod(0o700)
         self.transport = MemoryB2()
 
     def seal(self, age=None):
@@ -124,8 +127,8 @@ import tarfile
         self.assertEqual(list(self.sealed.iterdir()), [])
 
     def test_failed_encryption_has_no_published_package(self):
-        with self.assertRaises(Exception):
-            self.seal('/bin/false')
+        with self.assertRaisesRegex(offhost.Failure, 'encryption_failed'):
+            self.seal(self.failed_age)
         self.assertEqual(list(self.sealed.iterdir()), [])
 
     def test_wrong_ciphertext_header_rejected(self):
@@ -214,7 +217,7 @@ import tarfile
         retrieved = offhost.retrieve(package / 'upload-receipt.json', receipt_hash, self.received, self.transport)
         with patch.object(offhost, 'machine_id', return_value='independent-test-host'):
             with self.assertRaisesRegex(offhost.Failure, "decryption_failed"):
-                offhost.decrypt(retrieved, self.identity, self.restored, receipt_hash, age='/bin/false')
+                offhost.decrypt(retrieved, self.identity, self.restored, receipt_hash, age=str(self.failed_age))
         self.assertEqual(list(self.restored.iterdir()), [])
 
     def test_unsafe_and_incomplete_archives_fail_without_publication(self):
