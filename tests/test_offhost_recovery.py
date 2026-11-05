@@ -367,6 +367,19 @@ class B2EndpointTests(unittest.TestCase):
                 with self.assertRaisesRegex(offhost.Failure, 'untrusted_b2_endpoint'):
                     offhost.B2.valid_url(url)
 
+    def test_dns_length_limits_and_empty_ports_rejected(self):
+        # A pod label at the DNS boundary remains valid; the next character does not.
+        offhost.B2.valid_url('https://pod-' + '0' * 55 + '-1-1.backblaze.com/')
+        for url in (
+            'https://pod-' + '0' * 56 + '-1-1.backblaze.com/',
+            'https://' + 'a.' * 120 + 'backblazeb2.com/',
+            'https://api005.backblazeb2.com:/',
+            'https://pod-050-1045-06.backblaze.com:/upload',
+        ):
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(offhost.Failure, 'untrusted_b2_endpoint'):
+                    offhost.B2.valid_url(url)
+
     def test_documented_upload_endpoint_reaches_upload_and_checks_acknowledgement(self):
         client = object.__new__(offhost.B2)
         client.api, client.bucket = 'https://api005.backblazeb2.com', 'testbucket123'

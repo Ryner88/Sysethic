@@ -220,7 +220,9 @@ class B2:
                 or re.fullmatch(r'pod-[0-9]+-[0-9]+-[0-9]+\.backblaze\.com', host)
             )
             valid = (parsed.scheme == 'https' and trusted_host
+                     and len(host) <= 253 and all(len(label) <= 63 for label in host.split('.'))
                      and parsed.username is None and parsed.password is None
+                     and not parsed.netloc.endswith(':')
                      and parsed.port in (None, 443))
         except (ValueError, TypeError):
             valid = False
