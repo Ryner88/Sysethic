@@ -1,6 +1,7 @@
 """Disposable fixtures: transport/age doubles are not cryptographic validation."""
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -39,6 +40,13 @@ class MemoryB2:
             raise RuntimeError('simulated interrupted download')
         content = self.objects[identity]
         Path(destination).write_bytes(content + (b'tampered' if self.corrupt_download else b''))
+    def info(self, identity):
+        content = self.objects[identity]
+        return {'fileId': identity, 'fileName': self.names[int(identity) - 1],
+                'bucketId': self.bucket, 'action': 'upload', 'contentLength': len(content),
+                'contentSha1': hashlib.sha1(content).hexdigest()}
+    def versions(self, name):
+        return [self.info(identity) for identity in self.objects if self.info(identity)['fileName'] == name]
 
 
 @unittest.skipUnless(os.name == 'posix', 'Off-host filesystem safeguards and executable fixtures require POSIX')
@@ -323,8 +331,48 @@ class B2EndpointTests(unittest.TestCase):
                 with self.assertRaisesRegex(offhost.Failure, 'private_bucket'):
                     offhost.B2('testbucket123','sysethic/','upload')
 
+    def test_reconciliation_requires_separate_exact_read_only_scope(self):
+        self.assertEqual(offhost.CAPABILITIES['upload'], {'writeFiles', 'readFiles', 'listBuckets'})
+        caps = ['readFiles', 'listFiles', 'listBuckets']
+        records = {'buckets': [{'bucketId': 'testbucket123', 'bucketType': 'allPrivate'}]}
+        for capabilities in (caps, caps + ['writeFiles'], caps[:-1]):
+            with self.subTest(capabilities=capabilities):
+                with patch.dict(os.environ, {'SAAOE_B2_KEY_ID': 'test', 'SAAOE_B2_APPLICATION_KEY': 'test'}):
+                    with patch.object(offhost.B2, 'request', side_effect=[self.auth_payload(caps=capabilities), records]):
+                        if capabilities == caps:
+                            client = offhost.B2('testbucket123', 'sysethic/', 'reconcile')
+                            self.assertEqual(client.mode, 'reconcile')
+                        else:
+                            with self.assertRaisesRegex(offhost.Failure, 'minimally_scoped_key_required'):
+                                offhost.B2('testbucket123', 'sysethic/', 'reconcile')
+
+    def test_version_lookup_is_exact_and_incomplete_results_fail_closed(self):
+        client = object.__new__(offhost.B2)
+        client.api, client.bucket, client.prefix, client.token = 'https://api005.backblazeb2.com', 'testbucket123', 'sysethic/', 'synthetic'
+        client.mode = 'reconcile'
+        name = 'sysethic/operation/recovery.tar.gz.age'
+        with patch.object(client, 'request', return_value={'files': [], 'nextFileName': None, 'nextFileId': None}) as request:
+            self.assertEqual(client.versions(name), [])
+            payload = json.loads(request.call_args.args[1])
+            self.assertEqual(payload, {'bucketId': client.bucket, 'prefix': name, 'startFileName': name, 'maxFileCount': 2})
+        for result in ({'files': []},
+                       {'files': [], 'nextFileName': name, 'nextFileId': 'more'},
+                       {'files': [{'fileName': name + '-lookalike'}], 'nextFileName': None, 'nextFileId': None}):
+            with patch.object(client, 'request', return_value=result):
+                with self.assertRaisesRegex(offhost.Failure, 'incomplete_or_ambiguous_remote_listing'):
+                    client.versions(name)
+        client.mode = 'upload'
+        with patch.object(client, 'request', side_effect=AssertionError('No permission widening')):
+            with self.assertRaisesRegex(offhost.Failure, 'read_only_reconciliation_identity_required'):
+                client.versions(name)
+        client.mode = 'reconcile'
+        with patch.object(client, 'request', side_effect=AssertionError('Read-only identity cannot upload')):
+            with self.assertRaisesRegex(offhost.Failure, 'uploader_identity_required'):
+                client.upload(self.root / 'absent', name)
+
     def test_upload_acknowledgement_mismatch_rejected(self):
         client = object.__new__(offhost.B2)
+        client.mode = 'upload'
         client.api, client.bucket, client.prefix, client.token = 'https://api001.backblazeb2.com', 'testbucket123', 'sysethic/', 'test-token'
         payload = self.root / 'payload.age'
         payload.write_bytes(b'test ciphertext')
@@ -382,6 +430,7 @@ class B2EndpointTests(unittest.TestCase):
 
     def test_documented_upload_endpoint_reaches_upload_and_checks_acknowledgement(self):
         client = object.__new__(offhost.B2)
+        client.mode = 'upload'
         client.api, client.bucket = 'https://api005.backblazeb2.com', 'testbucket123'
         client.prefix, client.token = 'production/backups/', 'synthetic'
         payload = self.root / 'endpoint-test.age'

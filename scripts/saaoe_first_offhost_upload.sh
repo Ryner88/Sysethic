@@ -84,19 +84,27 @@ try:
     if len(records)!=1 or records[0].get('bucketName')!='sysethic-recovery':
         raise o.Failure('bucket_name_mismatch')
     bundle=pathlib.Path('/var/lib/saaoe-backups/20261010T010740Z-a79bb5cc')
-    package=o.seal(bundle,'/var/lib/saaoe-offhost',sys.argv[2],
-        '461d2e8a86620c7ee627b247d5824079abc6a851785bfe426331d429fcbca2fe',
-        age=sys.argv[3],evidence_files=['/var/lib/saaoe-qualification/20261010T010740Z-a79bb5cc/qualification.json'])
-    seal=json.loads((package/'seal.json').read_text())
-    if seal['configuration_included']:
-        raise o.Failure('configuration_must_be_excluded')
-    print(json.dumps({'sealed_package':str(package),'ciphertext_sha256':seal['ciphertext_sha256'],'ciphertext_bytes':seal['ciphertext_bytes'],'configuration_included':False}),flush=True)
-    receipt_hash=o.upload(package,transport)
-    receipt=json.loads((package/'upload-receipt.json').read_text())
-    print(json.dumps({'bucket':'sysethic-recovery','object_name':receipt['object_name'],
-        'ciphertext_file_id':receipt['ciphertext_file_id'],'completion_file_id':receipt['completion_file_id'],
-        'receipt_sha256':receipt_hash,'receipt_path':str(package/'upload-receipt.json'),
-        'ciphertext_sha256':receipt['ciphertext_sha256'],'remote_integrity':'ok'}))
+    # Resealing a retry would evade the original operation's durable journal.
+    # Preserve legacy/uncertain packages for explicit operator reconciliation.
+    output=pathlib.Path('/var/lib/saaoe-offhost')
+    # Hold the shared output lock across inspection, sealing and upload so two
+    # wrapper processes cannot both observe an empty destination and reseal.
+    with o.upload_lock(output):
+        if any(path.name.startswith((bundle.name+'-', '.pending-')) for path in output.iterdir()):
+            raise o.Failure('existing_or_pending_package_requires_operator_review')
+        package=o.seal(bundle,'/var/lib/saaoe-offhost',sys.argv[2],
+            '461d2e8a86620c7ee627b247d5824079abc6a851785bfe426331d429fcbca2fe',
+            age=sys.argv[3],evidence_files=['/var/lib/saaoe-qualification/20261010T010740Z-a79bb5cc/qualification.json'])
+        seal=json.loads((package/'seal.json').read_text())
+        if seal['configuration_included']:
+            raise o.Failure('configuration_must_be_excluded')
+        print(json.dumps({'sealed_package':str(package),'ciphertext_sha256':seal['ciphertext_sha256'],'ciphertext_bytes':seal['ciphertext_bytes'],'configuration_included':False}),flush=True)
+        receipt_hash=o.upload(package,transport)
+        receipt=json.loads((package/'upload-receipt.json').read_text())
+        print(json.dumps({'bucket':'sysethic-recovery','object_name':receipt['object_name'],
+            'ciphertext_file_id':receipt['ciphertext_file_id'],'completion_file_id':receipt['completion_file_id'],
+            'receipt_sha256':receipt_hash,'receipt_path':str(package/'upload-receipt.json'),
+            'ciphertext_sha256':receipt['ciphertext_sha256'],'remote_integrity':'ok'}))
 except Exception as error:
     print(json.dumps({'status':'failed','reason':str(error) if isinstance(error,o.Failure) else type(error).__name__}))
     raise SystemExit(1)

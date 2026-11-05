@@ -41,3 +41,17 @@ acknowledgement integrity enforcement using synthetic fixtures only.
 
 The installed helper remains unchanged. The timer remains disabled/inactive.
 A future deployment and controlled upload each require explicit authorization.
+
+## Follow-up retry-safety source repair
+
+Final merge review reproduced duplicate remote attempts after a simulated crash
+between completion-marker upload and local receipt publication. This was an
+isolated synthetic-remote reproduction; it established no fact about the
+historical B2 object. PR #16 remains unmerged pending retry-safety review.
+
+The subsequently authorized [retry protocol](offhost-retry-protocol.md) adds a
+durable intent, deterministic operation identity, operation locks, read-only
+reconciliation and atomic receipts for new protocol-marked packages. Legacy
+packages fail closed and are not modified or silently migrated. The original
+package/log identifiers and hashes above remain the historical trust anchors.
+This source repair does not authorize deployment, upload, restore or scheduling.
